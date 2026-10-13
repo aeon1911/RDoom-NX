@@ -1,7 +1,7 @@
 From 16931ee102770abffdcccba7d2536980e0433925 Mon Sep 17 00:00:00 2001
 From: RDoom <171243930+aeon1911@users.noreply.github.com>
 Date: Sun, 11 Oct 2026 19:58:55 -0300
-Subject: [PATCH 26/49] Switch Vulkan: fans as indexed triangles and emulated
+Subject: [PATCH 26/50] Switch Vulkan: fans as indexed triangles and emulated
  depth bias by default
 
 Hardware ladder (2026-10-11): with triangle fans drawn as indexed triangle

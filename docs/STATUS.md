@@ -1,7 +1,7 @@
 # RDoom NX — estado em 2026-10-13
 
-Pacote atual: `dist/RDoom.nro` sha256 `d8af446946c40f191911b5e5a55994ea4082cdb914666b577301cbf08aba11d1`
-(motor `5.0.3-49-g453febfd0`), zips e `SHA256SUMS.txt` em `dist/`.
+Pacote atual: `dist/RDoom.nro` sha256 `216e8de466a15268fc2340494bebc0a91a52cec3698a85f26567f9c4e095b1c2`
+(motor `5.0.3-50-g74c08b37a`), zips e `SHA256SUMS.txt` em `dist/`.
 
 ## Feito e verificado
 
@@ -215,6 +215,13 @@ Pacote atual: `dist/RDoom.nro` sha256 `d8af446946c40f191911b5e5a55994ea4082cdb91
   resolução dinâmica decide pelo tempo da GPU (sobe enquanto a próxima escala cabe em 85%, cai só com a GPU
   acima de 90%); estabilizador ignora quadros até 20% acima do alvo. O hub do Lexicon roda a ~33 fps (GPU
   presa, 3D 12,7 ms a 60%) — o autor pediu para deixar como está. Logs em `evidence/hw/2026-10-13-halffx2`.
+- **Teste do 453febfd0 (2026-10-13, mapa de slaughter do Lexicon + Brutal):** 1000–1265 monstros, tic 6–9 ms,
+  48–57 fps limitados pela CPU (GPU 8,5 ms); camada de meia resolução com 18–25 efeitos por quadro. A vista
+  continuou em 60%: depois de cada mudança a média da GPU recomeça por 20 quadros e nesse intervalo a regra
+  antiga (tempo do quadro) derrubava cada subida nos quadros de 20 ms da CPU. 5.0.3-50-g74c08b37a: com carimbos de tempo
+  vistos a regra antiga nunca mais roda (a escala espera a média), a média recomeça a cada mapa; perf.log
+  mostra também a escala máxima da janela. A primeira sessão começou sem cache de pipelines (pacote
+  reinstalado): pipelines criados em jogo só nessa vez. Logs em `evidence/hw/2026-10-13-dyngpu`.
 - **Publicado em 2026-10-13:** https://github.com/aeon1911/RDoom-NX (público) com o motor em
   https://github.com/aeon1911/RDoom-NX-engine (fork do UZDoom, branch `rdoom-nx`, submódulo `engine/`).
   Autor dos commits trocado para o e-mail privado do GitHub (os hashes do motor mudaram). Não publicados:
