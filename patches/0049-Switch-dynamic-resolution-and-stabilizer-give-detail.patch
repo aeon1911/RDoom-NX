@@ -1,0 +1,131 @@
+From 453febfd0f77d10a9be1653c86b973e5f16a0f45 Mon Sep 17 00:00:00 2001
+From: RDoom <171243930+aeon1911@users.noreply.github.com>
+Date: Tue, 13 Oct 2026 19:21:48 -0300
+Subject: [PATCH 49/49] Switch: dynamic resolution and stabilizer give detail
+ back at 60 fps
+
+Console test of 30e33a509 (Lexicon + Brutal): inside the maps the view stayed
+at 60% and the stabilizer at its top level for whole sessions while the game
+ran at 55-60 fps and the GPU needed ~10 of the 16.7 ms. With vsync a frame
+swings between 16 and 18 ms: the scale rose only after 45 frames in a row
+under 17.3 ms and fell on any 18.2 ms frame; the stabilizer wanted 60-300
+frames in a row under 17.2 ms.
+
+- dynamic resolution decides from the GPU timestamps (two frames old,
+  averaged): it rises while the next scale is predicted under 85% of the
+  frame (3D time grows with the pixel count) and drops only when the GPU
+  itself is over 90%; frame time only without timestamps (Ryujinx)
+- stabilizer: a frame up to 20% over the target no longer starts the
+  spare-time count over
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ src/common/engine/nx_governor.cpp             |  6 +-
+ .../vulkan/system/vk_renderdevice.cpp         | 58 +++++++++++++++++++
+ .../rendering/vulkan/system/vk_renderdevice.h |  2 +
+ 3 files changed, 65 insertions(+), 1 deletion(-)
+
+diff --git a/src/common/engine/nx_governor.cpp b/src/common/engine/nx_governor.cpp
+index 153b676eb..5dc9ea6cf 100644
+--- a/src/common/engine/nx_governor.cpp
++++ b/src/common/engine/nx_governor.cpp
+@@ -141,9 +141,13 @@ void NXGovernor_Frame(double frame_ms, double waits_ms, bool inlevel)
+ 	// the top level for whole sessions although its frames were on time; the
+ 	// limit is the GPU there, and going back up a level too early just costs
+ 	// one late frame and a longer wait next time)
++	// A frame a little over the target (vsync swings frames between 16 and
++	// 18 ms at 60 fps) neither counts nor starts the count over: requiring
++	// 60-300 frames in a row under 17.2 ms kept the console at the top level
++	// for whole maps that ran at 60 fps (2026-10-13 test).
+ 	double work = frame_ms - waits_ms;
+ 	if (frame_ms <= target * 1.03 && work <= target * 0.80) good++;
+-	else good = 0;
++	else if (frame_ms > target * 1.20 || work > target * 0.80) good = 0;
+ 
+ 	if (good >= lowerDelay && nxGovLevel > 0 && hold == 0)
+ 	{
+diff --git a/src/common/rendering/vulkan/system/vk_renderdevice.cpp b/src/common/rendering/vulkan/system/vk_renderdevice.cpp
+index 43a13b51e..62abe268e 100644
+--- a/src/common/rendering/vulkan/system/vk_renderdevice.cpp
++++ b/src/common/rendering/vulkan/system/vk_renderdevice.cpp
+@@ -347,6 +347,64 @@ void VulkanRenderDevice::UpdateDynamicResolution()
+ 	mDynFramesSinceRise++;
+ 	if (mDynCeilingFrames > 0 && --mDynCeilingFrames == 0)
+ 		mDynCeiling = 1.0f;
++
++	// GPU timestamps (two frames old, averaged). The frame time alone kept the
++	// view at 60% for whole maps on the console (2026-10-13 test): with vsync
++	// a frame swings between 16 and 18 ms, so 45 frames in a row under 17.3 ms
++	// never came and any 18.2 ms frame dropped the scale again, while the GPU
++	// needed ~10 of the 16.7 ms. The timestamps include the gaps between a
++	// frame's submits (they overstate the load), which only makes rises later.
++	double gpuFrame, gpuScene;
++	if (mCommands->TakeGpuFrameTime(gpuFrame, gpuScene) && gpuFrame > 0.5)
++	{
++		if (mDynGpuSamples == 0)
++		{
++			mDynGpuFrame = gpuFrame;
++			mDynGpuScene = gpuScene;
++		}
++		mDynGpuFrame += (gpuFrame - mDynGpuFrame) * 0.1;
++		mDynGpuScene += (gpuScene - mDynGpuScene) * 0.1;
++		mDynGpuSamples = min(mDynGpuSamples + 1, 1000);
++	}
++	if (mDynGpuSamples >= 30)
++	{
++		// the 3D view grows with its pixel count; the rest of the frame does not
++		auto predict = [&](float scale) { return mDynGpuFrame + mDynGpuScene * ((scale * scale) / (mDynScale * mDynScale) - 1.0); };
++		if (frameMs > budget + 1.5 && waitMs > 2.5 && mDynGpuFrame > budget * 0.9)
++		{
++			if (mDynFramesSinceRise < 120)
++			{
++				mDynCeiling = mDynScale - 0.05f;
++				mDynCeilingFrames = 1200;
++			}
++			float s = mDynScale * (float)sqrt(budget * 0.85 / mDynGpuFrame);
++			s = max(s, mDynScale * 0.8f);
++			mDynScale = clamp(floorf(s * 20.0f) / 20.0f, minScale, 1.0f);
++			mDynCalmFrames = 0;
++			mDynGpuSamples = 10;	// the average restarts at the new scale (20 more frames)
++		}
++		else if (mDynScale < 1.0f && predict(min(1.0f, mDynScale + 0.05f)) < budget * 0.85)
++		{
++			if (++mDynCalmFrames >= 45)
++			{
++				mDynCalmFrames = 0;
++				const float next = min(1.0f, mDynScale + 0.1f);
++				if (next <= mDynCeiling + 0.001f && predict(next) < budget * 0.85)
++					mDynScale = next;
++				else if (mDynScale + 0.05f <= mDynCeiling + 0.001f)
++					mDynScale += 0.05f;
++				else
++					return;
++				mDynFramesSinceRise = 0;
++				mDynGpuSamples = 10;
++			}
++		}
++		else
++			mDynCalmFrames = 0;
++		return;
++	}
++
++	// no timestamps (Ryujinx reads 0): frame time only
+ 	if (frameMs > budget + 1.5 && waitMs > 2.5)
+ 	{
+ 		if (mDynFramesSinceRise < 120)
+diff --git a/src/common/rendering/vulkan/system/vk_renderdevice.h b/src/common/rendering/vulkan/system/vk_renderdevice.h
+index a1883be18..a34ec3d31 100644
+--- a/src/common/rendering/vulkan/system/vk_renderdevice.h
++++ b/src/common/rendering/vulkan/system/vk_renderdevice.h
+@@ -143,6 +143,8 @@ private:
+ 	int mDynCeilingFrames = 0;
+ 	int mDynFramesSinceRise = 1000;
+ 	double mDynRestAtFull = 3.5;	// GPU ms outside the 3D view at full scale (running average)
++	double mDynGpuFrame = 0, mDynGpuScene = 0;	// GPU ms per frame / for the 3D view (running average)
++	int mDynGpuSamples = 0;
+ 	bool mSceneScaled = false;
+ 	IntRect mSceneFull, mSceneSmall;
+ 	void UpdateDynamicResolution();
+-- 
+2.56.0
+
