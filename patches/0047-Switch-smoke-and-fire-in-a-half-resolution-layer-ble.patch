@@ -1,0 +1,1235 @@
+From ced311a28d3115a80eb8983dceb2384d460fb403 Mon Sep 17 00:00:00 2001
+From: RDoom <171243930+aeon1911@users.noreply.github.com>
+Date: Tue, 13 Oct 2026 18:33:16 -0300
+Subject: [PATCH 47/47] Switch: smoke and fire in a half-resolution layer
+ blended over the scene
+
+Large translucent effect sprites (alpha or additive, NXIsPureEffect, at
+least rd_halfeffects_minarea of the screen) of the main view go to
+GLDL_NXEFFECTS. When they cover rd_halfeffects_minscreen (0.6) screens or
+more, they are drawn after the translucent list into an RGBA8 layer of half
+the resolution and blended over the scene before the weapon and HUD.
+
+- layer cleared to (0,0,0,1); FXLAYER pipelines (ColorMask bit 0x100, same
+  key size so old warm lists stay valid) keep in alpha how much of the
+  scene shows through; composite = scene * a + rgb (PP pass like SSAO's)
+- layer depth: scene depth copied to R32F at half size by a PP draw
+  (nxdepth.fp, texelFetch), then written through gl_FragDepth by a small
+  depth-only pass; the scene depth is sampled (DS|SAMPLED, ZCULL as with
+  rd_vk_zcull 1)
+- the depth copy is read back in the first frames: all zero (Ryujinx
+  cannot sample NVK's depth views, "Invalid texture format 0x2512B") turns
+  the layer off for the session, effects then drawn as before
+- composite/depth pipelines, shaders and images prepared at level load
+- perf.log: effects in the layer and their screen area per frame
+- rd_vk_halfeffects (on), rd_halfeffects_debug test modes
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ src/common/engine/nx_perf.cpp                 |  10 +-
+ src/common/engine/nx_perf.h                   |   2 +
+ .../postprocessing/hw_postprocess.cpp         |  60 +++
+ .../postprocessing/hw_postprocess.h           |  23 +
+ src/common/rendering/v_video.h                |   7 +
+ .../vulkan/renderer/vk_renderpass.cpp         |  29 +-
+ .../rendering/vulkan/renderer/vk_renderpass.h |   4 +
+ .../vulkan/renderer/vk_renderstate.cpp        |   5 +
+ .../vulkan/renderer/vk_renderstate.h          |   6 +
+ .../vulkan/system/vk_renderdevice.cpp         | 400 ++++++++++++++++++
+ .../rendering/vulkan/system/vk_renderdevice.h |  22 +
+ .../vulkan/textures/vk_pptexture.cpp          |   2 +-
+ .../vulkan/textures/vk_renderbuffers.cpp      |  60 ++-
+ .../vulkan/textures/vk_renderbuffers.h        |  10 +
+ src/rendering/hwrenderer/scene/hw_bsp.cpp     |   1 +
+ .../hwrenderer/scene/hw_drawinfo.cpp          |  48 ++-
+ src/rendering/hwrenderer/scene/hw_drawinfo.h  |   4 +
+ .../hwrenderer/scene/hw_drawlistadd.cpp       |   2 +-
+ .../hwrenderer/scene/hw_drawstructs.h         |   3 +
+ src/rendering/hwrenderer/scene/hw_sprites.cpp |  47 +-
+ wadsrc/static/shaders/pp/nxdepth.fp           |  19 +
+ 21 files changed, 744 insertions(+), 20 deletions(-)
+ create mode 100644 wadsrc/static/shaders/pp/nxdepth.fp
+
+diff --git a/src/common/engine/nx_perf.cpp b/src/common/engine/nx_perf.cpp
+index 5a62d3b8b..181cbc1d0 100644
+--- a/src/common/engine/nx_perf.cpp
++++ b/src/common/engine/nx_perf.cpp
+@@ -54,7 +54,8 @@ static struct
+ 	double tic, think, display, swap, sndupd, sndstart, tex, scene, bsp, hud, update, gpuwait, frame, gc, wait, net, input, music, client, glsync, glfinish, draw2d, frameend, present, vksubmit, vkclean, vkacquire, vkpresent, vkpending, gpuframe, gpuscene, gpupost, gpuend;
+ 	int gpuframes;
+ 	double scalesum; float scalemin;
+-	int tics, thinkers, sndstarts, drawitems, transitems, glsyncs, spriteskips, draws, lightuploads, lightskips, dynlights, dynlightsall, govlevel, vksubmits, effectsculled;
++	double halfarea, halfareamax;
++	int tics, thinkers, sndstarts, drawitems, transitems, glsyncs, spriteskips, draws, lightuploads, lightskips, dynlights, dynlightsall, govlevel, vksubmits, effectsculled, halfeffects;
+ } win;
+ 
+ #ifdef __SWITCH__
+@@ -195,6 +196,9 @@ void NXPerf_EndFrame()
+ 		win.glsyncs += nxperf.glsyncs;
+ 		win.spriteskips += nxperf.spriteskips;
+ 		win.effectsculled += nxperf.effectsculled;
++		win.halfeffects += nxperf.halfeffects;
++		win.halfarea += nxperf.halfarea;
++		win.halfareamax = std::max(win.halfareamax, nxperf.halfarea);
+ 		win.draw2d += nxperf.draw2d_ms;
+ 		win.present += nxperf.present_ms;
+ 		win.frameend += nxperf.frameend_ms;
+@@ -277,8 +281,8 @@ void NXPerf_EndFrame()
+ 				fprintf(perfFile, "#   per tic: %.1f ms, %d thinkers | draw items per frame %d (%d translucent) | sound starts/s %.0f | sprites waiting for their picture per frame %.1f\n",
+ 					win.tics ? win.tic / win.tics : 0.0, win.tics ? win.thinkers / win.tics : 0, win.drawitems / frames, win.transitems / frames,
+ 					win.sndstarts * 1000.0 / (sumFrame > 0 ? sumFrame : 1), win.spriteskips / n);
+-				fprintf(perfFile, "#   GL draw calls per frame %.0f | dynamic lights per frame: %.1f used of %.1f | light uploads %.0f, identical skipped %.0f | stabilizer level avg %.2f (now %d), effects left out per frame %.1f\n",
+-					win.draws / n, win.dynlights / n, win.dynlightsall / n, win.lightuploads / n, win.lightskips / n, win.govlevel / n, nxGovLevel, win.effectsculled / n);
++				fprintf(perfFile, "#   GL draw calls per frame %.0f | dynamic lights per frame: %.1f used of %.1f | light uploads %.0f, identical skipped %.0f | stabilizer level avg %.2f (now %d), effects left out per frame %.1f, in the half-resolution layer %.1f (their area %.2f screens, most %.2f)\n",
++					win.draws / n, win.dynlights / n, win.dynlightsall / n, win.lightuploads / n, win.lightskips / n, win.govlevel / n, nxGovLevel, win.effectsculled / n, win.halfeffects / n, win.halfarea / n, win.halfareamax);
+ 			}
+ 			if (frames > 0 && win.vksubmits > 0)
+ 			{
+diff --git a/src/common/engine/nx_perf.h b/src/common/engine/nx_perf.h
+index fd00af7f9..730039193 100644
+--- a/src/common/engine/nx_perf.h
++++ b/src/common/engine/nx_perf.h
+@@ -35,6 +35,8 @@ struct NXPerfCounters
+ 	int glsyncs = 0;
+ 	int spriteskips = 0;	// sprite draws skipped because the picture wasn't on the GPU yet
+ 	int effectsculled = 0;	// translucent effects left out by the stabilizer's screen area budget
++	int halfeffects = 0;	// effect sprites drawn in the half-resolution layer (Switch Vulkan)
++	double halfarea = 0;	// screen area of the effects that could go to that layer (screens)
+ 	double present_ms = 0;	// copy of the finished frame to the window (waits for a free window buffer)
+ 	double draw2d_ms = 0;	// 2D drawing (HUD, menus, messages) - part of update_ms
+ 	double frameend_ms = 0;	// end of the previous frame done at the start of this one (GL driver thread: fence, swap, waits)
+diff --git a/src/common/rendering/hwrenderer/postprocessing/hw_postprocess.cpp b/src/common/rendering/hwrenderer/postprocessing/hw_postprocess.cpp
+index a3aa9dee4..6d7ee6925 100644
+--- a/src/common/rendering/hwrenderer/postprocessing/hw_postprocess.cpp
++++ b/src/common/rendering/hwrenderer/postprocessing/hw_postprocess.cpp
+@@ -550,6 +550,66 @@ void PPSceneUpscale::Render(PPRenderState *renderstate, const IntRect &to)
+ 	renderstate->PopGroup();
+ }
+ 
++PPTexture *PPNXEffects::Layer(int width, int height)
++{
++	if (!mCreated || Color.Width != width || Color.Height != height)
++	{
++		Color = { width, height, PixelFormat::Rgba8 };	// 8-bit alpha: a 10:10:10:2 scene format could not carry it
++		Depth = { width, height, PixelFormat::R32f };
++		mCreated = true;
++	}
++	return &Color;
++}
++
++void PPNXEffects::Blend(PPBlendMode &mode)
++{
++	mode.BlendOp = STYLEOP_Add;
++	mode.SrcAlpha = STYLEALPHA_One;
++	mode.DestAlpha = STYLEALPHA_Src;
++	mode.Flags = 0;
++}
++
++void PPNXEffects::CopyDepth(PPRenderState *renderstate, const IntRect &layerRect, bool colorProxy)
++{
++	ExtractUniforms uniforms;
++	uniforms.Scale = screen->SceneScale();
++	uniforms.Offset = screen->SceneOffset();
++
++	renderstate->PushGroup("halfeffects depth");
++	renderstate->Clear();
++	renderstate->Shader = &DepthShader;
++	renderstate->Uniforms.Set(uniforms);
++	renderstate->Viewport = layerRect;
++	if (colorProxy)
++		renderstate->SetInputSceneColor(0);	// tests: checks the mapping where the depth cannot be read (Ryujinx)
++	else
++		renderstate->SetInputSceneDepth(0);
++	renderstate->SetOutputTexture(&Depth);
++	renderstate->SetNoBlend();
++	renderstate->Draw();
++	renderstate->PopGroup();
++}
++
++void PPNXEffects::Composite(PPRenderState *renderstate, const IntRect &layerRect, int debug)
++{
++	ExtractUniforms uniforms;
++	uniforms.Scale = { layerRect.width / (float)Color.Width, layerRect.height / (float)Color.Height };
++	uniforms.Offset = { layerRect.left / (float)Color.Width, layerRect.top / (float)Color.Height };
++
++	renderstate->PushGroup("halfeffects");
++	renderstate->Clear();
++	renderstate->Shader = &Shader;
++	renderstate->Uniforms.Set(uniforms);
++	renderstate->Viewport = screen->mSceneViewport;
++	renderstate->SetInputTexture(0, debug >= 9 ? &Depth : &Color, PPFilterMode::Linear);	// tests: 1 layer, 9 depth copy, 10 colour through the depth copy
++	renderstate->SetOutputSceneColor();
++	Blend(renderstate->BlendMode);
++	if (debug == 1 || debug >= 9)
++		renderstate->SetNoBlend();
++	renderstate->Draw();
++	renderstate->PopGroup();
++}
++
+ void PPColormap::Render(PPRenderState *renderstate, int fixedcm, float flash)
+ {
+ 	ColormapUniforms uniforms;
+diff --git a/src/common/rendering/hwrenderer/postprocessing/hw_postprocess.h b/src/common/rendering/hwrenderer/postprocessing/hw_postprocess.h
+index f8452687a..2aaae4176 100644
+--- a/src/common/rendering/hwrenderer/postprocessing/hw_postprocess.h
++++ b/src/common/rendering/hwrenderer/postprocessing/hw_postprocess.h
+@@ -898,10 +898,33 @@ private:
+ 	PPShader Upscale = { "shaders/pp/upscale.fp", "", ExtractUniforms::Desc() };
+ };
+ 
++// Switch Vulkan: half-resolution layer of the translucent effect sprites
++// (HWDrawInfo::NXRenderHalfEffects). Cleared to (0,0,0,1) and drawn with alpha
++// blend factors that keep, in its alpha, how much of the scene still shows
++// through; blended over the scene as scene * a + rgb.
++class PPNXEffects
++{
++public:
++	PPTexture *Layer(int width, int height);
++	PPTexture *DepthCopy() { return &Depth; }	// scene depth at the layer's size (R32F)
++	void CopyDepth(PPRenderState *renderstate, const IntRect &layerRect, bool colorProxy = false);
++	void Composite(PPRenderState *renderstate, const IntRect &layerRect, int debug = 0);
++	static void Blend(PPBlendMode &mode);	// scene * layer alpha + layer colour
++
++	PPShader Shader = { "shaders/pp/upscale.fp", "", ExtractUniforms::Desc() };
++	PPShader DepthShader = { "shaders/pp/nxdepth.fp", "", ExtractUniforms::Desc() };
++
++private:
++	PPTexture Color;
++	PPTexture Depth;
++	bool mCreated = false;
++};
++
+ class Postprocess
+ {
+ public:
+ 	PPSceneUpscale upscale;
++	PPNXEffects nxeffects;
+ 	PPBloom bloom;
+ 	PPLensDistort lens;
+ 	PPFXAA fxaa;
+diff --git a/src/common/rendering/v_video.h b/src/common/rendering/v_video.h
+index ac0fe126c..bca71dbd4 100644
+--- a/src/common/rendering/v_video.h
++++ b/src/common/rendering/v_video.h
+@@ -287,6 +287,13 @@ public:
+ 	// End of the level precache: upload the textures this game used before
+ 	// (Switch Vulkan keeps a list per IWAD + mods)
+ 	virtual void PrecacheUsedTextures() {}
++	// Half-resolution layer for translucent effect sprites (Switch Vulkan):
++	// smoke, fire and sparks drawn at a quarter of the pixels and blended over
++	// the scene before the weapon. Begin returns false when the effects must
++	// be drawn in the scene as usual.
++	virtual bool NXHalfEffectsAvailable() { return false; }
++	virtual bool NXBeginHalfEffects(FRenderState &state) { return false; }
++	virtual void NXEndHalfEffects(FRenderState &state) {}
+ 	virtual void SetSaveBuffers(bool yes) {}
+ 	virtual void ImageTransitionScene(bool unknown) {}
+ 	virtual void CopyScreenToBuffer(int width, int height, uint8_t* buffer)	{ memset(buffer, 0, width* height); }
+diff --git a/src/common/rendering/vulkan/renderer/vk_renderpass.cpp b/src/common/rendering/vulkan/renderer/vk_renderpass.cpp
+index 9281deb36..a6984f02b 100644
+--- a/src/common/rendering/vulkan/renderer/vk_renderpass.cpp
++++ b/src/common/rendering/vulkan/renderer/vk_renderpass.cpp
+@@ -634,11 +634,36 @@ std::unique_ptr<VulkanPipeline> VkRenderPassSetup::CreatePipeline(const VkPipeli
+ 	builder.Stencil(VK_STENCIL_OP_KEEP, op2vk[key.StencilPassOp], VK_STENCIL_OP_KEEP, VK_COMPARE_OP_EQUAL, 0xffffffff, 0xffffffff, 0);
+ 
+ 	ColorBlendAttachmentBuilder blendbuilder;
+-	blendbuilder.ColorWriteMask((VkColorComponentFlags)key.ColorMask);
++	blendbuilder.ColorWriteMask((VkColorComponentFlags)(key.ColorMask & 15));
+ 	BlendMode(blendbuilder, key.RenderStyle);
++	VkPipelineColorBlendAttachmentState blend = blendbuilder.Create();
++	if (key.ColorMask & NX_PIPELINE_FXLAYER)
++	{
++		// Effects layer: colour blends as in the scene, starting from black;
++		// alpha starts at 1 and becomes the fraction of the scene that still
++		// shows through: alpha blending scales it by (1 - a), additive leaves
++		// it alone, an opaque draw sets it to 0. The composite is then
++		// scene * alpha + colour, the same as drawing them into the scene.
++		if (!blend.blendEnable)
++		{
++			blend.blendEnable = VK_TRUE;
++			blend.srcColorBlendFactor = VK_BLEND_FACTOR_ONE;
++			blend.dstColorBlendFactor = VK_BLEND_FACTOR_ZERO;
++			blend.colorBlendOp = VK_BLEND_OP_ADD;
++		}
++		blend.srcAlphaBlendFactor = VK_BLEND_FACTOR_ZERO;
++		blend.alphaBlendOp = VK_BLEND_OP_ADD;
++		if (blend.colorBlendOp != VK_BLEND_OP_ADD)
++			blend.dstAlphaBlendFactor = VK_BLEND_FACTOR_ONE;
++		else if (blend.dstColorBlendFactor == VK_BLEND_FACTOR_ONE || blend.dstColorBlendFactor == VK_BLEND_FACTOR_ZERO)
++			blend.dstAlphaBlendFactor = blend.dstColorBlendFactor;
++		else
++			blend.dstAlphaBlendFactor = VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA;
++		blend.colorWriteMask |= VK_COLOR_COMPONENT_A_BIT;
++	}
+ 
+ 	for (int i = 0; i < PassKey.DrawBuffers; i++)
+-		builder.AddColorBlendAttachment(blendbuilder.Create());
++		builder.AddColorBlendAttachment(blend);
+ 
+ 	builder.RasterizationSamples((VkSampleCountFlagBits)PassKey.Samples);
+ 
+diff --git a/src/common/rendering/vulkan/renderer/vk_renderpass.h b/src/common/rendering/vulkan/renderer/vk_renderpass.h
+index 72d29a3ac..949778639 100644
+--- a/src/common/rendering/vulkan/renderer/vk_renderpass.h
++++ b/src/common/rendering/vulkan/renderer/vk_renderpass.h
+@@ -41,6 +41,10 @@ class VkPPShader;
+ class GraphicsPipelineBuilder;
+ class ColorBlendAttachmentBuilder;
+ 
++// VkPipelineKey::ColorMask bit above the four channel bits: pipeline for the
++// half-resolution effects layer (same size key, so old warm lists stay valid)
++enum { NX_PIPELINE_FXLAYER = 0x100 };
++
+ class VkPipelineKey
+ {
+ public:
+diff --git a/src/common/rendering/vulkan/renderer/vk_renderstate.cpp b/src/common/rendering/vulkan/renderer/vk_renderstate.cpp
+index af617460c..733be30d3 100644
+--- a/src/common/rendering/vulkan/renderer/vk_renderstate.cpp
++++ b/src/common/rendering/vulkan/renderer/vk_renderstate.cpp
+@@ -312,6 +312,11 @@ void VkRenderState::ApplyRenderPass(int dt)
+ 	pipelineKey.StencilTest = mStencilTest;
+ 	pipelineKey.StencilPassOp = mStencilOp;
+ 	pipelineKey.ColorMask = mColorMask;
++	if (mNXFxLayer)
++	{
++		pipelineKey.ColorMask |= NX_PIPELINE_FXLAYER;
++		mNXFxDrawn = true;
++	}
+ 	pipelineKey.CullMode = mCullMode;
+ 	pipelineKey.NumTextureLayers = mMaterial.mMaterial ? mMaterial.mMaterial->NumLayers() : 0;
+ 	pipelineKey.NumTextureLayers = max(pipelineKey.NumTextureLayers, SHADER_MIN_REQUIRED_TEXTURE_LAYERS);// Always force minimum 8 textures as the shader requires it
+diff --git a/src/common/rendering/vulkan/renderer/vk_renderstate.h b/src/common/rendering/vulkan/renderer/vk_renderstate.h
+index 0f84ab674..4c5844519 100644
+--- a/src/common/rendering/vulkan/renderer/vk_renderstate.h
++++ b/src/common/rendering/vulkan/renderer/vk_renderstate.h
+@@ -67,6 +67,10 @@ public:
+ 
+ 	void BeginFrame();
+ 	void SetRenderTarget(VkTextureImage *image, VulkanImageView *depthStencilView, int width, int height, VkFormat Format, VkSampleCountFlagBits samples);
++	// Switch: draws go to the half-resolution effects layer (blend keeps the
++	// scene's transmittance in alpha, see VkRenderPassSetup::CreatePipeline)
++	void NXSetFxLayer(bool on) { mNXFxLayer = on; mNXFxDrawn = false; mNeedApply = true; }
++	bool NXFxDrawn() const { return mNXFxDrawn; }
+ 	void Bind(int bindingpoint, uint32_t offset);
+ 	void EndRenderPass();
+ 	void EndFrame();
+@@ -102,6 +106,8 @@ protected:
+ 	float mViewportDepthMin = 0.0f, mViewportDepthMax = 1.0f;
+ 	bool mScissorChanged = true;
+ 	bool mViewportChanged = true;
++	bool mNXFxLayer = false;
++	bool mNXFxDrawn = false;
+ 	int mEmuBiasSign = 0;	// Switch: depth bias emulated through the viewport depth range (-1 closer, +1 farther)
+ 
+ 	bool mDepthTest = false;
+diff --git a/src/common/rendering/vulkan/system/vk_renderdevice.cpp b/src/common/rendering/vulkan/system/vk_renderdevice.cpp
+index 5ddc78ba3..e1cc28e3d 100644
+--- a/src/common/rendering/vulkan/system/vk_renderdevice.cpp
++++ b/src/common/rendering/vulkan/system/vk_renderdevice.cpp
+@@ -35,6 +35,7 @@
+ #include "hw_bonebuffer.h"
+ #include "hw_clock.h"
+ #include "nx_perf.h"
++#include "i_time.h"
+ #include "hw_lightbuffer.h"
+ #include "hw_skydome.h"
+ #include "hwrenderer/data/hw_viewpointbuffer.h"
+@@ -62,6 +63,20 @@
+ #include "vulkan/textures/vk_texture.h"
+ #include "vulkan/textures/vk_asynctex.h"
+ 
++#ifdef __SWITCH__
++// half-resolution effects layer: pass writing its depth (NXFxDepthDownsample)
++struct NXFxDepthPass
++{
++	std::unique_ptr<VulkanShader> VS, FS;
++	std::unique_ptr<VulkanDescriptorSetLayout> SetLayout;
++	std::unique_ptr<VulkanPipelineLayout> Layout;
++	std::unique_ptr<VulkanRenderPass> Pass;
++	std::unique_ptr<VulkanPipeline> Pipeline;
++	std::unique_ptr<VulkanDescriptorPool> Pool;
++	VkFormat Format = VK_FORMAT_UNDEFINED;
++};
++#endif
++
+ FString JitCaptureStackTrace(int framesToSkip, bool includeNativeFrames, int maxFrames = -1);
+ 
+ EXTERN_CVAR(Int, gl_tonemap)
+@@ -139,6 +154,11 @@ VulkanRenderDevice::~VulkanRenderDevice()
+ 			VulkanDeviceLostCallback("vkDeviceWaitIdle at shutdown");
+ 	}
+ 
++#ifdef __SWITCH__
++	mNXFxDepthPass.reset();
++	mNXFxProbe[0].reset();
++	mNXFxProbe[1].reset();
++#endif
+ 	delete mVertexData;
+ 	delete mSkyData;
+ 	delete mViewpoints;
+@@ -672,6 +692,7 @@ void VulkanRenderDevice::WaitForPendingFrame()
+ 	// called while a level loads: create the pipelines this game used before
+ 	if (mRenderPassManager)
+ 		mRenderPassManager->WarmupPipelines();
++	NXWarmHalfEffects();
+ }
+ 
+ #ifdef __SWITCH__
+@@ -680,6 +701,385 @@ bool VulkanRenderDevice::AllowSSAO()
+ {
+ 	return rd_vk_zcull;  // depth buffers are attachment-only (no ZCULL) otherwise
+ }
++
++//==========================================================================
++//
++// Half-resolution effects layer (HWDrawInfo::NXRenderHalfEffects)
++//
++// Begin: the scene depth (its dynamic-resolution viewport) is drawn at half
++// size into the layer's depth buffer, the layer is cleared to (0,0,0,1) and
++// becomes the render target with the FXLAYER pipelines. End: the layer is
++// blended over the scene colour with a post-processing draw, as SSAO does,
++// before the weapon and HUD.
++//
++//==========================================================================
++
++EXTERN_CVAR(Bool, rd_vk_halfeffects)
++// tests: 1 composite without blending (shows the layer), 2 no depth test in
++// the layer, 3 layer cleared to red (checks the composite), 4 layer depth
++// cleared to far, 5 depth pass writes far, 9 shows the depth copy, 10 the
++// scene colour through the depth copy (checks the mapping in Ryujinx, which
++// cannot sample NVK's depth views: "Invalid texture format 0x2512B")
++CVAR(Int, rd_halfeffects_debug, 0, 0)
++
++bool VulkanRenderDevice::NXHalfEffectsAvailable()
++{
++	return rd_vk_halfeffects && mNXFxDepthState >= 0 && mScreenBuffers && GetBuffers() == mScreenBuffers.get() && mScreenBuffers->NXFxSupported();
++}
++
++// The layer's depth: the scene depth copied at half size into an R32F texture
++// by a post-processing draw (read as SSAO reads it), then written into the
++// layer's depth buffer by a full-screen triangle through gl_FragDepth.
++// vkCmdBlitImage of the depth, or sampling the depth texture in this
++// depth-only pass, left Ryujinx with zero depth (every effect hidden), so
++// neither could be checked off the console; both steps here can.
++
++bool VulkanRenderDevice::NXFxDepthPassReady()
++{
++	const VkFormat format = GetBuffers()->SceneDepthStencilFormat;
++	if (mNXFxDepthPass && mNXFxDepthPass->Format == format)
++		return true;
++	if (mNXFxDepthPass)
++		mCommands->WaitForCommands(false);
++	try
++	{
++		auto p = std::make_unique<NXFxDepthPass>();
++		p->Format = format;
++		p->VS = ShaderBuilder()
++			.Type(ShaderType::Vertex)
++			.AddSource("nxfxdepth.vp",
++				"#version 450\n"
++				"layout(push_constant) uniform NXRect { vec4 rect; vec4 mode; };\n"	// uv scale xy, offset zw; mode.x: tests
++				"layout(location=0) out vec2 uv;\n"
++				"layout(location=1) flat out int dbg;\n"
++				"void main() {\n"
++				"	vec2 p = vec2((gl_VertexIndex << 1) & 2, gl_VertexIndex & 2);\n"
++				"	uv = rect.zw + p * rect.xy;\n"
++				"	dbg = int(mode.x);\n"
++				"	gl_Position = vec4(p * 2.0 - 1.0, 0.0, 1.0);\n"
++				"}\n")
++			.DebugName("nxfxdepth.vp")
++			.Create("nxfxdepth.vp", device.get());
++		p->FS = ShaderBuilder()
++			.Type(ShaderType::Fragment)
++			.AddSource("nxfxdepth.fp",
++				"#version 450\n"
++				"layout(binding=0) uniform sampler2D DepthCopy;\n"
++				"layout(location=0) in vec2 uv;\n"
++				"layout(location=1) flat in int dbg;\n"
++				"void main() {\n"
++				"	ivec2 ipos = ivec2(max(uv * vec2(textureSize(DepthCopy, 0)), vec2(0.0)));\n"
++				"	float d = texelFetch(DepthCopy, ipos, 0).r;\n"
++				"	if (dbg == 5) d = 1.0;\n"
++
++				"	gl_FragDepth = d;\n"
++				"}\n")
++			.DebugName("nxfxdepth.fp")
++			.Create("nxfxdepth.fp", device.get());
++		p->SetLayout = DescriptorSetLayoutBuilder()
++			.AddBinding(0, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, VK_SHADER_STAGE_FRAGMENT_BIT)
++			.DebugName("NXFxDepth.SetLayout")
++			.Create(device.get());
++		p->Layout = PipelineLayoutBuilder()
++			.AddSetLayout(p->SetLayout.get())
++			.AddPushConstantRange(VK_SHADER_STAGE_VERTEX_BIT, 0, sizeof(float) * 8)
++			.DebugName("NXFxDepth.Layout")
++			.Create(device.get());
++		// depth fully rewritten, stencil cleared to 0 for the layer's draws;
++		// the depth load op is not CLEAR, so NVK enables no ZCULL here
++		p->Pass = RenderPassBuilder()
++			.AddDepthStencilAttachment(format, VK_SAMPLE_COUNT_1_BIT,
++				VK_ATTACHMENT_LOAD_OP_DONT_CARE, VK_ATTACHMENT_STORE_OP_STORE,
++				VK_ATTACHMENT_LOAD_OP_CLEAR, VK_ATTACHMENT_STORE_OP_STORE,
++				VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL, VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL)
++			.AddSubpass()
++			.AddSubpassDepthStencilAttachmentRef(0, VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL)
++			.AddExternalSubpassDependency(
++				VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT | VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
++				VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT | VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT,
++				VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT | VK_ACCESS_SHADER_READ_BIT,
++				VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_READ_BIT | VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT)
++			.DebugName("NXFxDepth.Pass")
++			.Create(device.get());
++		{
++			std::lock_guard<std::mutex> cacheLock(mRenderPassManager->CacheMutex());
++			p->Pipeline = GraphicsPipelineBuilder()
++				.Cache(mRenderPassManager->GetCache())
++				.AddVertexShader(p->VS.get())
++				.AddFragmentShader(p->FS.get())
++				.Topology(VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST)
++				.AddDynamicState(VK_DYNAMIC_STATE_VIEWPORT)
++				.AddDynamicState(VK_DYNAMIC_STATE_SCISSOR)
++				.Viewport(0.0f, 0.0f, 320.0f, 200.0f)
++				.Scissor(0, 0, 320, 200)
++				.Cull(VK_CULL_MODE_NONE, VK_FRONT_FACE_CLOCKWISE)
++				.DepthStencilEnable(true, true, false)
++				.DepthFunc(VK_COMPARE_OP_ALWAYS)
++				.RasterizationSamples(VK_SAMPLE_COUNT_1_BIT)
++				.Layout(p->Layout.get())
++				.RenderPass(p->Pass.get())
++				.DebugName("NXFxDepth.Pipeline")
++				.Create(device.get());
++		}
++		// a set per frame (the scene depth view changes with the buffers)
++		p->Pool = DescriptorPoolBuilder()
++			.Flags(VK_DESCRIPTOR_POOL_CREATE_FREE_DESCRIPTOR_SET_BIT)
++			.MaxSets(16)
++			.AddPoolSize(VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 16)
++			.DebugName("NXFxDepth.Pool")
++			.Create(device.get());
++		mNXFxDepthPass = std::move(p);
++	}
++	catch (const std::exception &e)
++	{
++		mNXFxDepthPass.reset();
++		FString n;
++		n.Format("off (depth pass: %s)", e.what());
++		RDoom_SessionSet("vulkan_half_effects", n.GetChars());
++		return false;
++	}
++	return true;
++}
++
++bool VulkanRenderDevice::NXFxDepthDownsample(VkTextureImage *depth, const IntRect &sv)
++{
++	if (!NXFxDepthPassReady())
++		return false;
++	auto &p = *mNXFxDepthPass;
++	auto buffers = GetBuffers();
++	auto set = p.Pool->tryAllocate(p.SetLayout.get());
++	if (!set)
++		return false;
++
++	// 1. scene depth -> R32F copy at the layer's size (a post-processing draw
++	//    reading the depth texture as SSAO does)
++	{
++		VkPPRenderState renderstate(this);
++		hw_postprocess.nxeffects.CopyDepth(&renderstate, mNXFxRect, rd_halfeffects_debug == 10);
++	}
++	VkTextureImage *copy = mTextureManager->GetTexture(PPTextureType::PPTexture, hw_postprocess.nxeffects.DepthCopy());
++	if (mNXFxDepthState == 0)
++		NXFxCheckDepth(copy);
++
++	// 2. copy -> layer depth buffer through gl_FragDepth
++	WriteDescriptors()
++		.AddCombinedImageSampler(set.get(), 0, copy->View.get(), mSamplerManager->Get(PPFilterMode::Nearest, PPWrapMode::Clamp), VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL)
++		.Execute(device.get());
++	const int w = depth->Image->width, h = depth->Image->height;
++	if (!depth->PPFramebuffer)	// freed with the image (VkTextureImage::Reset)
++	{
++		depth->PPFramebuffer = FramebufferBuilder()
++			.RenderPass(p.Pass.get())
++			.AddAttachment(depth->View.get())
++			.Size(w, h)
++			.DebugName("NXFxDepth.Framebuffer")
++			.Create(device.get());
++	}
++
++	auto cmd = mCommands->GetDrawCommands();
++	VkImageTransition()
++		.AddImage(&buffers->SceneDepthStencil, VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL, false)
++		.AddImage(copy, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, false)
++		.AddImage(depth, VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL, true)
++		.Execute(cmd);
++	RenderPassBegin()
++		.RenderPass(p.Pass.get())
++		.RenderArea(0, 0, w, h)
++		.Framebuffer(depth->PPFramebuffer.get())
++		.AddClearDepthStencil(1.0f, 0)
++		.Execute(cmd);
++	cmd->bindPipeline(VK_PIPELINE_BIND_POINT_GRAPHICS, p.Pipeline.get());
++	cmd->bindDescriptorSet(VK_PIPELINE_BIND_POINT_GRAPHICS, p.Layout.get(), 0, set.get());
++	VkViewport viewport = { (float)mNXFxRect.left, (float)mNXFxRect.top, (float)mNXFxRect.width, (float)mNXFxRect.height, 0.0f, 1.0f };
++	VkRect2D scissor = { { mNXFxRect.left, mNXFxRect.top }, { (uint32_t)mNXFxRect.width, (uint32_t)mNXFxRect.height } };
++	cmd->setViewport(0, 1, &viewport);
++	cmd->setScissor(0, 1, &scissor);
++	const float rect[8] = { mNXFxRect.width / (float)w, mNXFxRect.height / (float)h,
++		mNXFxRect.left / (float)w, mNXFxRect.top / (float)h, (float)rd_halfeffects_debug, 0.0f, 0.0f, 0.0f };
++	cmd->pushConstants(p.Layout.get(), VK_SHADER_STAGE_VERTEX_BIT, 0, sizeof(rect), rect);
++	cmd->draw(3, 1, 0, 0);
++	cmd->endRenderPass();
++	mCommands->DrawDeleteList->Add(std::move(set));
++	return true;
++}
++
++void VulkanRenderDevice::NXFxCheckDepth(VkTextureImage *copy)
++{
++	// this slot's previous frame is finished (BeginFrame waited for it)
++	const int slot = mCommands->FrameSlot() & 1;
++	if (mNXFxProbePending[slot])
++	{
++		mNXFxProbePending[slot] = false;
++		const float *v = (const float *)mNXFxProbe[slot]->Map(0, 48 * sizeof(float));
++		bool depth = false;
++		for (int i = 0; i < 48; i++)
++			if (v[i] > 0.0f && v[i] <= 1.0f)
++				depth = true;
++		mNXFxProbe[slot]->Unmap();
++		if (depth)
++		{
++			mNXFxDepthState = 1;
++			RDoom_SessionSet("vulkan_half_effects_depth", "ok (scene depth read back)");
++			return;
++		}
++		// real geometry is never at depth 0 (the near plane)
++		if (++mNXFxZeroChecks >= 3)
++		{
++			mNXFxDepthState = -1;
++			RDoom_SessionSet("vulkan_half_effects", "off (the scene depth reads back as zero here; effects drawn at full resolution)");
++			RDoom_SessionSet("vulkan_half_effects_depth", "zero in 3 frames");
++			return;
++		}
++	}
++	if (!mNXFxProbe[slot])
++	{
++		mNXFxProbe[slot] = BufferBuilder()
++			.Size(48 * sizeof(float))
++			.Usage(VK_BUFFER_USAGE_TRANSFER_DST_BIT, VMA_MEMORY_USAGE_CPU_ONLY)
++			.DebugName("NXFxProbe")
++			.Create(device.get());
++	}
++	// three rows of 16 texels across the middle of the view
++	VkBufferImageCopy regions[3] = {};
++	for (int i = 0; i < 3; i++)
++	{
++		regions[i].bufferOffset = i * 16 * sizeof(float);
++		regions[i].imageSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
++		regions[i].imageSubresource.layerCount = 1;
++		regions[i].imageOffset = { mNXFxRect.left + max(0, mNXFxRect.width / 2 - 8), mNXFxRect.top + mNXFxRect.height * (i + 1) / 4, 0 };
++		regions[i].imageExtent = { (uint32_t)min(16, mNXFxRect.width), 1, 1 };
++	}
++	auto cmd = mCommands->GetDrawCommands();
++	VkImageTransition().AddImage(copy, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, false).Execute(cmd);
++	cmd->copyImageToBuffer(copy->Image->image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, mNXFxProbe[slot]->buffer, 3, regions);
++	mNXFxProbePending[slot] = true;
++}
++
++bool VulkanRenderDevice::NXBeginHalfEffects(FRenderState &state)
++{
++	if (!NXHalfEffectsAvailable() || state.GetPassType() != NORMAL_PASS)
++		return false;
++	auto buffers = GetBuffers();
++	const int lw = (buffers->GetWidth() + 1) / 2, lh = (buffers->GetHeight() + 1) / 2;
++	PPTexture *layer = hw_postprocess.nxeffects.Layer(lw, lh);
++	VkTextureImage *depth = buffers->GetNXFxDepth(lw, lh);
++	if (!depth)
++		return false;
++	VkTextureImage *color = mTextureManager->GetTexture(PPTextureType::PPTexture, layer);
++	const VkFormat colorFormat = mTextureManager->GetTextureFormat(layer);
++
++	IntRect sv = mSceneViewport;
++	sv.left = clamp(sv.left, 0, buffers->GetWidth() - 1);
++	sv.top = clamp(sv.top, 0, buffers->GetHeight() - 1);
++	sv.width = clamp(sv.width, 1, buffers->GetWidth() - sv.left);
++	sv.height = clamp(sv.height, 1, buffers->GetHeight() - sv.top);
++	mNXFxRect.left = sv.left / 2;
++	mNXFxRect.top = sv.top / 2;
++	mNXFxRect.width = clamp((sv.width + 1) / 2, 1, lw - mNXFxRect.left);
++	mNXFxRect.height = clamp((sv.height + 1) / 2, 1, lh - mNXFxRect.top);
++
++	mRenderState->EndRenderPass();
++	if (rd_halfeffects_debug == 4)
++	{
++		VkImageTransition().AddImage(depth, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, true).Execute(mCommands->GetDrawCommands());
++		VkClearDepthStencilValue cv = { 1.0f, 0 };
++		VkImageSubresourceRange range = { VK_IMAGE_ASPECT_DEPTH_BIT | VK_IMAGE_ASPECT_STENCIL_BIT, 0, 1, 0, 1 };
++		mCommands->GetDrawCommands()->clearDepthStencilImage(depth->Image->image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, &cv, 1, &range);
++		VkImageTransition().AddImage(depth, VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL, false).Execute(mCommands->GetDrawCommands());
++	}
++	else if (!NXFxDepthDownsample(depth, sv))
++		return false;
++	VkImageTransition()
++		.AddImage(color, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, true)
++		.Execute(mCommands->GetDrawCommands());
++
++	// colour cleared when the first effect is drawn (stencil: 0 from the depth pass)
++	memcpy(mNXFxClearSave, mSceneClearColor, sizeof(mNXFxClearSave));
++	mSceneClearColor[0] = mSceneClearColor[1] = mSceneClearColor[2] = 0.0f;
++	mSceneClearColor[3] = 1.0f;
++	if (rd_halfeffects_debug == 3)
++	{
++		mSceneClearColor[0] = 1.0f;
++		mSceneClearColor[3] = 0.5f;
++	}
++	mRenderState->SetRenderTarget(color, depth->View.get(), lw, lh, colorFormat, VK_SAMPLE_COUNT_1_BIT);
++	mRenderState->Clear(CT_Color | CT_Stencil);
++	mRenderState->NXSetFxLayer(true);
++	mRenderState->SetViewport(mNXFxRect.left, mNXFxRect.top, mNXFxRect.width, mNXFxRect.height);
++	mRenderState->SetScissor(mNXFxRect.left, mNXFxRect.top, mNXFxRect.width, mNXFxRect.height);
++	if (rd_halfeffects_debug == 2)
++		mRenderState->EnableDepthTest(false);
++	return true;
++}
++
++void VulkanRenderDevice::NXEndHalfEffects(FRenderState &state)
++{
++	mRenderState->EndRenderPass();
++	const bool drawn = mRenderState->NXFxDrawn();
++	mRenderState->NXSetFxLayer(false);
++	mRenderState->Clear(0);
++	if (rd_halfeffects_debug == 2)
++		mRenderState->EnableDepthTest(true);
++	memcpy(mSceneClearColor, mNXFxClearSave, sizeof(mNXFxClearSave));
++	SetSceneRenderTarget(false);
++	if (drawn || rd_halfeffects_debug >= 9)
++	{
++		VkPPRenderState renderstate(this);
++		hw_postprocess.nxeffects.Composite(&renderstate, mNXFxRect, rd_halfeffects_debug);
++	}
++	const IntRect &sv = mSceneViewport;
++	mRenderState->SetViewport(sv.left, sv.top, sv.width, sv.height);
++	mRenderState->SetScissor(sv.left, sv.top, sv.width, sv.height);
++}
++
++// At level load: create what the first frame with smoke would otherwise
++// create in the middle of a fight (each a hitch of 20+ ms on the Switch):
++// the layer images, the composite shader and pipeline, the depth pass.
++void VulkanRenderDevice::NXWarmHalfEffects()
++{
++	if (mNXFxWarmed || !NXHalfEffectsAvailable() || !mShaderManager || !mShaderManager->AllCompiled())
++		return;
++	mNXFxWarmed = true;
++	const uint64_t start = I_msTime();
++	auto buffers = mScreenBuffers.get();
++	const int lw = (buffers->GetWidth() + 1) / 2, lh = (buffers->GetHeight() + 1) / 2;
++	PPTexture *layer = hw_postprocess.nxeffects.Layer(lw, lh);
++	mTextureManager->GetTexture(PPTextureType::PPTexture, layer);
++	if (!buffers->GetNXFxDepth(lw, lh))
++		return;
++
++	VkPPRenderPassKey key;
++	key.Shader = mShaderManager->GetVkShader(&hw_postprocess.nxeffects.Shader);
++	key.Uniforms = sizeof(ExtractUniforms);
++	key.InputTextures = 1;
++	key.BlendMode = PPBlendMode();
++	PPNXEffects::Blend(key.BlendMode);
++	key.OutputFormat = buffers->SceneColorFormat;
++	key.SwapChain = 0;
++	key.ShadowMapBuffers = 0;
++	key.StencilTest = WhichDepthStencil::Scene;
++	key.Samples = buffers->GetSceneSamples();
++	mRenderPassManager->GetPPRenderPass(key);
++	key.Shader = mShaderManager->GetVkShader(&hw_postprocess.nxeffects.DepthShader);
++	key.BlendMode = PPBlendMode();
++	key.BlendMode.BlendOp = STYLEOP_Add;
++	key.BlendMode.SrcAlpha = STYLEALPHA_One;
++	key.BlendMode.DestAlpha = STYLEALPHA_Zero;
++	key.BlendMode.Flags = 0;
++	key.OutputFormat = VK_FORMAT_R32_SFLOAT;
++	key.StencilTest = WhichDepthStencil::None;
++	key.Samples = VK_SAMPLE_COUNT_1_BIT;
++	mRenderPassManager->GetPPRenderPass(key);
++	mTextureManager->GetTexture(PPTextureType::PPTexture, hw_postprocess.nxeffects.DepthCopy());
++
++	NXFxDepthPassReady();
++
++	FString n;
++	n.Format("layer %dx%d, composite and depth pass prepared in %d ms", lw, lh, (int)(I_msTime() - start));
++	RDoom_SessionSet("vulkan_half_effects_warmup", n.GetChars());
++}
++#else
++void VulkanRenderDevice::NXWarmHalfEffects() {}
+ #endif
+ 
+ unsigned int VulkanRenderDevice::GetLightBufferBlockSize() const
+diff --git a/src/common/rendering/vulkan/system/vk_renderdevice.h b/src/common/rendering/vulkan/system/vk_renderdevice.h
+index 879abc322..c1b79db2c 100644
+--- a/src/common/rendering/vulkan/system/vk_renderdevice.h
++++ b/src/common/rendering/vulkan/system/vk_renderdevice.h
+@@ -35,6 +35,7 @@ class VkShaderManager;
+ class VkCommandBufferManager;
+ class VkDescriptorSetManager;
+ class VkRenderPassManager;
++class VkTextureImage;
+ class VkFramebufferManager;
+ class VkRaytrace;
+ class VkRenderState;
+@@ -120,6 +121,9 @@ public:
+ 	void PrecacheUsedTextures() override;
+ #ifdef __SWITCH__
+ 	bool AllowSSAO() override;
++	bool NXHalfEffectsAvailable() override;
++	bool NXBeginHalfEffects(FRenderState &state) override;
++	void NXEndHalfEffects(FRenderState &state) override;
+ #endif
+ 
+ 	bool RaytracingEnabled();
+@@ -142,6 +146,24 @@ private:
+ 	bool mSceneScaled = false;
+ 	IntRect mSceneFull, mSceneSmall;
+ 	void UpdateDynamicResolution();
++	// half-resolution effects layer: its viewport, the scene clear colour
++	// while it is cleared, first-use costs paid at level load
++	IntRect mNXFxRect;
++	float mNXFxClearSave[4] = {};
++	bool mNXFxWarmed = false;
++	void NXWarmHalfEffects();
++#ifdef __SWITCH__
++	std::unique_ptr<struct NXFxDepthPass> mNXFxDepthPass;
++	bool NXFxDepthPassReady();
++	bool NXFxDepthDownsample(VkTextureImage *depth, const IntRect &sceneRect);
++	// the depth copy read back in the first frames: all zero = this GPU (or
++	// emulator: Ryujinx) cannot sample the depth buffer, the layer turns off
++	void NXFxCheckDepth(VkTextureImage *copy);
++	std::unique_ptr<VulkanBuffer> mNXFxProbe[2];
++	bool mNXFxProbePending[2] = {};
++	int mNXFxDepthState = 0;	// 0 checking, 1 verified, -1 broken
++	int mNXFxZeroChecks = 0;
++#endif
+ 	std::unique_ptr<VkBufferManager> mBufferManager;
+ 	std::unique_ptr<VkSamplerManager> mSamplerManager;
+ 	std::unique_ptr<VkTextureManager> mTextureManager;
+diff --git a/src/common/rendering/vulkan/textures/vk_pptexture.cpp b/src/common/rendering/vulkan/textures/vk_pptexture.cpp
+index e47cea0bd..c3b1cce39 100644
+--- a/src/common/rendering/vulkan/textures/vk_pptexture.cpp
++++ b/src/common/rendering/vulkan/textures/vk_pptexture.cpp
+@@ -46,7 +46,7 @@ VkPPTexture::VkPPTexture(VulkanRenderDevice* fb, PPTexture *texture) : fb(fb)
+ 	if (texture->Data)
+ 		imgbuilder.Usage(VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT);
+ 	else
+-		imgbuilder.Usage(VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT);
++		imgbuilder.Usage(VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT);	// Switch: half-effects depth check reads one back
+ 	imgbuilder.DebugName("VkPPTexture");
+ 	if (!imgbuilder.IsFormatSupported(fb->device.get()))
+ 		I_FatalError("Vulkan device does not support the image format required by a postprocess texture\n");
+diff --git a/src/common/rendering/vulkan/textures/vk_renderbuffers.cpp b/src/common/rendering/vulkan/textures/vk_renderbuffers.cpp
+index 3d4c0e7ce..c493fbbff 100644
+--- a/src/common/rendering/vulkan/textures/vk_renderbuffers.cpp
++++ b/src/common/rendering/vulkan/textures/vk_renderbuffers.cpp
+@@ -45,6 +45,11 @@ CVAR(Bool, rd_vk_zcull, false, 0)
+ // on screen is the same, and translucent layers (Brutal Doom's smoke) blend at
+ // full rate instead of the half rate and double traffic of RGBA16F.
+ CVAR(Int, rd_vk_scenefmt, 2, CVAR_GLOBALCONFIG)
++// Translucent effect sprites (smoke, fire) in a half-resolution layer blended
++// over the scene (HWDrawInfo::NXRenderHalfEffects). Its depth is drawn from
++// the scene depth, which then cannot be a transient attachment and gets ZCULL
++// like rd_vk_zcull 1 (fine on hardware since the light-header fix: 0% either way).
++CVAR(Bool, rd_vk_halfeffects, true, CVAR_GLOBALCONFIG)
+ VkImageUsageFlags RDoom_DepthUsage(VkImageUsageFlags usage)
+ {
+ 	if (rd_vk_zcull)
+@@ -99,11 +104,12 @@ void VkRenderBuffers::BeginFrame(int width, int height, int sceneWidth, int scen
+ 
+ 	bool formatChanged = false;
+ #ifdef __SWITCH__
+-	if (mSceneFmt != rd_vk_scenefmt || mZcull != rd_vk_zcull)
++	if (mSceneFmt != rd_vk_scenefmt || mZcull != rd_vk_zcull || mHalfFx != rd_vk_halfeffects)
+ 	{
+ 		formatChanged = mSceneFmt != -1;
+ 		mSceneFmt = rd_vk_scenefmt;
+ 		mZcull = rd_vk_zcull;
++		mHalfFx = rd_vk_halfeffects;
+ 		SceneColorFormat = VK_FORMAT_R16G16B16A16_SFLOAT;
+ 		VkFormat wanted = mSceneFmt == 1 ? VK_FORMAT_A2B10G10R10_UNORM_PACK32 : mSceneFmt == 2 ? VK_FORMAT_R8G8B8A8_UNORM : VK_FORMAT_R16G16B16A16_SFLOAT;
+ 		VkFormatProperties props = {};
+@@ -210,6 +216,9 @@ void VkRenderBuffers::CreateScene(int width, int height, VkSampleCountFlagBits s
+ {
+ 	SceneColor.Reset(fb);
+ 	SceneDepthStencil.Reset(fb);
++#ifdef __SWITCH__
++	NXFxDepth.Reset(fb);
++#endif
+ 	SceneNormal.Reset(fb);
+ 	SceneFog.Reset(fb);
+ 
+@@ -248,10 +257,21 @@ void VkRenderBuffers::CreateSceneDepthStencil(int width, int height, VkSampleCou
+ #ifdef __SWITCH__
+ 	if (rd_vk_depth32)
+ 		SceneDepthStencilFormat = VK_FORMAT_D32_SFLOAT_S8_UINT;
++	// the half-resolution effects layer reads this depth buffer as a texture
++	// (single sample)
++	{
++		VkFormatProperties props = {};
++		vkGetPhysicalDeviceFormatProperties(fb->device->PhysicalDevice.Device, SceneDepthStencilFormat, &props);
++		const VkFormatFeatureFlags need = VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT | VK_FORMAT_FEATURE_DEPTH_STENCIL_ATTACHMENT_BIT;
++		mNXFxSupported = rd_vk_halfeffects && samples == VK_SAMPLE_COUNT_1_BIT && (props.optimalTilingFeatures & need) == need;
++		RDoom_SessionSet("vulkan_half_effects", !rd_vk_halfeffects ? "off (rd_vk_halfeffects 0)" : mNXFxSupported ? "on (smoke and fire at half resolution)" :
++			samples != VK_SAMPLE_COUNT_1_BIT ? "off (multisampling)" : "off (depth format cannot be sampled)");
++	}
++	const bool zcull = rd_vk_zcull || mNXFxSupported;
+ 	{
+ 		FString d;
+ 		d.Format("%s, %dx%d, %d sample(s), ZCULL %s", SceneDepthStencilFormat == VK_FORMAT_D32_SFLOAT_S8_UINT ? "D32_SFLOAT_S8" : "D24_UNORM_S8", width, height, (int)samples,
+-			rd_vk_zcull ? "allowed (rd_vk_zcull 1)" : "off (transient depth attachments)");
++			rd_vk_zcull ? "allowed (rd_vk_zcull 1)" : zcull ? "allowed (depth sampled for the half-resolution effects)" : "off (transient depth attachments)");
+ 		RDoom_SessionSet("vulkan_scene_depth", d.GetChars());
+ 	}
+ #endif
+@@ -260,7 +280,10 @@ void VkRenderBuffers::CreateSceneDepthStencil(int width, int height, VkSampleCou
+ 	builder.Samples(samples);
+ 	builder.Format(SceneDepthStencilFormat);
+ 	#ifdef __SWITCH__
+-	builder.Usage(RDoom_DepthUsage(VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT));
++	if (mNXFxSupported)
++		builder.Usage(VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT);
++	else
++		builder.Usage(RDoom_DepthUsage(VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT));
+ #else
+ 	builder.Usage(VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT);
+ #endif
+@@ -289,6 +312,37 @@ void VkRenderBuffers::CreateSceneDepthStencil(int width, int height, VkSampleCou
+ 		.Create(fb->device.get());
+ }
+ 
++#ifdef __SWITCH__
++VkTextureImage *VkRenderBuffers::GetNXFxDepth(int width, int height)
++{
++	if (!mNXFxSupported)
++		return nullptr;
++	if (NXFxDepth.Image && (int)NXFxDepth.Image->width == width && (int)NXFxDepth.Image->height == height)
++		return &NXFxDepth;
++	NXFxDepth.Reset(fb);
++	// written through gl_FragDepth: TRANSFER_DST keeps it out of NVK's
++	// ZCULL-compatible usages (and no pass clears its depth)
++	ImageBuilder builder;
++	builder.Size(width, height);
++	builder.Format(SceneDepthStencilFormat);
++	builder.Usage(VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT);
++	if (!builder.IsFormatSupported(fb->device.get()))
++	{
++		mNXFxSupported = false;
++		RDoom_SessionSet("vulkan_half_effects", "off (depth image for the layer not supported)");
++		return nullptr;
++	}
++	builder.DebugName("VkRenderBuffers.NXFxDepth");
++	NXFxDepth.Image = builder.Create(fb->device.get());
++	NXFxDepth.AspectMask = VK_IMAGE_ASPECT_DEPTH_BIT | VK_IMAGE_ASPECT_STENCIL_BIT;
++	NXFxDepth.View = ImageViewBuilder()
++		.Image(NXFxDepth.Image.get(), SceneDepthStencilFormat, VK_IMAGE_ASPECT_DEPTH_BIT | VK_IMAGE_ASPECT_STENCIL_BIT)
++		.DebugName("VkRenderBuffers.NXFxDepthView")
++		.Create(fb->device.get());
++	return &NXFxDepth;
++}
++#endif
++
+ void VkRenderBuffers::CreateSceneFog(int width, int height, VkSampleCountFlagBits samples)
+ {
+ 	SceneFog.Image = ImageBuilder()
+diff --git a/src/common/rendering/vulkan/textures/vk_renderbuffers.h b/src/common/rendering/vulkan/textures/vk_renderbuffers.h
+index f9f44544f..caf55de50 100644
+--- a/src/common/rendering/vulkan/textures/vk_renderbuffers.h
++++ b/src/common/rendering/vulkan/textures/vk_renderbuffers.h
+@@ -67,6 +67,14 @@ public:
+ 
+ 	VulkanFramebuffer* GetOutput(VkPPRenderPassSetup* passSetup, const PPOutput& output, WhichDepthStencil stencilTest, int& framebufferWidth, int& framebufferHeight);
+ 
++#ifdef __SWITCH__
++	// half-resolution effects layer: its depth buffer is drawn from the
++	// scene's, which must then be sampled (rd_vk_halfeffects)
++	bool NXFxSupported() const { return mNXFxSupported; }
++	VkTextureImage *GetNXFxDepth(int width, int height);
++	VkTextureImage NXFxDepth;
++#endif
++
+ private:
+ 	void CreatePipelineDepthStencil(int width, int height);
+ 	void CreatePipeline(int width, int height);
+@@ -83,6 +91,8 @@ private:
+ 	int mHeight = 0;
+ 	int mSceneFmt = -1;		// Switch: rd_vk_scenefmt / rd_vk_zcull the buffers were made with
+ 	bool mZcull = false;
++	bool mHalfFx = false;
++	bool mNXFxSupported = false;
+ 	int mSceneWidth = 0;
+ 	int mSceneHeight = 0;
+ 	VkSampleCountFlagBits mSamples = VK_SAMPLE_COUNT_1_BIT;
+diff --git a/src/rendering/hwrenderer/scene/hw_bsp.cpp b/src/rendering/hwrenderer/scene/hw_bsp.cpp
+index 1e337a308..c8588478b 100644
+--- a/src/rendering/hwrenderer/scene/hw_bsp.cpp
++++ b/src/rendering/hwrenderer/scene/hw_bsp.cpp
+@@ -1058,6 +1058,7 @@ void HWDrawInfo::RenderBSP(void *node, bool drawpsprites)
+ 
+ 	validcount++;	// used for processing sidedefs only once by the renderer.
+ 	nxEffectArea = 0;
++	nxHalfArea = 0;
+ 
+ 	multithread = gl_multithread;
+ 	if (multithread)
+diff --git a/src/rendering/hwrenderer/scene/hw_drawinfo.cpp b/src/rendering/hwrenderer/scene/hw_drawinfo.cpp
+index 78503b325..c764406b3 100644
+--- a/src/rendering/hwrenderer/scene/hw_drawinfo.cpp
++++ b/src/rendering/hwrenderer/scene/hw_drawinfo.cpp
+@@ -480,7 +480,7 @@ void HWDrawInfo::CreateScene(bool drawpsprites)
+ 			{
+ 				int n = (int)di->drawlists[i].drawitems.Size();
+ 				nxperf.drawitems += n;
+-				if (i == GLDL_TRANSLUCENT) nxperf.transitems += n;
++				if (i == GLDL_TRANSLUCENT || i == GLDL_NXEFFECTS) nxperf.transitems += n;
+ 			}
+ 		}
+ 	} nxcount{ this };
+@@ -617,6 +617,49 @@ void HWDrawInfo::RenderTranslucent(FRenderState &state)
+ 	RenderAll.Unclock();
+ }
+ 
++//-----------------------------------------------------------------------------
++//
++// Switch Vulkan: the translucent effect sprites of the main view (smoke, fire,
++// sparks; GLDL_NXEFFECTS) in a layer of half the resolution, blended over the
++// scene by the backend. A fight in Brutal Doom stacks a dozen screen-sized
++// smoke puffs; at a quarter of the pixels they no longer push the whole view
++// down to 60% resolution. They come after the rest of the translucent list,
++// so their order against translucent walls and other sprites is lost.
++//
++//-----------------------------------------------------------------------------
++
++// The layer costs about one full-screen layer of its own (the blend over the
++// scene, plus the depth copy at half size) and saves 3/4 of every effect
++// pixel: below about 0.6 screens of effects they are drawn into the scene
++// (GM20B estimate: blend 0.15-0.3 ms, a screen of lit smoke ~0.5 ms).
++CVAR(Float, rd_halfeffects_minscreen, 0.6f, CVAR_GLOBALCONFIG)
++
++void HWDrawInfo::NXRenderHalfEffects(FRenderState &state)
++{
++	auto &list = drawlists[GLDL_NXEFFECTS];
++	nxperf.halfarea += nxHalfArea;
++	if (list.Size() == 0)
++		return;
++	RenderAll.Clock();
++	// false: draw them into the scene
++	const bool layer = nxHalfArea >= rd_halfeffects_minscreen && screen->NXBeginHalfEffects(state);
++	if (layer)
++		nxperf.halfeffects += list.Size();
++
++	state.AlphaFunc(Alpha_GEqual, gl_mask_sprite_threshold);
++	state.SetRenderStyle(STYLE_Translucent);
++	state.EnableBrightmap(true);
++	state.SetDepthMask(false);
++	list.DrawSorted(this, state);
++	state.EnableBrightmap(false);
++	state.AlphaFunc(Alpha_GEqual, 0.5f);
++	state.SetDepthMask(true);
++
++	if (layer)
++		screen->NXEndHalfEffects(state);
++	RenderAll.Unclock();
++}
++
+ 
+ //-----------------------------------------------------------------------------
+ //
+@@ -1014,6 +1057,7 @@ void HWDrawInfo::DrawScene(int drawmode)
+ 	auto& vp = Viewpoint;
+ 
+ 	bool applySSAO = false;
++	nxHalfEffects = drawmode == DM_MAINVIEW && screen->NXHalfEffectsAvailable();
+ 	if (drawmode == DM_MAINVIEW)
+ 	{
+ 		ssao_portals_available = gl_ssao_portals;
+@@ -1062,6 +1106,8 @@ void HWDrawInfo::DrawScene(int drawmode)
+ 	portalState.EndFrame(this, RenderState);
+ 	recursion--;
+ 	RenderTranslucent(RenderState);
++	if (nxHalfEffects)
++		NXRenderHalfEffects(RenderState);
+ }
+ 
+ 
+diff --git a/src/rendering/hwrenderer/scene/hw_drawinfo.h b/src/rendering/hwrenderer/scene/hw_drawinfo.h
+index ca7cdb184..1e546e104 100644
+--- a/src/rendering/hwrenderer/scene/hw_drawinfo.h
++++ b/src/rendering/hwrenderer/scene/hw_drawinfo.h
+@@ -108,6 +108,7 @@ enum DrawListType
+ 
+ 	GLDL_TRANSLUCENT,
+ 	GLDL_TRANSLUCENTBORDER,
++	GLDL_NXEFFECTS,		// translucent effect sprites of the half-resolution layer (Switch Vulkan)
+ 
+ 	GLDL_TYPES,
+ };
+@@ -117,6 +118,8 @@ struct HWDrawInfo
+ {
+ 	// Switch port: screen area covered by translucent effects in this scene (NXEffectOverBudget)
+ 	double nxEffectArea = 0;
++	bool nxHalfEffects = false;	// this view collects effect sprites in GLDL_NXEFFECTS
++	double nxHalfArea = 0;		// their screen area (screens): the layer pays off from rd_halfeffects_minscreen
+ 	struct wallseg
+ 	{
+ 		float x1, y1, z1, x2, y2, z2;
+@@ -271,6 +274,7 @@ public:
+ 	void CreateScene(bool drawpsprites);
+ 	void RenderScene(FRenderState &state);
+ 	void RenderTranslucent(FRenderState &state);
++	void NXRenderHalfEffects(FRenderState &state);
+ 	void RenderPortal(HWPortal *p, FRenderState &state, bool usestencil);
+ 	void EndDrawScene(sector_t * viewsector, FRenderState &state);
+ 	void DrawEndScene2D(sector_t * viewsector, FRenderState &state);
+diff --git a/src/rendering/hwrenderer/scene/hw_drawlistadd.cpp b/src/rendering/hwrenderer/scene/hw_drawlistadd.cpp
+index e29314f7d..e8f074f7b 100644
+--- a/src/rendering/hwrenderer/scene/hw_drawlistadd.cpp
++++ b/src/rendering/hwrenderer/scene/hw_drawlistadd.cpp
+@@ -141,7 +141,7 @@ void HWDrawInfo::AddSprite(HWSprite *sprite, bool translucent)
+ 	// [BB] Allow models to be drawn in the GLDL_TRANSLUCENT pass.
+ 	if (translucent || sprite->actor == nullptr || (!sprite->modelframe && (sprite->actor->renderflags & RF_SPRITETYPEMASK) != RF_WALLSPRITE))
+ 	{
+-		list = GLDL_TRANSLUCENT;
++		list = translucent && nxHalfEffects && sprite->nxHalfRes ? GLDL_NXEFFECTS : GLDL_TRANSLUCENT;
+ 	}
+ 	else
+ 	{
+diff --git a/src/rendering/hwrenderer/scene/hw_drawstructs.h b/src/rendering/hwrenderer/scene/hw_drawstructs.h
+index 0b915f081..f9e012820 100644
+--- a/src/rendering/hwrenderer/scene/hw_drawstructs.h
++++ b/src/rendering/hwrenderer/scene/hw_drawstructs.h
+@@ -398,6 +398,7 @@ public:
+ 	float offx, offy;
+ 	float trans;
+ 	int dynlightindex;
++	bool nxHalfRes = false;	// a large translucent effect: may go to the half-resolution layer
+ 
+ 	FGameTexture *texture;
+ 	AActor * actor;
+@@ -417,6 +418,8 @@ public:
+ 	void ProcessParticle(HWDrawInfo *di, particle_t *particle, sector_t *sector, class DVisualThinker *spr);//, int shade, int fakeside)
+ 	void AdjustVisualThinker(HWDrawInfo *di, DVisualThinker *spr, sector_t *sector);
+ 	bool NXEffectOverBudget(HWDrawInfo *di, AActor *thing);
++	double NXScreenArea(HWDrawInfo *di) const;
++	bool NXHalfResEffect(HWDrawInfo *di, AActor *thing, double &area) const;
+ 
+ 	void DrawSprite(HWDrawInfo *di, FRenderState &state, bool translucent);
+ };
+diff --git a/src/rendering/hwrenderer/scene/hw_sprites.cpp b/src/rendering/hwrenderer/scene/hw_sprites.cpp
+index 20163e6f7..c0b1b1bf0 100644
+--- a/src/rendering/hwrenderer/scene/hw_sprites.cpp
++++ b/src/rendering/hwrenderer/scene/hw_sprites.cpp
+@@ -830,6 +830,7 @@ void HWSprite::Process(HWDrawInfo *di, AActor* thing, sector_t * sector, area_t
+ 	sector_t rs;
+ 	sector_t * rendersector;
+ 
++	nxHalfRes = false;
+ 	if (thing == nullptr)
+ 		return;
+ 
+@@ -1490,6 +1491,10 @@ void HWSprite::Process(HWDrawInfo *di, AActor* thing, sector_t * sector, area_t
+ 
+ 	if (hw_styleflags != STYLEHW_Solid && !modelframe && !isSpriteShadow && NXEffectOverBudget(di, thing))
+ 		return;
++	double nxArea;
++	nxHalfRes = hw_styleflags != STYLEHW_Solid && !modelframe && !isSpriteShadow && di->nxHalfEffects && NXHalfResEffect(di, thing, nxArea);
++	if (nxHalfRes)
++		di->nxHalfArea += nxArea;
+ 	PutSprite(di, hw_styleflags != STYLEHW_Solid);
+ 	rendered_sprites++;
+ }
+@@ -1503,6 +1508,7 @@ void HWSprite::Process(HWDrawInfo *di, AActor* thing, sector_t * sector, area_t
+ 
+ void HWSprite::ProcessParticle(HWDrawInfo *di, particle_t *particle, sector_t *sector, DVisualThinker *spr)//, int shade, int fakeside)
+ {
++	nxHalfRes = false;
+ 	if (!particle || particle->alpha <= 0)
+ 		return;
+ 
+@@ -1703,15 +1709,10 @@ void HWSprite::ProcessParticle(HWDrawInfo *di, particle_t *particle, sector_t *s
+ 
+ CVAR(Float, nx_effect_area, 0.f, 0)
+ 
+-bool HWSprite::NXEffectOverBudget(HWDrawInfo *di, AActor *thing)
++// screen fraction of the sprite: its world size against what the view covers
++// at its depth (horizontal FOV, screen aspect)
++double HWSprite::NXScreenArea(HWDrawInfo *di) const
+ {
+-	const double budget = NXGov_EffectArea(nx_effect_area);
+-	if (budget <= 0 || thing == nullptr)
+-		return false;
+-	if (!NXIsPureEffect(thing))
+-		return false;
+-	// screen fraction of the sprite: its world size against what the view
+-	// covers at its depth (horizontal FOV, screen aspect)
+ 	const auto &vp = di->Viewpoint;
+ 	const double w = sqrt(double(x2 - x1) * (x2 - x1) + double(y2 - y1) * (y2 - y1));
+ 	const double h = fabs(double(z1 - z2));
+@@ -1719,7 +1720,35 @@ bool HWSprite::NXEffectOverBudget(HWDrawInfo *di, AActor *thing)
+ 	const double t = vp.FieldOfView.Tan() > 0.01 ? (vp.FieldOfView / 2).Tan() : 1.0;
+ 	const double aspect = screen->GetHeight() > 0 ? double(screen->GetWidth()) / screen->GetHeight() : 16.0 / 9.0;
+ 	const double viewArea = 4.0 * d * d * t * t / aspect;
+-	const double area = min(1.0, w * h / viewArea);
++	return min(1.0, w * h / viewArea);
++}
++
++// Smoke and fire big enough to cost real fill go to the half-resolution layer;
++// sparks and puffs of a few dozen pixels stay sharp (they cost next to nothing).
++// Only plain alpha and additive blending: the layer keeps how much of the
++// scene shows through in its alpha, which those two can describe.
++CVAR(Float, rd_halfeffects_minarea, 0.004f, CVAR_GLOBALCONFIG)
++
++bool HWSprite::NXHalfResEffect(HWDrawInfo *di, AActor *thing, double &area) const
++{
++	if (thing == nullptr || !NXIsPureEffect(thing))
++		return false;
++	if (RenderStyle.BlendOp != STYLEOP_Add ||
++		(RenderStyle.SrcAlpha != STYLEALPHA_Src && RenderStyle.SrcAlpha != STYLEALPHA_One) ||
++		(RenderStyle.DestAlpha != STYLEALPHA_InvSrc && RenderStyle.DestAlpha != STYLEALPHA_One))
++		return false;
++	area = NXScreenArea(di);
++	return area >= rd_halfeffects_minarea;
++}
++
++bool HWSprite::NXEffectOverBudget(HWDrawInfo *di, AActor *thing)
++{
++	const double budget = NXGov_EffectArea(nx_effect_area);
++	if (budget <= 0 || thing == nullptr)
++		return false;
++	if (!NXIsPureEffect(thing))
++		return false;
++	const double area = NXScreenArea(di);
+ 	if (di->nxEffectArea + area > budget)
+ 	{
+ 		nxperf.effectsculled++;
+diff --git a/wadsrc/static/shaders/pp/nxdepth.fp b/wadsrc/static/shaders/pp/nxdepth.fp
+new file mode 100644
+index 000000000..6f3bde342
+--- /dev/null
++++ b/wadsrc/static/shaders/pp/nxdepth.fp
+@@ -0,0 +1,19 @@
++/*
++** nxdepth.fp
++** Half-resolution effects layer (RDoom, Switch): the scene depth of the
++** (dynamic-resolution) view copied to a float texture, read like SSAO's
++** lineardepth.fp does; a second pass turns it into the layer's depth buffer.
++**
++** SPDX-License-Identifier: GPL-3.0-or-later
++*/
++
++layout(location=0) in vec2 TexCoord;
++layout(location=0) out vec4 FragColor;
++layout(binding=0) uniform sampler2D DepthTexture;
++
++void main()
++{
++	vec2 uv = Offset + TexCoord * Scale;
++	ivec2 ipos = ivec2(max(uv * vec2(textureSize(DepthTexture, 0)), vec2(0.0)));
++	FragColor = vec4(texelFetch(DepthTexture, ipos, 0).x, 0.0, 0.0, 1.0);
++}
+-- 
+2.56.0
+

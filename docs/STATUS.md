@@ -1,7 +1,7 @@
 # RDoom NX — estado em 2026-10-13
 
-Pacote atual: `dist/RDoom.nro` sha256 `39d6fffd1f97f545bae432caf067142351ecd2517349721a2060f8c5ce1ce5dc`
-(motor `5.0.3-46-gbda37a838`), zips e `SHA256SUMS.txt` em `dist/`.
+Pacote atual: `dist/RDoom.nro` sha256 `bea9eeca7642dc6f8dd3f02d52fc621e5967615f0c60fcc20291b563a97cb429`
+(motor `5.0.3-47-gced311a28`), zips e `SHA256SUMS.txt` em `dist/`.
 
 ## Feito e verificado
 
@@ -192,6 +192,16 @@ Pacote atual: `dist/RDoom.nro` sha256 `39d6fffd1f97f545bae432caf067142351ecd2517
   e os "save" sumiram. DOOM2 + Brutal (2 min, com troca de mapa): pipelines prontos em 3 ms no carregamento,
   nenhum shader criado em jogo, poucos frames de 40–68 ms; numa luta pesada até 17 frames > 35 ms em 5 s.
   Logs em `evidence/hw/2026-10-13-writer`.
+- **Fumaça e fogo em meia resolução (5.0.3-47-gced311a28, 2026-10-13):** efeitos translúcidos grandes
+  (alfa ou aditivos, só efeitos puros, ≥ 0,4% da tela cada) vão para uma camada RGBA8 de meia resolução,
+  misturada sobre a cena antes da arma e do HUD, quando somam ≥ 0,6 tela (`rd_halfeffects_minscreen`;
+  abaixo disso a camada custaria mais do que economiza). A profundidade da camada vem da cena (cópia R32F
+  em meia resolução + passada que grava `gl_FragDepth`). Nos primeiros quadros a cópia é lida de volta:
+  se vier só zero a camada desliga na sessão (`vulkan_half_effects` no engine-session.txt) e os efeitos
+  voltam a ser desenhados como antes. No Ryujinx é o que acontece: o emulador não amostra a visão de
+  profundidade do NVK (`Invalid texture format 0x2512B`); camada, composição e mapeamento foram
+  conferidos lá com os modos `rd_halfeffects_debug` 2–5 e 10 (`evidence/ryujinx/119`–`135`). perf.log
+  mostra efeitos na camada e a área deles por quadro. **Teste no console pendente.**
 - **Publicado em 2026-10-13:** https://github.com/aeon1911/RDoom-NX (público) com o motor em
   https://github.com/aeon1911/RDoom-NX-engine (fork do UZDoom, branch `rdoom-nx`, submódulo `engine/`).
   Autor dos commits trocado para o e-mail privado do GitHub (os hashes do motor mudaram). Não publicados:
