@@ -187,6 +187,11 @@ Pacote atual: `dist/RDoom.nro` sha256 `39d6fffd1f97f545bae432caf067142351ecd2517
   núcleo do jogo e ficava atrás das outras threads quando interrompida segurando o lock. Build 5.0.3-46-gbda37a838 (b173c0a27 antes da troca do e-mail dos commits): thread de
   gravação no núcleo 2 com a prioridade do jogo; uma lista de pipelines para todos os jogos
   (`rdoom-pipelines-all.bin`). Logs em `evidence/hw/2026-10-13-sesslog`.
+- **Teste do bda37a838 (2026-10-13):** Freedoom 2 + Brutal (60 s): um único frame > 40 ms (logo após entrar no
+  mapa), janelas de 5 s com 0–1 frame > 35 ms, estabilizador no nível 0–1 com 25–26 luzes; o travão a cada 10 s
+  e os "save" sumiram. DOOM2 + Brutal (2 min, com troca de mapa): pipelines prontos em 3 ms no carregamento,
+  nenhum shader criado em jogo, poucos frames de 40–68 ms; numa luta pesada até 17 frames > 35 ms em 5 s.
+  Logs em `evidence/hw/2026-10-13-writer`.
 - **Publicado em 2026-10-13:** https://github.com/aeon1911/RDoom-NX (público) com o motor em
   https://github.com/aeon1911/RDoom-NX-engine (fork do UZDoom, branch `rdoom-nx`, submódulo `engine/`).
   Autor dos commits trocado para o e-mail privado do GitHub (os hashes do motor mudaram). Não publicados:
