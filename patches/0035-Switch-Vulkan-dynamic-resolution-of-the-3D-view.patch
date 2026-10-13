@@ -1,0 +1,331 @@
+From 821dce1d503bf908960110288b655bd13789db2c Mon Sep 17 00:00:00 2001
+From: RDoom <171243930+aeon1911@users.noreply.github.com>
+Date: Mon, 12 Oct 2026 18:57:55 -0300
+Subject: [PATCH 35/46] Switch Vulkan: dynamic resolution of the 3D view
+
+Console logs (c391ba597): steady scenes run at 45-58 fps with the GPU at
+10-14 ms, but Brutal Doom explosions (dozens of large translucent smoke
+sprites) push the 3D scene past 16 ms and some frames to ~90 ms. The GPU
+benchmark showed a 0.75 scale cuts 36% of the GPU time.
+
+The main view is now drawn into a smaller part of the render target when
+the GPU frame time (timestamps) exceeds rd_dynres_target (12 ms): the
+scale follows the scene's share of the frame, drops at most 20% per step,
+and climbs back 5% after 30 calm frames (rd_dynres_min 0.6). It is
+stretched back with a linear blit right after the scene, before the
+weapon sprites and the HUD, which stay at full resolution. No buffers are
+recreated. perf.log reports the average and minimum 3D resolution;
+rd_dynres_force fixes the scale for tests.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ src/common/engine/nx_perf.cpp                 |  8 +-
+ src/common/engine/nx_perf.h                   |  1 +
+ src/common/rendering/v_video.h                |  3 +
+ .../vulkan/renderer/vk_postprocess.cpp        | 27 +++++++
+ .../vulkan/renderer/vk_postprocess.h          |  2 +
+ .../vulkan/system/vk_commandbuffer.cpp        |  3 +
+ .../vulkan/system/vk_commandbuffer.h          |  4 +
+ .../vulkan/system/vk_renderdevice.cpp         | 79 +++++++++++++++++++
+ .../rendering/vulkan/system/vk_renderdevice.h |  7 ++
+ src/rendering/hwrenderer/hw_entrypoint.cpp    |  2 +
+ 10 files changed, 134 insertions(+), 2 deletions(-)
+
+diff --git a/src/common/engine/nx_perf.cpp b/src/common/engine/nx_perf.cpp
+index 835b86ee9..7b9cae20d 100644
+--- a/src/common/engine/nx_perf.cpp
++++ b/src/common/engine/nx_perf.cpp
+@@ -47,6 +47,7 @@ static struct
+ {
+ 	double tic, think, display, swap, sndupd, sndstart, tex, scene, bsp, hud, update, gpuwait, frame, gc, wait, net, input, music, client, glsync, glfinish, draw2d, frameend, present, vksubmit, vkclean, vkacquire, vkpresent, vkpending, gpuframe, gpuscene, gpupost, gpuend;
+ 	int gpuframes;
++	double scalesum; float scalemin;
+ 	int tics, thinkers, sndstarts, drawitems, transitems, glsyncs, spriteskips, draws, lightuploads, lightskips, dynlights, dynlightsall, govlevel, vksubmits;
+ } win;
+ 
+@@ -181,6 +182,8 @@ void NXPerf_EndFrame()
+ 		win.gpuscene += nxperf.gpu_scene_ms;
+ 		win.gpupost += nxperf.gpu_post_ms;
+ 		win.gpuend += nxperf.gpu_end_ms;
++		win.scalesum += nxperf.scene_scale;
++		if (win.scalemin <= 0 || nxperf.scene_scale < win.scalemin) win.scalemin = nxperf.scene_scale;
+ 		win.draws += nxperf.draws;
+ 		win.lightuploads += nxperf.lightuploads;
+ 		win.lightskips += nxperf.lightskips;
+@@ -251,8 +254,9 @@ void NXPerf_EndFrame()
+ 			if (win.gpuframes > 0)
+ 			{
+ 				double g = win.gpuframes;
+-				fprintf(perfFile, "#   gpu (%s): frame %.2f ms = 3D scene %.2f + post-processing %.2f + 2D/present %.2f (avg of %d frames)\n",
+-					NXOperationMode(), win.gpuframe / g, win.gpuscene / g, win.gpupost / g, win.gpuend / g, win.gpuframes);
++				fprintf(perfFile, "#   gpu (%s): frame %.2f ms = 3D scene %.2f + post-processing %.2f + 2D/present %.2f (avg of %d frames) | 3D resolution avg %.0f%%, min %.0f%%\n",
++					NXOperationMode(), win.gpuframe / g, win.gpuscene / g, win.gpupost / g, win.gpuend / g, win.gpuframes,
++					frames ? 100.0 * win.scalesum / frames : 100.0, win.scalemin > 0 ? 100.0 * win.scalemin : 100.0);
+ 			}
+ 			NXGLThreadStats(perfFile);
+ 			if (NXPerf_SummaryHook) NXPerf_SummaryHook(perfFile);
+diff --git a/src/common/engine/nx_perf.h b/src/common/engine/nx_perf.h
+index 9f4a935e8..55e444f5b 100644
+--- a/src/common/engine/nx_perf.h
++++ b/src/common/engine/nx_perf.h
+@@ -39,6 +39,7 @@ struct NXPerfCounters
+ 	// GPU time of completed frames (timestamps, read back a frame later)
+ 	int gpuframes = 0;
+ 	double gpu_frame_ms = 0, gpu_scene_ms = 0, gpu_post_ms = 0, gpu_end_ms = 0;	// whole frame = scene + post-processing + 2D/present
++	float scene_scale = 1;	// dynamic resolution of the 3D view this frame
+ 	int tics = 0, shaders = 0, textures = 0, sounds = 0, sndstarts = 0;
+ 	int thinkers = 0;		// thinkers ticked (summed over the frame's tics)
+ 	int tex_async = 0, tex_wait = 0, tex_budget = 0, snd_async = 0, tex_preupload = 0;
+diff --git a/src/common/rendering/v_video.h b/src/common/rendering/v_video.h
+index 9e310379d..e0364248e 100644
+--- a/src/common/rendering/v_video.h
++++ b/src/common/rendering/v_video.h
+@@ -281,6 +281,9 @@ public:
+ 	virtual int PerFrameSlots() const { return 1; }
+ 	virtual int PerFrameSlot() const { return 0; }
+ 	virtual void SyncNextFrame() {}
++	// Dynamic resolution of the 3D view (Switch Vulkan): shrinks mSceneViewport
++	// for the main view; the backend scales it back up before the HUD.
++	virtual void ScaleSceneViewport() {}
+ 	virtual void SetSaveBuffers(bool yes) {}
+ 	virtual void ImageTransitionScene(bool unknown) {}
+ 	virtual void CopyScreenToBuffer(int width, int height, uint8_t* buffer)	{ memset(buffer, 0, width* height); }
+diff --git a/src/common/rendering/vulkan/renderer/vk_postprocess.cpp b/src/common/rendering/vulkan/renderer/vk_postprocess.cpp
+index f95a272ab..a2f0c170e 100644
+--- a/src/common/rendering/vulkan/renderer/vk_postprocess.cpp
++++ b/src/common/rendering/vulkan/renderer/vk_postprocess.cpp
+@@ -183,6 +183,33 @@ void VkPostprocess::BlitSceneToPostprocess()
+ 	}
+ }
+ 
++void VkPostprocess::UpscaleScene(const IntRect &from, const IntRect &to)
++{
++	fb->GetRenderState()->EndRenderPass();
++	auto buffers = fb->GetBuffers();
++	auto cmdbuffer = fb->GetCommands()->GetDrawCommands();
++	const int src = mCurrentPipelineImage, dst = (mCurrentPipelineImage + 1) % VkRenderBuffers::NumPipelineImages;
++
++	// dst keeps its content outside the view (the HUD redraws the status bar area)
++	VkImageTransition()
++		.AddImage(&buffers->PipelineImage[src], VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, false)
++		.AddImage(&buffers->PipelineImage[dst], VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, false)
++		.Execute(cmdbuffer);
++
++	VkImageBlit blit = {};
++	blit.srcOffsets[0] = { from.left, from.top, 0 };
++	blit.srcOffsets[1] = { from.left + from.width, from.top + from.height, 1 };
++	blit.srcSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 };
++	blit.dstOffsets[0] = { to.left, to.top, 0 };
++	blit.dstOffsets[1] = { to.left + to.width, to.top + to.height, 1 };
++	blit.dstSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 };
++	cmdbuffer->blitImage(
++		buffers->PipelineImage[src].Image->image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
++		buffers->PipelineImage[dst].Image->image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
++		1, &blit, VK_FILTER_LINEAR);
++	mCurrentPipelineImage = dst;
++}
++
+ void VkPostprocess::ImageTransitionScene(bool undefinedSrcLayout)
+ {
+ 	auto buffers = fb->GetBuffers();
+diff --git a/src/common/rendering/vulkan/renderer/vk_postprocess.h b/src/common/rendering/vulkan/renderer/vk_postprocess.h
+index 6520284cb..dfccb4833 100644
+--- a/src/common/rendering/vulkan/renderer/vk_postprocess.h
++++ b/src/common/rendering/vulkan/renderer/vk_postprocess.h
+@@ -56,6 +56,8 @@ public:
+ 	void ImageTransitionScene(bool undefinedSrcLayout);
+ 
+ 	void BlitSceneToPostprocess();
++	// dynamic resolution: stretches the 3D view drawn into 'from' over 'to'
++	void UpscaleScene(const IntRect &from, const IntRect &to);
+ 	void BlitCurrentToImage(VkTextureImage *image, VkImageLayout finallayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+ 	void CopyCurrentToImage(VkTextureImage *image, VkImageLayout finallayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+ 	void DrawPresentTexture(const IntRect &box, bool applyGamma, bool screenshot);
+diff --git a/src/common/rendering/vulkan/system/vk_commandbuffer.cpp b/src/common/rendering/vulkan/system/vk_commandbuffer.cpp
+index 4442d3baa..2943df186 100644
+--- a/src/common/rendering/vulkan/system/vk_commandbuffer.cpp
++++ b/src/common/rendering/vulkan/system/vk_commandbuffer.cpp
+@@ -181,6 +181,9 @@ void VkCommandBufferManager::ReadGpuMarks()
+ 			continue;
+ 		nxperf.gpuframes++;
+ 		nxperf.gpu_frame_ms += ms(GpuFrameStart, GpuFrameEnd);
++		mGpuLastFrame = ms(GpuFrameStart, GpuFrameEnd);
++		mGpuLastScene = avail(GpuSceneEnd) ? ms(GpuFrameStart, GpuSceneEnd) : 0.0;
++		mGpuNewSample = true;
+ 		int last = GpuFrameStart;
+ 		if (avail(GpuSceneEnd))
+ 		{
+diff --git a/src/common/rendering/vulkan/system/vk_commandbuffer.h b/src/common/rendering/vulkan/system/vk_commandbuffer.h
+index 7e5480bd5..bff1937fc 100644
+--- a/src/common/rendering/vulkan/system/vk_commandbuffer.h
++++ b/src/common/rendering/vulkan/system/vk_commandbuffer.h
+@@ -67,6 +67,8 @@ public:
+ 	// frame's fence has passed, so measuring adds no CPU/GPU synchronisation.
+ 	enum GpuMark { GpuFrameStart, GpuSceneEnd, GpuPostEnd, GpuFrameEnd, GpuMarkCount };
+ 	void MarkGpu(GpuMark mark);
++	// newest completed frame (0 until one was read); taken by the dynamic resolution
++	bool TakeGpuFrameTime(double &frameMs, double &sceneMs) { if (!mGpuNewSample) return false; mGpuNewSample = false; frameMs = mGpuLastFrame; sceneMs = mGpuLastScene; return true; }
+ 
+ 	class DeleteList
+ 	{
+@@ -139,6 +141,8 @@ private:
+ 	unsigned mGpuMarksWritten[GpuMarkSets] = {};
+ 	bool mGpuMarkSubmitted[GpuMarkSets] = {};
+ 	void ReadGpuMarks();
++	double mGpuLastFrame = 0, mGpuLastScene = 0;
++	bool mGpuNewSample = false;
+ 
+ 	enum { MaxTimestampQueries = 100 };
+ 	std::unique_ptr<VulkanQueryPool> mTimestampQueryPool;
+diff --git a/src/common/rendering/vulkan/system/vk_renderdevice.cpp b/src/common/rendering/vulkan/system/vk_renderdevice.cpp
+index 1b425fc37..c542e4ce1 100644
+--- a/src/common/rendering/vulkan/system/vk_renderdevice.cpp
++++ b/src/common/rendering/vulkan/system/vk_renderdevice.cpp
+@@ -21,6 +21,7 @@
+ */
+ 
+ #include <cinttypes>
++#include "gamestate.h"
+ 
+ #include <zvulkan/vulkanbuilders.h>
+ #include <zvulkan/vulkancompatibledevice.h>
+@@ -280,6 +281,73 @@ void VulkanRenderDevice::RenderTextureView(FCanvasTexture* tex, std::function<vo
+ 
+ #ifdef __SWITCH__
+ CVAR(Bool, rd_vk_earlysubmit, true, 0)
++// Dynamic resolution of the 3D view: the scene is drawn into a smaller part of
++// the render target when the GPU needs more than rd_dynres_target ms per frame
++// (Brutal Doom explosions: dozens of large translucent smoke sprites), then
++// stretched back before the weapon and HUD, which stay at full resolution.
++CVAR(Bool, rd_dynres, true, CVAR_ARCHIVE | CVAR_GLOBALCONFIG)
++CVAR(Float, rd_dynres_target, 12.0f, CVAR_ARCHIVE | CVAR_GLOBALCONFIG)
++CVAR(Float, rd_dynres_min, 0.6f, CVAR_ARCHIVE | CVAR_GLOBALCONFIG)
++CVAR(Float, rd_dynres_force, 0.0f, 0)	// tests: fixed 3D scale (0 = automatic)
++EXTERN_CVAR(Int, rd_gpubench)
++
++void VulkanRenderDevice::UpdateDynamicResolution()
++{
++	if (rd_dynres_force > 0)
++	{
++		mDynScale = clamp((float)rd_dynres_force, 0.25f, 1.0f);
++		return;
++	}
++	double frameMs, sceneMs;
++	if (!mCommands->TakeGpuFrameTime(frameMs, sceneMs))
++		return;
++	const float minScale = clamp((float)rd_dynres_min, 0.4f, 1.0f);
++	if (!rd_dynres || rd_gpubench > 0 || gamestate != GS_LEVEL || frameMs <= 0)
++	{
++		mDynScale = 1.0f;
++		mDynCalmFrames = 0;
++		return;
++	}
++	const double target = clamp((double)rd_dynres_target, 6.0, 30.0);
++	if (frameMs > target && sceneMs > 0.5)
++	{
++		// the 3D view's cost follows its area; the rest of the frame stays
++		const double fixedMs = frameMs - sceneMs;
++		const double wantScene = max(target - fixedMs, sceneMs * 0.25);
++		float s = mDynScale * (float)sqrt(wantScene / sceneMs);
++		s = max(s, mDynScale * 0.8f);	// at most 20% per step
++		mDynScale = clamp(floorf(s * 20.0f) / 20.0f, minScale, 1.0f);
++		mDynCalmFrames = 0;
++	}
++	else if (frameMs < target * 0.8 && mDynScale < 1.0f)
++	{
++		// back up slowly, only after the GPU has had room for a while
++		if (++mDynCalmFrames >= 30)
++		{
++			mDynScale = min(1.0f, mDynScale + 0.05f);
++			mDynCalmFrames = 0;
++		}
++	}
++	else
++		mDynCalmFrames = 0;
++}
++
++void VulkanRenderDevice::ScaleSceneViewport()
++{
++	mSceneScaled = false;
++	nxperf.scene_scale = mDynScale;
++	if (mDynScale >= 0.999f || mSceneViewport.width < 64 || mSceneViewport.height < 64)
++		return;
++	mSceneFull = mSceneViewport;
++	mSceneSmall = mSceneViewport;
++	mSceneSmall.width = max(32, (int)(mSceneFull.width * mDynScale));
++	mSceneSmall.height = max(32, (int)(mSceneFull.height * mDynScale));
++	mSceneViewport = mSceneSmall;
++	mSceneScaled = true;
++}
++#else
++void VulkanRenderDevice::UpdateDynamicResolution() {}
++void VulkanRenderDevice::ScaleSceneViewport() {}
+ #endif
+ 
+ void VulkanRenderDevice::PostProcessScene(bool swscene, int fixedcm, float flash, const std::function<void()> &afterBloomDrawEndScene2D)
+@@ -295,6 +363,14 @@ void VulkanRenderDevice::PostProcessScene(bool swscene, int fixedcm, float flash
+ 		mCommands->FlushCommands(false);
+ #endif
+ 	if (!swscene) mPostprocess->BlitSceneToPostprocess(); // Copy the resulting scene to the current post process texture
++#ifdef __SWITCH__
++	if (mSceneScaled)
++	{
++		mSceneScaled = false;
++		mPostprocess->UpscaleScene(mSceneSmall, mSceneFull);
++		mSceneViewport = mSceneFull;
++	}
++#endif
+ 	mPostprocess->PostProcessScene(fixedcm, flash, afterBloomDrawEndScene2D);
+ }
+ 
+@@ -488,6 +564,9 @@ void VulkanRenderDevice::BeginFrame()
+ 	mCommands->WaitForFrameSlot();
+ 	mFrameBegun = true;
+ 	mRenderPassManager->SaveCacheWhenIdle();
++#ifdef __SWITCH__
++	UpdateDynamicResolution();
++#endif
+ 	SetViewportRects(nullptr);
+ 	mViewpoints->Clear();
+ 	mCommands->BeginFrame();
+diff --git a/src/common/rendering/vulkan/system/vk_renderdevice.h b/src/common/rendering/vulkan/system/vk_renderdevice.h
+index 8136d99b3..5ad28faf1 100644
+--- a/src/common/rendering/vulkan/system/vk_renderdevice.h
++++ b/src/common/rendering/vulkan/system/vk_renderdevice.h
+@@ -116,6 +116,7 @@ public:
+ 	int PerFrameSlots() const override;
+ 	int PerFrameSlot() const override;
+ 	void SyncNextFrame() override;
++	void ScaleSceneViewport() override;
+ #ifdef __SWITCH__
+ 	bool AllowSSAO() override;
+ #endif
+@@ -130,6 +131,12 @@ private:
+ 	std::unique_ptr<VkCommandBufferManager> mCommands;
+ 
+ 	bool mFrameBegun = false;	// BeginFrame ran for the frame being recorded
++	// dynamic resolution of the 3D view (rd_dynres)
++	float mDynScale = 1.0f;
++	int mDynCalmFrames = 0;
++	bool mSceneScaled = false;
++	IntRect mSceneFull, mSceneSmall;
++	void UpdateDynamicResolution();
+ 	std::unique_ptr<VkBufferManager> mBufferManager;
+ 	std::unique_ptr<VkSamplerManager> mSamplerManager;
+ 	std::unique_ptr<VkTextureManager> mTextureManager;
+diff --git a/src/rendering/hwrenderer/hw_entrypoint.cpp b/src/rendering/hwrenderer/hw_entrypoint.cpp
+index 86989aaa4..a175a095e 100644
+--- a/src/rendering/hwrenderer/hw_entrypoint.cpp
++++ b/src/rendering/hwrenderer/hw_entrypoint.cpp
+@@ -134,6 +134,8 @@ sector_t* RenderViewpoint(FRenderViewpoint& mainvp, AActor* camera, IntRect* bou
+ 	{
+ 		const auto& eye = vrmode->mEyes[eye_ix];
+ 		screen->SetViewportRects(bounds);
++		if (mainview && toscreen && eyeCount == 1)
++			screen->ScaleSceneViewport();
+ 
+ 		if (mainview) // Bind the scene frame buffer and turn on draw buffers used by ssao
+ 		{
+-- 
+2.56.0
+

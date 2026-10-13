@@ -1,0 +1,15 @@
+wait 13
+tap PLUS 0.2
+wait 45
+shot 01-level
+hold ZR
+wait 0.25
+shot 02-fire-a
+wait 0.2
+shot 03-fire-b
+wait 0.2
+shot 04-fire-c
+wait 2
+release ZR
+wait 1
+shot 05-after

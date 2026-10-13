@@ -1,0 +1,575 @@
+From 8b928579267724a79a7de362c579132e81814f53 Mon Sep 17 00:00:00 2001
+From: RDoom <171243930+aeon1911@users.noreply.github.com>
+Date: Sun, 11 Oct 2026 13:40:47 -0300
+Subject: [PATCH 20/46] Switch Vulkan: skip dcache cleans on uncached memory,
+ overlap frames, stop per-frame phase.log writes
+
+- VulkanBuffer/VulkanImage know whether their memory is HOST_CACHED. NVK on
+  Horizon maps HOST_COHERENT memory uncached, so the per-submit clean of every
+  persistent buffer, the Unmap clean and the light buffer cleans were pure
+  overhead (5.7 -> 0.5 ms per frame in Ryujinx). Cached memory is still cleaned.
+- Frame overlap (rd_vk_frameoverlap, default on): the end of a frame submits and
+  presents without waiting; the fence wait moves to the next BeginFrame/Update,
+  any other submit, and level load, so the GPU draws while the CPU runs tics.
+- NX_Phase wrote phase.log (open/append/close on the SD card) five times per
+  frame and grew without limit; it now records each phase once.
+- perf.log: Vulkan submit/clean/acquire/present/wait timings; the stabilizer
+  counts Vulkan waits as waits. Session report lists Vulkan memory types.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ .../ZVulkan/include/zvulkan/vulkanobjects.h   | 11 +++-
+ libraries/ZVulkan/src/vulkanbuilders.cpp      |  5 ++
+ src/common/engine/nx_perf.cpp                 | 19 +++++--
+ src/common/engine/nx_perf.h                   |  7 +++
+ src/common/platform/posix/nx/nx_glthread.cpp  | 17 ++++--
+ .../rendering/hwrenderer/data/buffers.h       |  3 ++
+ .../hwrenderer/data/hw_lightbuffer.cpp        |  6 ++-
+ src/common/rendering/v_video.h                |  1 +
+ .../rendering/vulkan/system/vk_buffer.cpp     |  2 +-
+ .../vulkan/system/vk_commandbuffer.cpp        | 53 ++++++++++++++++++-
+ .../vulkan/system/vk_commandbuffer.h          | 11 ++++
+ .../rendering/vulkan/system/vk_hwbuffer.h     |  4 ++
+ .../vulkan/system/vk_renderdevice.cpp         | 35 +++++++++++-
+ .../rendering/vulkan/system/vk_renderdevice.h |  1 +
+ .../vulkan/textures/vk_framebuffer.cpp        | 11 +++-
+ .../rendering/vulkan/textures/vk_nxupload.cpp |  6 +++
+ src/maploader/maploader.cpp                   |  4 ++
+ 17 files changed, 179 insertions(+), 17 deletions(-)
+
+diff --git a/libraries/ZVulkan/include/zvulkan/vulkanobjects.h b/libraries/ZVulkan/include/zvulkan/vulkanobjects.h
+index 38ff2df40..eb445fc73 100644
+--- a/libraries/ZVulkan/include/zvulkan/vulkanobjects.h
++++ b/libraries/ZVulkan/include/zvulkan/vulkanobjects.h
+@@ -69,6 +69,12 @@ public:
+ 	size_t size = 0;
+ 	void *mappedPtr = nullptr;
+ 	size_t mappedSize = 0;
++#if defined(__SWITCH__)
++	// The memory type has HOST_CACHED: CPU writes sit in the dcache until
++	// cleaned. NVK maps HOST_COHERENT-only memory uncached, and cleaning that
++	// is pure overhead (a DC CVAC per 64-byte line), so it is skipped.
++	bool cpuCached = true;
++#endif
+ 
+ 	void *Map(size_t offset, size_t size);
+ 	void Unmap();
+@@ -108,6 +114,7 @@ public:
+ 	int mipLevels = 1;
+ 	int layerCount = 1;
+ 
++	VkMemoryPropertyFlags MemoryProperties() { VkMemoryPropertyFlags f = 0; vmaGetAllocationMemoryProperties(device->allocator, allocation, &f); return f; }
+ 	void *Map(size_t offset, size_t size);
+ 	void Unmap();
+ 
+@@ -522,8 +529,8 @@ inline void *VulkanBuffer::Map(size_t offset, size_t size)
+ inline void VulkanBuffer::Unmap()
+ {
+ #if defined(__SWITCH__)
+-	// Tegra X1 does not snoop the CPU dcache. HOST_COHERENT is not enough.
+-	if (mappedPtr && mappedSize > 0)
++	// Tegra X1 does not snoop the CPU dcache: memory mapped cached must be cleaned.
++	if (cpuCached && mappedPtr && mappedSize > 0)
+ 		armDCacheClean(mappedPtr, mappedSize);
+ #endif
+ 	mappedPtr = nullptr;
+diff --git a/libraries/ZVulkan/src/vulkanbuilders.cpp b/libraries/ZVulkan/src/vulkanbuilders.cpp
+index eca6d2845..e58f863cd 100644
+--- a/libraries/ZVulkan/src/vulkanbuilders.cpp
++++ b/libraries/ZVulkan/src/vulkanbuilders.cpp
+@@ -673,6 +673,11 @@ std::unique_ptr<VulkanBuffer> BufferBuilder::Create(VulkanDevice* device)
+ 	}
+ 
+ 	auto obj = std::make_unique<VulkanBuffer>(device, buffer, allocation, bufferInfo.size);
++#if defined(__SWITCH__)
++	VkMemoryPropertyFlags memflags = 0;
++	vmaGetAllocationMemoryProperties(device->allocator, allocation, &memflags);
++	obj->cpuCached = (memflags & VK_MEMORY_PROPERTY_HOST_CACHED_BIT) != 0;
++#endif
+ 	if (debugName)
+ 		obj->SetDebugName(debugName);
+ 	return obj;
+diff --git a/src/common/engine/nx_perf.cpp b/src/common/engine/nx_perf.cpp
+index 2212c9dac..0eab1dde7 100644
+--- a/src/common/engine/nx_perf.cpp
++++ b/src/common/engine/nx_perf.cpp
+@@ -45,8 +45,8 @@ void (*NXPerf_SummaryHook)(FILE *f) = nullptr;
+ // totals over the current summary window (all frames, not only the slow ones)
+ static struct
+ {
+-	double tic, think, display, swap, sndupd, sndstart, tex, scene, bsp, hud, update, gpuwait, frame, gc, wait, net, input, music, client, glsync, glfinish, draw2d, frameend, present;
+-	int tics, thinkers, sndstarts, drawitems, transitems, glsyncs, spriteskips, draws, lightuploads, lightskips, dynlights, dynlightsall, govlevel;
++	double tic, think, display, swap, sndupd, sndstart, tex, scene, bsp, hud, update, gpuwait, frame, gc, wait, net, input, music, client, glsync, glfinish, draw2d, frameend, present, vksubmit, vkclean, vkacquire, vkpresent, vkpending;
++	int tics, thinkers, sndstarts, drawitems, transitems, glsyncs, spriteskips, draws, lightuploads, lightskips, dynlights, dynlightsall, govlevel, vksubmits;
+ } win;
+ 
+ #ifdef __SWITCH__
+@@ -122,7 +122,8 @@ void NXPerf_EndFrame()
+ 
+ 	{
+ 		extern int nx_levelframes;
+-		NXGovernor_Frame(frame, nxperf.swap_ms + nxperf.gpuwait_ms + nxperf.wait_ms, nx_levelframes > 3);
++		// Vulkan waits for the display/GPU inside acquire, present and the frame-start wait
++		NXGovernor_Frame(frame, nxperf.swap_ms + nxperf.gpuwait_ms + nxperf.wait_ms + nxperf.vkacquire_ms + nxperf.vkpresent_ms + nxperf.vkpending_ms, nx_levelframes > 3);
+ 	}
+ 
+ 	if (nx_perflog > 0 && linesWritten < 3000)
+@@ -158,6 +159,12 @@ void NXPerf_EndFrame()
+ 		win.draw2d += nxperf.draw2d_ms;
+ 		win.present += nxperf.present_ms;
+ 		win.frameend += nxperf.frameend_ms;
++		win.vksubmits += nxperf.vksubmits;
++		win.vksubmit += nxperf.vksubmit_ms;
++		win.vkclean += nxperf.vkclean_ms;
++		win.vkacquire += nxperf.vkacquire_ms;
++		win.vkpresent += nxperf.vkpresent_ms;
++		win.vkpending += nxperf.vkpending_ms;
+ 		win.draws += nxperf.draws;
+ 		win.lightuploads += nxperf.lightuploads;
+ 		win.lightskips += nxperf.lightskips;
+@@ -213,6 +220,12 @@ void NXPerf_EndFrame()
+ 				fprintf(perfFile, "#   GL draw calls per frame %.0f | dynamic lights per frame: %.1f used of %.1f | light uploads %.0f, identical skipped %.0f | stabilizer level avg %.2f (now %d)\n",
+ 					win.draws / n, win.dynlights / n, win.dynlightsall / n, win.lightuploads / n, win.lightskips / n, win.govlevel / n, nxGovLevel);
+ 			}
++			if (frames > 0 && win.vksubmits > 0)
++			{
++				double n = frames;
++				fprintf(perfFile, "#   vulkan: submits %.1f (%.2f ms in vkQueueSubmit) | cache clean %.2f | acquire %.2f | present %.2f | fence wait at frame end %.2f | wait for previous frame at frame start %.2f (ms per frame)\n",
++					win.vksubmits / n, win.vksubmit / n, win.vkclean / n, win.vkacquire / n, win.vkpresent / n, win.gpuwait / n, win.vkpending / n);
++			}
+ 			NXGLThreadStats(perfFile);
+ 			if (NXPerf_SummaryHook) NXPerf_SummaryHook(perfFile);
+ 			win = {};
+diff --git a/src/common/engine/nx_perf.h b/src/common/engine/nx_perf.h
+index 3a9feac55..b9b0062a1 100644
+--- a/src/common/engine/nx_perf.h
++++ b/src/common/engine/nx_perf.h
+@@ -29,6 +29,13 @@ struct NXPerfCounters
+ 	double present_ms = 0;	// copy of the finished frame to the window (waits for a free window buffer)
+ 	double draw2d_ms = 0;	// 2D drawing (HUD, menus, messages) - part of update_ms
+ 	double frameend_ms = 0;	// end of the previous frame done at the start of this one (GL driver thread: fence, swap, waits)
++	// Vulkan frame end (parts of update_ms; acquire/present also go to present_ms, fence waits to gpuwait_ms)
++	int vksubmits = 0;			// vkQueueSubmit calls
++	double vksubmit_ms = 0;		// inside vkQueueSubmit
++	double vkclean_ms = 0;		// dcache clean of persistent buffers before a submit
++	double vkacquire_ms = 0;	// vkAcquireNextImageKHR
++	double vkpresent_ms = 0;	// vkQueuePresentKHR
++	double vkpending_ms = 0;	// waiting at the start of a frame for the previous frame's GPU work (frame overlap)
+ 	int tics = 0, shaders = 0, textures = 0, sounds = 0, sndstarts = 0;
+ 	int thinkers = 0;		// thinkers ticked (summed over the frame's tics)
+ 	int tex_async = 0, tex_wait = 0, tex_budget = 0, snd_async = 0, tex_preupload = 0;
+diff --git a/src/common/platform/posix/nx/nx_glthread.cpp b/src/common/platform/posix/nx/nx_glthread.cpp
+index 4800a6097..45cd7bf51 100644
+--- a/src/common/platform/posix/nx/nx_glthread.cpp
++++ b/src/common/platform/posix/nx/nx_glthread.cpp
+@@ -239,11 +239,20 @@ void NX_GLCrumb(const char *what)
+ void NX_Phase(const char *what)
+ {
+ 	NX_GLCrumb(what);
+-	static const char *last = nullptr;
+-	if (what == last) return;
+-	last = what;
+-	FILE *f = fopen("phase.log", "a");
++	// phase.log records the first time each phase is reached (start-up order,
++	// where a hang began). The main loop cycles through the same phases every
++	// frame: writing those used to cost five SD-card open/append/close per
++	// frame and grew the file without limit. The hang report still names the
++	// current phase through the crumb above.
++	static const char *seen[64];
++	static int numSeen = 0, lines = 0;
++	for (int i = 0; i < numSeen; i++)
++		if (seen[i] == what) return;
++	if (numSeen < 64) seen[numSeen++] = what;
++	if (lines >= 200) return;
++	FILE *f = fopen("phase.log", lines == 0 ? "w" : "a");
+ 	if (!f) return;
++	lines++;
+ 	fprintf(f, "%llu %s\n", (unsigned long long)gCrumbMainTime, what ? what : "?");
+ 	fclose(f);
+ }
+diff --git a/src/common/rendering/hwrenderer/data/buffers.h b/src/common/rendering/hwrenderer/data/buffers.h
+index 1384bea3a..04b4e311a 100644
+--- a/src/common/rendering/hwrenderer/data/buffers.h
++++ b/src/common/rendering/hwrenderer/data/buffers.h
+@@ -105,6 +105,9 @@ public:
+ 	size_t Size() { return buffersize; }
+ 	virtual void GPUDropSync() {}
+ 	virtual void GPUWaitSync() {}
++	// Switch: CPU writes to Memory() must be cleaned from the dcache before the
++	// GPU reads them (false when the backend mapped the memory uncached).
++	virtual bool NeedsCacheClean() { return true; }
+ };
+ 
+ class IVertexBuffer : virtual public IBuffer
+diff --git a/src/common/rendering/hwrenderer/data/hw_lightbuffer.cpp b/src/common/rendering/hwrenderer/data/hw_lightbuffer.cpp
+index a8d29544b..d027d4143 100644
+--- a/src/common/rendering/hwrenderer/data/hw_lightbuffer.cpp
++++ b/src/common/rendering/hwrenderer/data/hw_lightbuffer.cpp
+@@ -60,7 +60,8 @@ FLightBuffer::FLightBuffer(int pipelineNbr):
+ 		if (mem)
+ 		{
+ 			memset(mem, 0, mByteSize);
+-			armDCacheClean(mem, mByteSize);
++			if (mBufferPipeline[n]->NeedsCacheClean())
++				armDCacheClean(mem, mByteSize);
+ 		}
+ #endif
+ 	}
+@@ -126,7 +127,8 @@ int FLightBuffer::UploadLights(FDynLightData &data)
+ 		memcpy(&copyptr[4 + 4*size0], &data.arrays[1][0], size1 * ELEMENT_SIZE);
+ 		memcpy(&copyptr[4 + 4*(size0 + size1)], &data.arrays[2][0], size2 * ELEMENT_SIZE);
+ #if defined(__SWITCH__)
+-		armDCacheClean(copyptr, totalsize * ELEMENT_SIZE);
++		if (mBuffer->NeedsCacheClean())
++			armDCacheClean(copyptr, totalsize * ELEMENT_SIZE);
+ #endif
+ 		return thisindex;
+ 	}
+diff --git a/src/common/rendering/v_video.h b/src/common/rendering/v_video.h
+index 5ddf57c19..c66cb64d0 100644
+--- a/src/common/rendering/v_video.h
++++ b/src/common/rendering/v_video.h
+@@ -271,6 +271,7 @@ public:
+ 	virtual void SetSceneRenderTarget(bool useSSAO) {}
+ 	virtual void UpdateShadowMap() {}
+ 	virtual void WaitForCommands(bool finish) {}
++	virtual void WaitForPendingFrame() {}	// Vulkan frame overlap: the GPU is done with the last presented frame
+ 	virtual void SetSaveBuffers(bool yes) {}
+ 	virtual void ImageTransitionScene(bool unknown) {}
+ 	virtual void CopyScreenToBuffer(int width, int height, uint8_t* buffer)	{ memset(buffer, 0, width* height); }
+diff --git a/src/common/rendering/vulkan/system/vk_buffer.cpp b/src/common/rendering/vulkan/system/vk_buffer.cpp
+index 7d2246866..ca01d9028 100644
+--- a/src/common/rendering/vulkan/system/vk_buffer.cpp
++++ b/src/common/rendering/vulkan/system/vk_buffer.cpp
+@@ -60,7 +60,7 @@ void VkBufferManager::FlushPersistentBuffers()
+ #if defined(__SWITCH__)
+ 	for (auto buf : Buffers)
+ 	{
+-		if (buf && buf->mPersistent && buf->Memory() && buf->Size() > 0)
++		if (buf && buf->mPersistent && buf->Memory() && buf->Size() > 0 && buf->NeedsCacheClean())
+ 			armDCacheClean(buf->Memory(), buf->Size());
+ 	}
+ #endif
+diff --git a/src/common/rendering/vulkan/system/vk_commandbuffer.cpp b/src/common/rendering/vulkan/system/vk_commandbuffer.cpp
+index 31f4e44ab..833ff2577 100644
+--- a/src/common/rendering/vulkan/system/vk_commandbuffer.cpp
++++ b/src/common/rendering/vulkan/system/vk_commandbuffer.cpp
+@@ -31,6 +31,8 @@
+ #include "v_video.h"
+ #include "vulkan/system/vk_buffer.h"
+ #include "vulkan/system/vk_hwbuffer.h"
++#include "nx_perf.h"
++#include "c_cvars.h"
+ #if defined(__SWITCH__)
+ #include <switch.h>
+ #endif
+@@ -111,12 +113,33 @@ void VkCommandBufferManager::BeginFrame()
+ 	}
+ }
+ 
++#if defined(__SWITCH__)
++CVAR(Bool, rd_vk_frameoverlap, true, CVAR_ARCHIVE | CVAR_GLOBALCONFIG)
++#endif
++
++void VkCommandBufferManager::WaitForPendingFrame()
++{
++	if (!mFramePending)
++		return;
++	NXPERF_SCOPE(vkpending_ms, nullptr);
++	vkWaitForFences(fb->device->device, mPendingFences, mSubmitWaitFences, VK_TRUE, std::numeric_limits<uint64_t>::max());
++	vkResetFences(fb->device->device, mPendingFences, mSubmitWaitFences);
++	mPendingTransferDelete.reset();
++	mPendingDrawDelete.reset();
++	mFramePending = false;
++	mPendingFences = 0;
++}
++
+ void VkCommandBufferManager::FlushCommands(VulkanCommandBuffer** commands, size_t count, bool finish, bool lastsubmit)
+ {
++	// the fences and command buffers of the previous frame are reused from index 0
++	WaitForPendingFrame();
++
+ 	int currentIndex = mNextSubmit % maxConcurrentSubmitCount;
+ 
+ 	if (mNextSubmit >= maxConcurrentSubmitCount)
+ 	{
++		NXPERF_SCOPE(gpuwait_ms, nullptr);
+ 		vkWaitForFences(fb->device->device, 1, &mSubmitFence[currentIndex]->fence, VK_TRUE, std::numeric_limits<uint64_t>::max());
+ 		vkResetFences(fb->device->device, 1, &mSubmitFence[currentIndex]->fence);
+ 	}
+@@ -141,10 +164,16 @@ void VkCommandBufferManager::FlushCommands(VulkanCommandBuffer** commands, size_
+ 
+ #if defined(__SWITCH__)
+ 	if (fb && fb->GetBufferManager())
++	{
++		NXPERF_SCOPE(vkclean_ms, nullptr);
+ 		fb->GetBufferManager()->FlushPersistentBuffers();
++	}
+ #endif
+ 
+-	submit.Execute(fb->device.get(), fb->device->GraphicsQueue, mSubmitFence[currentIndex].get());
++	{
++		NXPERF_SCOPE(vksubmit_ms, &nxperf.vksubmits);
++		submit.Execute(fb->device.get(), fb->device->GraphicsQueue, mSubmitFence[currentIndex].get());
++	}
+ 	mNextSubmit++;
+ }
+ 
+@@ -180,6 +209,8 @@ void VkCommandBufferManager::FlushCommands(bool finish, bool lastsubmit, bool up
+ 
+ void VkCommandBufferManager::WaitForCommands(bool finish, bool uploadOnly)
+ {
++	WaitForPendingFrame();
++
+ 	if (finish)
+ 	{
+ 		Finish.Reset();
+@@ -199,8 +230,28 @@ void VkCommandBufferManager::WaitForCommands(bool finish, bool uploadOnly)
+ 
+ 	int numWaitFences = min(mNextSubmit, (int)maxConcurrentSubmitCount);
+ 
++#if defined(__SWITCH__)
++	// End of a presented frame: leave the GPU work in flight. Everything the
++	// frame used (command buffers, staging memory, deleted objects) stays
++	// alive until WaitForPendingFrame. GPU timestamp queries need the wait.
++	if (finish && !uploadOnly && rd_vk_frameoverlap && !gpuStatActive && numWaitFences > 0)
++	{
++		mFramePending = true;
++		mPendingFences = numWaitFences;
++		mPendingTransferDelete = std::move(TransferDeleteList);
++		mPendingDrawDelete = std::move(DrawDeleteList);
++		DeleteFrameObjects(false);
++		mNextSubmit = 0;
++		Finish.Unclock();
++		rendered_commandbuffers = current_rendered_commandbuffers;
++		current_rendered_commandbuffers = 0;
++		return;
++	}
++#endif
++
+ 	if (numWaitFences > 0)
+ 	{
++		NXPERF_SCOPE(gpuwait_ms, nullptr);
+ 		vkWaitForFences(fb->device->device, numWaitFences, mSubmitWaitFences, VK_TRUE, std::numeric_limits<uint64_t>::max());
+ 		vkResetFences(fb->device->device, numWaitFences, mSubmitWaitFences);
+ 	}
+diff --git a/src/common/rendering/vulkan/system/vk_commandbuffer.h b/src/common/rendering/vulkan/system/vk_commandbuffer.h
+index 2c5502532..db6f5a7fd 100644
+--- a/src/common/rendering/vulkan/system/vk_commandbuffer.h
++++ b/src/common/rendering/vulkan/system/vk_commandbuffer.h
+@@ -44,6 +44,12 @@ public:
+ 	void WaitForCommands(bool finish) { WaitForCommands(finish, false); }
+ 	void WaitForCommands(bool finish, bool uploadOnly);
+ 
++	// Frame overlap (Switch): the end of a frame submits and presents but does
++	// not wait for the GPU; the wait happens here, at the start of the next
++	// frame (or before any other submit), so the GPU draws frame N while the
++	// CPU runs the game tics and input of frame N+1.
++	void WaitForPendingFrame();
++
+ 	void PushGroup(const FString& name);
+ 	void PopGroup();
+ 	void UpdateGpuStats();
+@@ -96,6 +102,11 @@ private:
+ 	VkFence mSubmitWaitFences[maxConcurrentSubmitCount];
+ 	int mNextSubmit = 0;
+ 
++	bool mFramePending = false;
++	int mPendingFences = 0;
++	std::unique_ptr<DeleteList> mPendingTransferDelete;
++	std::unique_ptr<DeleteList> mPendingDrawDelete;
++
+ 	struct TimestampQuery
+ 	{
+ 		FString name;
+diff --git a/src/common/rendering/vulkan/system/vk_hwbuffer.h b/src/common/rendering/vulkan/system/vk_hwbuffer.h
+index 7d2d09710..9a46a85c7 100644
+--- a/src/common/rendering/vulkan/system/vk_hwbuffer.h
++++ b/src/common/rendering/vulkan/system/vk_hwbuffer.h
+@@ -56,6 +56,10 @@ public:
+ 	VulkanRenderDevice* fb = nullptr;
+ 	std::list<VkHardwareBuffer*>::iterator it;
+ 
++#if defined(__SWITCH__)
++	bool NeedsCacheClean() override { return !mBuffer || mBuffer->cpuCached; }
++#endif
++
+ 	VkBufferUsageFlags mBufferType = 0;
+ 	std::unique_ptr<VulkanBuffer> mBuffer;
+ 	std::unique_ptr<VulkanBuffer> mStaging;
+diff --git a/src/common/rendering/vulkan/system/vk_renderdevice.cpp b/src/common/rendering/vulkan/system/vk_renderdevice.cpp
+index 6586e3e21..c8ede3465 100644
+--- a/src/common/rendering/vulkan/system/vk_renderdevice.cpp
++++ b/src/common/rendering/vulkan/system/vk_renderdevice.cpp
+@@ -31,6 +31,7 @@
+ #include "flatvertices.h"
+ #include "hw_bonebuffer.h"
+ #include "hw_clock.h"
++#include "nx_perf.h"
+ #include "hw_lightbuffer.h"
+ #include "hw_skydome.h"
+ #include "hwrenderer/data/hw_viewpointbuffer.h"
+@@ -203,6 +204,8 @@ void VulkanRenderDevice::InitializeState()
+ 
+ void VulkanRenderDevice::Update()
+ {
++	// wipes and the start screen present frames without BeginFrame
++	mCommands->WaitForPendingFrame();
+ 	twoD.Reset();
+ 	Flush3D.Reset();
+ 
+@@ -210,8 +213,11 @@ void VulkanRenderDevice::Update()
+ 
+ 	GetPostprocess()->SetActiveRenderTarget();
+ 
+-	Draw2D();
+-	twod->Clear();
++	{
++		NXPERF_SCOPE(draw2d_ms, nullptr);
++		Draw2D();
++		twod->Clear();
++	}
+ 
+ 	mRenderState->EndRenderPass();
+ 	mRenderState->EndFrame();
+@@ -453,6 +459,8 @@ TArray<uint8_t> VulkanRenderDevice::GetScreenshotBuffer(int &pitch, ESSType &col
+ 
+ void VulkanRenderDevice::BeginFrame()
+ {
++	// the frame's persistent buffers are rewritten from the start below
++	mCommands->WaitForPendingFrame();
+ 	SetViewportRects(nullptr);
+ 	mViewpoints->Clear();
+ 	mCommands->BeginFrame();
+@@ -482,11 +490,20 @@ void VulkanRenderDevice::WaitForCommands(bool finish)
+ 	mCommands->WaitForCommands(finish);
+ }
+ 
++void VulkanRenderDevice::WaitForPendingFrame()
++{
++	mCommands->WaitForPendingFrame();
++}
++
+ unsigned int VulkanRenderDevice::GetLightBufferBlockSize() const
+ {
+ 	return mLights->GetBlockSize();
+ }
+ 
++#ifdef __SWITCH__
++EXTERN_CVAR(Bool, rd_vk_frameoverlap)
++#endif
++
+ void VulkanRenderDevice::PrintStartupLog()
+ {
+ 	const auto &props = device->PhysicalDevice.Properties.Properties;
+@@ -514,6 +531,20 @@ void VulkanRenderDevice::PrintStartupLog()
+ 		d.Format("%s (api %s, driver %s)", props.deviceName, apiVersion.GetChars(), driverVersion.GetChars());
+ 		RDoom_SessionSet("vulkan_device", d.GetChars());
+ 		RDoom_SessionSet("renderer_active", "vulkan");
++
++		// memory types decide whether CPU writes need dcache cleaning (HOST_CACHED)
++		FString mt;
++		const auto &mem = device->PhysicalDevice.Properties.Memory;
++		for (uint32_t i = 0; i < mem.memoryTypeCount; i++)
++		{
++			VkMemoryPropertyFlags f = mem.memoryTypes[i].propertyFlags;
++			mt.AppendFormat("%s%u:%s%s%s%s", i ? ", " : "", i,
++				(f & VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT) ? "L" : "", (f & VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT) ? "V" : "",
++				(f & VK_MEMORY_PROPERTY_HOST_COHERENT_BIT) ? "Co" : "", (f & VK_MEMORY_PROPERTY_HOST_CACHED_BIT) ? "Ca" : "");
++		}
++		mt += " (L=device local, V=host visible, Co=coherent, Ca=cached)";
++		RDoom_SessionSet("vulkan_memory_types", mt.GetChars());
++		RDoom_SessionSet("vulkan_frame_overlap", rd_vk_frameoverlap ? "on" : "off");
+ 	}
+ #endif
+ 	Printf("Vulkan device type: %s\n", deviceType.GetChars());
+diff --git a/src/common/rendering/vulkan/system/vk_renderdevice.h b/src/common/rendering/vulkan/system/vk_renderdevice.h
+index 0052f1894..f9a105eaa 100644
+--- a/src/common/rendering/vulkan/system/vk_renderdevice.h
++++ b/src/common/rendering/vulkan/system/vk_renderdevice.h
+@@ -112,6 +112,7 @@ public:
+ 	void Draw2D() override;
+ 
+ 	void WaitForCommands(bool finish) override;
++	void WaitForPendingFrame() override;
+ 
+ 	bool RaytracingEnabled();
+ 
+diff --git a/src/common/rendering/vulkan/textures/vk_framebuffer.cpp b/src/common/rendering/vulkan/textures/vk_framebuffer.cpp
+index ca16411e5..bef297ff7 100644
+--- a/src/common/rendering/vulkan/textures/vk_framebuffer.cpp
++++ b/src/common/rendering/vulkan/textures/vk_framebuffer.cpp
+@@ -45,6 +45,7 @@ VkFramebufferManager::~VkFramebufferManager()
+ {
+ }
+ 
++#include "nx_perf.h"
+ #ifdef __SWITCH__
+ #include "common/platform/posix/nx/rdoom_nx.h"
+ static unsigned rdoomPresented;
+@@ -82,7 +83,10 @@ void VkFramebufferManager::AcquireImage()
+ 		}
+ 	}
+ 
+-	PresentImageIndex = SwapChain->AcquireImage(SwapChainImageAvailableSemaphore.get());
++	{
++		NXPERF_SCOPE(vkacquire_ms, nullptr);
++		PresentImageIndex = SwapChain->AcquireImage(SwapChainImageAvailableSemaphore.get());
++	}
+ 	if (PresentImageIndex != -1)
+ 	{
+ 		fb->GetPostprocess()->DrawPresentTexture(fb->mOutputLetterbox, true, false);
+@@ -93,7 +97,10 @@ void VkFramebufferManager::QueuePresent()
+ {
+ 	if (PresentImageIndex != -1)
+ 	{
+-		SwapChain->QueuePresent(PresentImageIndex, RenderFinishedSemaphores[PresentImageIndex].get());
++		{
++			NXPERF_SCOPE(vkpresent_ms, nullptr);
++			SwapChain->QueuePresent(PresentImageIndex, RenderFinishedSemaphores[PresentImageIndex].get());
++		}
+ #ifdef __SWITCH__
+ 		// proof in the session report that frames really reach the display
+ 		rdoomPresented++;
+diff --git a/src/common/rendering/vulkan/textures/vk_nxupload.cpp b/src/common/rendering/vulkan/textures/vk_nxupload.cpp
+index fd628fc6c..5c16182e9 100644
+--- a/src/common/rendering/vulkan/textures/vk_nxupload.cpp
++++ b/src/common/rendering/vulkan/textures/vk_nxupload.cpp
+@@ -69,6 +69,12 @@ bool NX_UploadViaBlit(VulkanRenderDevice *fb, VulkanCommandBuffer *cmd, VkImage
+ 	const uint8_t *in = (const uint8_t *)pixels;
+ 	for (int y = 0; y < h; y++)
+ 		memcpy(mem + layout.offset + (size_t)y * layout.rowPitch, in + (size_t)y * rowBytes, rowBytes);
++	{
++		// The GPU does not snoop the CPU dcache: memory mapped cached must be
++		// cleaned before the blit reads it (uncached memory needs nothing).
++		if (src->MemoryProperties() & VK_MEMORY_PROPERTY_HOST_CACHED_BIT)
++			armDCacheClean(mem, (size_t)(layout.offset + layout.size));
++	}
+ 	src->Unmap();
+ 
+ 	VkImageMemoryBarrier barrier = { VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER };
+diff --git a/src/maploader/maploader.cpp b/src/maploader/maploader.cpp
+index 1aebd5037..0a6d1507b 100644
+--- a/src/maploader/maploader.cpp
++++ b/src/maploader/maploader.cpp
+@@ -2928,6 +2928,9 @@ void MapLoader::LoadLevel(MapData *map, const char *lumpname, int position)
+ {
+ 	const int *oldvertextable  = nullptr;
+ 
++	// Vulkan frame overlap: the last frame of the old level may still be on the GPU
++	if (screen) screen->WaitForPendingFrame();
++
+ 	// note: most of this ordering is important
+ 	ForceNodeBuild = gennodes;
+ 
+@@ -3229,6 +3232,7 @@ void MapLoader::LoadLevel(MapData *map, const char *lumpname, int position)
+ 
+ 	InitRenderInfo();				// create hardware independent renderer resources for the level. This must be done BEFORE the PolyObj Spawn!!!
+ 	Level->ClearDynamic3DFloorData();	// CreateVBO must be run on the plain 3D floor data.
++	screen->WaitForPendingFrame();	// the vertex buffer is rewritten in place
+ 	CreateVBO(screen->mVertexData, Level->sectors);
+ 
+ 	screen->InitLightmap(Level->LMTextureSize, Level->LMTextureCount, Level->LMTextureData);
+-- 
+2.56.0
+

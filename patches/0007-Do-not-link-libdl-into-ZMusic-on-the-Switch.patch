@@ -1,0 +1,31 @@
+From 4811e53e52fcfa8fe2e66ac5c7478dbfe631c6a7 Mon Sep 17 00:00:00 2001
+From: Aeon <171243930+aeon1911@users.noreply.github.com>
+Date: Mon, 28 Sep 2026 12:26:02 -0300
+Subject: [PATCH 07/46] Do not link libdl into ZMusic on the Switch.
+
+libnx has no libdl, and module loading is already stubbed. CMAKE_DL_LIBS was still reaching uzdoom.elf through ZMusic's interface libraries after the engine list had dropped it.
+---
+ libraries/ZMusic/source/CMakeLists.txt | 7 ++++++-
+ 1 file changed, 6 insertions(+), 1 deletion(-)
+
+diff --git a/libraries/ZMusic/source/CMakeLists.txt b/libraries/ZMusic/source/CMakeLists.txt
+index a346919cb..fd6d5101d 100644
+--- a/libraries/ZMusic/source/CMakeLists.txt
++++ b/libraries/ZMusic/source/CMakeLists.txt
+@@ -140,7 +140,12 @@ if(WIN32)
+ 	)
+ endif()
+ 
+-target_link_libraries(zmusic-obj INTERFACE dumb gme libxmp miniz ${CMAKE_DL_LIBS})
++if(NINTENDO_SWITCH)
++	# libnx has no libdl. Module loading is stubbed in i_module.cpp.
++	target_link_libraries(zmusic-obj INTERFACE dumb gme libxmp miniz)
++else()
++	target_link_libraries(zmusic-obj INTERFACE dumb gme libxmp miniz ${CMAKE_DL_LIBS})
++endif()
+ 
+ target_include_directories(zmusic-obj
+ INTERFACE
+-- 
+2.56.0
+

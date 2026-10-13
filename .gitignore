@@ -1,0 +1,30 @@
+# Published: source, scripts, docs, patches, assets source, licenses.
+# Never published: commercial game data, user/emulator files, builds, downloads.
+*.wad
+*.WAD
+*.pk3
+*.pk7
+*.ipk3
+*.iwad
+*.keys
+*.nsp
+*.xci
+/build/
+/dist/
+/test-env/
+/evidence/
+/third_party/mesa-sdk/
+/third_party/freedoom/
+/vktest/build/
+/vktest/matrix/build/
+/vktest/*.nro
+/vktest/*.elf
+/vktest/*.nacp
+/vktest/matrix/*.nro
+/vktest/matrix/*.elf
+/vktest/matrix/*.nacp
+/assets/build/
+/.claude/
+__pycache__/
+*.o
+*.pyc

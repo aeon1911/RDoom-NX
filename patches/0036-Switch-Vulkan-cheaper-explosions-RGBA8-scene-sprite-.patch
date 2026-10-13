@@ -1,0 +1,262 @@
+From ea657fdecf6e588313532d7b9bfec873d2f318c6 Mon Sep 17 00:00:00 2001
+From: RDoom <171243930+aeon1911@users.noreply.github.com>
+Date: Mon, 12 Oct 2026 19:45:57 -0300
+Subject: [PATCH 36/46] Switch Vulkan: cheaper explosions - RGBA8 scene, sprite
+ alpha cut, draw-based upscale
+
+Console logs (4cd05c98b): outside explosions the game holds 60 fps; in
+Brutal Doom explosions 400-650 sprites (200-430 translucent) make frames of
+100-200 ms that are GPU time even at 60% resolution. Sprites are lit per
+sprite on the CPU, so the cost is blending: hundreds of smoke layers over
+the view.
+
+- The scene is RGBA8 by default (rd_vk_scenefmt 2): with bloom and
+  tonemapping off the image is the same, and blending runs at full rate
+  with half the traffic of RGBA16F.
+- Translucent sprite fragments below rd_sprite_alphacut (0.02) are
+  discarded instead of blended.
+- The dynamic resolution stretches the view with a textured draw
+  (shaders/pp/upscale.fp) instead of vkCmdBlitImage, which cost 2-4 ms per
+  frame on NVK; the controller models the frame at full scale and climbs
+  back as soon as the predicted frame fits (it stayed at 60% for the whole
+  session after the first explosion).
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ .../postprocessing/hw_postprocess.cpp         | 18 ++++++++++
+ .../postprocessing/hw_postprocess.h           | 15 ++++++++
+ .../vulkan/system/vk_renderdevice.cpp         | 36 ++++++++++++++-----
+ .../rendering/vulkan/system/vk_renderdevice.h |  1 +
+ .../vulkan/textures/vk_renderbuffers.cpp      |  5 ++-
+ src/rendering/hwrenderer/scene/hw_sprites.cpp | 15 +++++++-
+ wadsrc/static/shaders/pp/upscale.fp           | 16 +++++++++
+ 7 files changed, 96 insertions(+), 10 deletions(-)
+ create mode 100644 wadsrc/static/shaders/pp/upscale.fp
+
+diff --git a/src/common/rendering/hwrenderer/postprocessing/hw_postprocess.cpp b/src/common/rendering/hwrenderer/postprocessing/hw_postprocess.cpp
+index ab9efe975..a3aa9dee4 100644
+--- a/src/common/rendering/hwrenderer/postprocessing/hw_postprocess.cpp
++++ b/src/common/rendering/hwrenderer/postprocessing/hw_postprocess.cpp
+@@ -532,6 +532,24 @@ void PPCameraExposure::UpdateTextures(int width, int height)
+ 
+ /////////////////////////////////////////////////////////////////////////////
+ 
++void PPSceneUpscale::Render(PPRenderState *renderstate, const IntRect &to)
++{
++	ExtractUniforms uniforms;
++	uniforms.Scale = screen->SceneScale();	// the smaller viewport the scene was drawn into
++	uniforms.Offset = screen->SceneOffset();
++
++	renderstate->PushGroup("upscale");
++	renderstate->Clear();
++	renderstate->Shader = &Upscale;
++	renderstate->Uniforms.Set(uniforms);
++	renderstate->Viewport = to;
++	renderstate->SetInputCurrent(0, PPFilterMode::Linear);
++	renderstate->SetOutputNext();
++	renderstate->SetNoBlend();
++	renderstate->Draw();
++	renderstate->PopGroup();
++}
++
+ void PPColormap::Render(PPRenderState *renderstate, int fixedcm, float flash)
+ {
+ 	ColormapUniforms uniforms;
+diff --git a/src/common/rendering/hwrenderer/postprocessing/hw_postprocess.h b/src/common/rendering/hwrenderer/postprocessing/hw_postprocess.h
+index 1f402aadc..f8452687a 100644
+--- a/src/common/rendering/hwrenderer/postprocessing/hw_postprocess.h
++++ b/src/common/rendering/hwrenderer/postprocessing/hw_postprocess.h
+@@ -884,9 +884,24 @@ private:
+ 
+ /////////////////////////////////////////////////////////////////////////////
+ 
++/////////////////////////////////////////////////////////////////////////////
++
++// Dynamic resolution (Switch): stretches the 3D view, drawn into the smaller
++// scene viewport, over the full one with a single textured draw (cheaper on
++// NVK than vkCmdBlitImage, which costs a meta pass per call).
++class PPSceneUpscale
++{
++public:
++	void Render(PPRenderState *renderstate, const IntRect &to);
++
++private:
++	PPShader Upscale = { "shaders/pp/upscale.fp", "", ExtractUniforms::Desc() };
++};
++
+ class Postprocess
+ {
+ public:
++	PPSceneUpscale upscale;
+ 	PPBloom bloom;
+ 	PPLensDistort lens;
+ 	PPFXAA fxaa;
+diff --git a/src/common/rendering/vulkan/system/vk_renderdevice.cpp b/src/common/rendering/vulkan/system/vk_renderdevice.cpp
+index c542e4ce1..d48f86044 100644
+--- a/src/common/rendering/vulkan/system/vk_renderdevice.cpp
++++ b/src/common/rendering/vulkan/system/vk_renderdevice.cpp
+@@ -22,6 +22,8 @@
+ 
+ #include <cinttypes>
+ #include "gamestate.h"
++#include "vulkan/renderer/vk_pprenderstate.h"
++#include "hwrenderer/postprocessing/hw_postprocess.h"
+ 
+ #include <zvulkan/vulkanbuilders.h>
+ #include <zvulkan/vulkancompatibledevice.h>
+@@ -289,6 +291,7 @@ CVAR(Bool, rd_dynres, true, CVAR_ARCHIVE | CVAR_GLOBALCONFIG)
+ CVAR(Float, rd_dynres_target, 12.0f, CVAR_ARCHIVE | CVAR_GLOBALCONFIG)
+ CVAR(Float, rd_dynres_min, 0.6f, CVAR_ARCHIVE | CVAR_GLOBALCONFIG)
+ CVAR(Float, rd_dynres_force, 0.0f, 0)	// tests: fixed 3D scale (0 = automatic)
++CVAR(Bool, rd_dynres_blit, false, 0)	// tests: stretch with vkCmdBlitImage instead of a draw
+ EXTERN_CVAR(Int, rd_gpubench)
+ 
+ void VulkanRenderDevice::UpdateDynamicResolution()
+@@ -309,24 +312,35 @@ void VulkanRenderDevice::UpdateDynamicResolution()
+ 		return;
+ 	}
+ 	const double target = clamp((double)rd_dynres_target, 6.0, 30.0);
++	const double restMs = frameMs - sceneMs;	// post-processing, 2D, present (+ the upscale when scaled)
++	if (mDynScale >= 0.999f)
++		mDynRestAtFull = mDynRestAtFull * 0.9 + restMs * 0.1;
+ 	if (frameMs > target && sceneMs > 0.5)
+ 	{
+ 		// the 3D view's cost follows its area; the rest of the frame stays
+-		const double fixedMs = frameMs - sceneMs;
+-		const double wantScene = max(target - fixedMs, sceneMs * 0.25);
++		const double wantScene = max(target - restMs, sceneMs * 0.25);
+ 		float s = mDynScale * (float)sqrt(wantScene / sceneMs);
+ 		s = max(s, mDynScale * 0.8f);	// at most 20% per step
+ 		mDynScale = clamp(floorf(s * 20.0f) / 20.0f, minScale, 1.0f);
+ 		mDynCalmFrames = 0;
+ 	}
+-	else if (frameMs < target * 0.8 && mDynScale < 1.0f)
++	else if (mDynScale < 1.0f && sceneMs > 0)
+ 	{
+-		// back up slowly, only after the GPU has had room for a while
+-		if (++mDynCalmFrames >= 30)
++		// one step up only when the frame predicted for it fits with room to
++		// spare; at full scale the upscale pass disappears from the frame
++		const float next = min(1.0f, mDynScale + 0.1f);
++		const double ratio = (next * next) / (mDynScale * mDynScale);
++		const double predicted = (next >= 0.999f ? mDynRestAtFull : restMs) + sceneMs * ratio;
++		if (predicted < target * 0.9)
+ 		{
+-			mDynScale = min(1.0f, mDynScale + 0.05f);
+-			mDynCalmFrames = 0;
++			if (++mDynCalmFrames >= 15)
++			{
++				mDynScale = next;
++				mDynCalmFrames = 0;
++			}
+ 		}
++		else
++			mDynCalmFrames = 0;
+ 	}
+ 	else
+ 		mDynCalmFrames = 0;
+@@ -367,7 +381,13 @@ void VulkanRenderDevice::PostProcessScene(bool swscene, int fixedcm, float flash
+ 	if (mSceneScaled)
+ 	{
+ 		mSceneScaled = false;
+-		mPostprocess->UpscaleScene(mSceneSmall, mSceneFull);
++		if (rd_dynres_blit)
++			mPostprocess->UpscaleScene(mSceneSmall, mSceneFull);
++		else
++		{
++			VkPPRenderState renderstate(this);
++			hw_postprocess.upscale.Render(&renderstate, mSceneFull);	// reads mSceneViewport (still the small one)
++		}
+ 		mSceneViewport = mSceneFull;
+ 	}
+ #endif
+diff --git a/src/common/rendering/vulkan/system/vk_renderdevice.h b/src/common/rendering/vulkan/system/vk_renderdevice.h
+index 5ad28faf1..d3082e6df 100644
+--- a/src/common/rendering/vulkan/system/vk_renderdevice.h
++++ b/src/common/rendering/vulkan/system/vk_renderdevice.h
+@@ -134,6 +134,7 @@ private:
+ 	// dynamic resolution of the 3D view (rd_dynres)
+ 	float mDynScale = 1.0f;
+ 	int mDynCalmFrames = 0;
++	double mDynRestAtFull = 3.5;	// GPU ms outside the 3D view at full scale (running average)
+ 	bool mSceneScaled = false;
+ 	IntRect mSceneFull, mSceneSmall;
+ 	void UpdateDynamicResolution();
+diff --git a/src/common/rendering/vulkan/textures/vk_renderbuffers.cpp b/src/common/rendering/vulkan/textures/vk_renderbuffers.cpp
+index cd73cb6e8..3d4c0e7ce 100644
+--- a/src/common/rendering/vulkan/textures/vk_renderbuffers.cpp
++++ b/src/common/rendering/vulkan/textures/vk_renderbuffers.cpp
+@@ -41,7 +41,10 @@ CVAR(Bool, rd_vk_zcull, false, 0)
+ // post-processing pass moves through the Tegra X1's shared memory bus; HDR
+ // effects (bloom, tonemap) then work in the 0..1 range. Both settings take
+ // effect on the next frame (the buffers are rebuilt).
+-CVAR(Int, rd_vk_scenefmt, 0, CVAR_ARCHIVE | CVAR_GLOBALCONFIG)
++// Default RGBA8: with bloom and tonemapping off (the Switch profiles) the image
++// on screen is the same, and translucent layers (Brutal Doom's smoke) blend at
++// full rate instead of the half rate and double traffic of RGBA16F.
++CVAR(Int, rd_vk_scenefmt, 2, CVAR_GLOBALCONFIG)
+ VkImageUsageFlags RDoom_DepthUsage(VkImageUsageFlags usage)
+ {
+ 	if (rd_vk_zcull)
+diff --git a/src/rendering/hwrenderer/scene/hw_sprites.cpp b/src/rendering/hwrenderer/scene/hw_sprites.cpp
+index 17ead2446..58de972b7 100644
+--- a/src/rendering/hwrenderer/scene/hw_sprites.cpp
++++ b/src/rendering/hwrenderer/scene/hw_sprites.cpp
+@@ -98,6 +98,10 @@ extern bool (*NXSpriteDrawableHook)(FGameTexture *gtex, int translation, int sca
+ //
+ //==========================================================================
+ 
++#ifdef __SWITCH__
++CVAR(Float, rd_sprite_alphacut, 0.02f, CVAR_ARCHIVE | CVAR_GLOBALCONFIG)
++#endif
++
+ void HWSprite::DrawSprite(HWDrawInfo *di, FRenderState &state, bool translucent)
+ {
+ 	// Switch: an image that is still being decoded (or waits for its upload)
+@@ -134,11 +138,20 @@ void HWSprite::DrawSprite(HWDrawInfo *di, FRenderState &state, bool translucent)
+ 		state.SetRenderStyle(RenderStyle);
+ 		state.SetTextureMode(RenderStyle);
+ 
++#ifdef __SWITCH__
++		// Switch: fragments that would add less than rd_sprite_alphacut of
++		// colour are discarded instead of blended - the empty borders of large
++		// smoke and fire sprites cost blending bandwidth for nothing
++		const float cut = clamp((float)rd_sprite_alphacut, 0.f, 0.1f);
++#else
++		const float cut = 0.f;
++#endif
+ 		if (hw_styleflags == STYLEHW_NoAlphaTest)
+ 		{
+-			state.AlphaFunc(Alpha_GEqual, 0.f);
++			state.AlphaFunc(Alpha_GEqual, cut);
+ 		}
+ 		else if (!texture || !texture->GetTranslucency()) state.AlphaFunc(Alpha_GEqual, gl_mask_sprite_threshold);
++		else if (cut > 0.f) state.AlphaFunc(Alpha_GEqual, cut);
+ 		else state.AlphaFunc(Alpha_Greater, 0.f);
+ 
+ 		if (RenderStyle.BlendOp == STYLEOP_Shadow)
+diff --git a/wadsrc/static/shaders/pp/upscale.fp b/wadsrc/static/shaders/pp/upscale.fp
+new file mode 100644
+index 000000000..06f680c50
+--- /dev/null
++++ b/wadsrc/static/shaders/pp/upscale.fp
+@@ -0,0 +1,16 @@
++/*
++** upscale.fp
++** Dynamic resolution (RDoom, Switch): the 3D view drawn into a smaller part
++** of the scene texture, stretched over the full view.
++**
++** SPDX-License-Identifier: GPL-3.0-or-later
++*/
++
++layout(location=0) in vec2 TexCoord;
++layout(location=0) out vec4 FragColor;
++layout(binding=0) uniform sampler2D SceneTexture;
++
++void main()
++{
++	FragColor = texture(SceneTexture, Offset + TexCoord * Scale);
++}
+-- 
+2.56.0
+

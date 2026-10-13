@@ -1,0 +1,4 @@
+[submodule "engine"]
+	path = engine
+	url = https://github.com/aeon1911/RDoom-NX-engine.git
+	branch = rdoom-nx

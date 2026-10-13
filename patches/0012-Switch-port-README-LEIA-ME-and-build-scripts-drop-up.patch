@@ -1,0 +1,2405 @@
+From 0a70d7619b2c296cd5adea365e35b07d6d0b6b89 Mon Sep 17 00:00:00 2001
+From: Aeon <171243930+aeon1911@users.noreply.github.com>
+Date: Wed, 30 Sep 2026 18:09:47 -0300
+Subject: [PATCH 12/46] Switch port README, LEIA-ME and build scripts; drop
+ upstream PC CI.
+
+- README.md describes the Switch port (upstream README moved to docs/).
+- nx/LEIA-ME.txt (package notes), nx/shadervariants.txt (fresh installs).
+- nx/build: build-switch.sh (devkitPro install), package.sh, build-libsndfile.sh
+  and toolchain-from-source/ (devkitA64 + libnx + portlibs from GitHub).
+- The upstream workflows build and publish PC releases; they don't apply here.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01Fn3j1bfp175Wf4L7hzf5y6
+---
+ .github/workflows/build_core.yml              | 483 ------------------
+ .github/workflows/continuous_integration.yml  | 476 -----------------
+ .github/workflows/pages_deploy.yml            | 100 ----
+ .github/workflows/pr_bot.yml                  | 206 --------
+ .github/workflows/release_core.yml            | 174 -------
+ .github/workflows/trigger_pages.yml           |  24 -
+ README.md                                     | 125 ++---
+ docs/README-UZDoom.md                         |  96 ++++
+ nx/LEIA-ME.txt                                | 184 +++++++
+ nx/build/README.md                            |  50 ++
+ nx/build/build-libsndfile.sh                  |  20 +
+ nx/build/build-switch.sh                      |  46 ++
+ nx/build/package.sh                           |  14 +
+ .../toolchain-from-source/build-portlibs.sh   | 102 ++++
+ .../toolchain-from-source/build-toolchain.sh  |  73 +++
+ .../toolchain-from-source/fetch-sources.sh    |  43 ++
+ nx/shadervariants.txt                         |  19 +
+ 17 files changed, 692 insertions(+), 1543 deletions(-)
+ delete mode 100644 .github/workflows/build_core.yml
+ delete mode 100644 .github/workflows/continuous_integration.yml
+ delete mode 100644 .github/workflows/pages_deploy.yml
+ delete mode 100644 .github/workflows/pr_bot.yml
+ delete mode 100644 .github/workflows/release_core.yml
+ delete mode 100644 .github/workflows/trigger_pages.yml
+ create mode 100644 docs/README-UZDoom.md
+ create mode 100644 nx/LEIA-ME.txt
+ create mode 100644 nx/build/README.md
+ create mode 100755 nx/build/build-libsndfile.sh
+ create mode 100755 nx/build/build-switch.sh
+ create mode 100755 nx/build/package.sh
+ create mode 100755 nx/build/toolchain-from-source/build-portlibs.sh
+ create mode 100755 nx/build/toolchain-from-source/build-toolchain.sh
+ create mode 100755 nx/build/toolchain-from-source/fetch-sources.sh
+ create mode 100644 nx/shadervariants.txt
+
+diff --git a/.github/workflows/build_core.yml b/.github/workflows/build_core.yml
+deleted file mode 100644
+index e83a0d7c0..000000000
+--- a/.github/workflows/build_core.yml
++++ /dev/null
+@@ -1,483 +0,0 @@
+-on:
+-  workflow_call:
+-    inputs:
+-      name:
+-        required: true
+-        type: string
+-      os:
+-        required: true
+-        type: string
+-      os_image:
+-        required: true
+-        type: string
+-      deps_cmdline:
+-        required: true
+-        type: string
+-      build_opts:
+-        required: true
+-        type: string
+-      extra_files:
+-        required: true
+-        type: string
+-        # s[n]   = output file
+-        # s[n+1] = resource sha256
+-        # s[n+2] = resource url
+-      build_type:
+-        required: true
+-        type: string
+-      environment:
+-        required: true
+-        type: string
+-    secrets:
+-      GPG_PRIVATE_KEY:
+-        required: false
+-      MACOS_CERTIFICATE:
+-        required: false
+-      MACOS_CERTIFICATE_PASSWORD:
+-        required: false
+-      MACOS_CERTIFICATE_ID:
+-        required: false
+-
+-jobs:
+-  run_build:
+-    name: ${{ inputs.name }} ${{ inputs.build_type }}
+-    runs-on: ${{ inputs.os }}
+-    environment: ${{ inputs.environment != '' && 'production' || '' }}
+-    container:
+-      image: ${{ inputs.os_image }}
+-      options: --device /dev/fuse --cap-add SYS_ADMIN --security-opt apparmor:unconfined
+-    defaults:
+-      run:
+-        shell: ${{ contains(inputs.name, 'MinGW') && 'msys2 {0}' || 'bash' }}
+-
+-    steps:
+-    - name: Dump Event
+-      shell: bash
+-      env:
+-        EVENT: ${{ toJson(github) }}
+-      run: echo "${EVENT}"
+-
+-    - name: Prepare Container
+-      if: runner.os == 'Linux'
+-      run: |
+-        # Containers are lean and may not have packages required by early steps
+-        elevated() { if [ "$EUID" -ne 0 ]; then sudo "$@"; else "$@"; fi; }
+-
+-        if which apt-get; then
+-          elevated apt-get -q update
+-          elevated apt-get -q install -y curl file git gh jq python3 sudo tree
+-        fi
+-        # fixed dubious ownership issue in a container
+-        git config --global --add safe.directory $GITHUB_WORKSPACE
+-
+-    # https://github.com/actions/runner-images/issues/14083
+-    - name: Install Winget
+-      if: inputs.os == 'windows-11-arm'
+-      shell: pwsh
+-      run: |
+-        Install-Module -Name Microsoft.WinGet.Client -Repository PSGallery -Force
+-        Repair-WinGetPackageManager -Latest -Force
+-        Write-Output "Winget Version: $(winget --version)"
+-        "C:\Users\runneradmin\AppData\Local\Microsoft\WinGet\Links" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+-
+-    - name: Checkout
+-      uses: actions/checkout@v6
+-      with:
+-        fetch-depth: 0
+-
+-    - name: Get Cache Ref
+-      id: key
+-      shell: bash
+-      run: |
+-        ref=${{ github.base_ref || github.ref }}
+-        main=${{ github.event.repository.master_branch || 'trunk' }}
+-        suffix="${{ inputs.name }}/${{ inputs.build_type }}"
+-        echo "ref: $ref"
+-        if [[ -z "${ref}" || "${ref}" == refs/* ]]; then
+-          refs=( $(git branch -r --contains ${{ github.sha }} | grep -v 'HEAD' | grep origin/ | sed 's/^[[:space:]]*origin\///' ) )
+-          count=${#refs[@]}
+-          if [[ ${count} == 0 ]]; then
+-            ref=${main}
+-          elif [[ ${count} == 1 ]]; then
+-            ref=${refs[0]}
+-          else
+-            for ((i=0; i<count; i++)); do
+-              if [[ ${refs[i]} == ${main} ]]; then break; fi
+-            done
+-            if [[ ! ${i} < ${count} ]]; then i=0; fi
+-            ref=${refs[i]}
+-          fi
+-        fi
+-        function key() { echo "$1=$2/${suffix// /_}" | tee -a "$GITHUB_OUTPUT" ; }
+-        key primary $ref
+-        key secondary $main
+-
+-    - name: Restore Cache
+-      if:
+-      id: cache
+-      uses: actions/cache/restore@v5
+-      with:
+-        path: .cache
+-        key: ${{ steps.key.outputs.primary }}
+-        restore-keys: ${{ steps.key.outputs.secondary }}
+-
+-    - name: Test Cache
+-      id: cached
+-      shell: bash
+-      run: |
+-        if [[ "${{ steps.cache.conclusion }}" == "skipped" ]]; then
+-          status=skipped
+-        elif [[ ${{github.run_attempt}} != 1 ]]; then
+-          status=dropped
+-        elif [[ -z "${{ steps.cache.outputs.cache-hit }}" ]]; then
+-          status=missing
+-        else
+-          status=okay
+-        fi
+-        echo "status=${status}" | tee -a "$GITHUB_OUTPUT"
+-        if [[ "${status}" != "okay" ]]; then
+-          echo "Clearing cache"
+-          rm -rf .cache
+-        fi
+-        # use this condition to enable saving cache
+-
+-        # TODO: add override for the ref_name check
+-        if [[ "${status}" != 'skipped' && "${{github.event_name}}" != 'pull_request' \
+-          && "${{github.ref_name}}" == "${{github.event.repository.default_branch}}" && "${{github.ref_type}}" == 'branch' ]]; then
+-          echo "save=yes" | tee -a "$GITHUB_OUTPUT"
+-          if [[ "${status}" != 'missing' && \
+-          "${{steps.cache.outputs.cache-primary-key}}" == "${{steps.cache.outputs.cache-matched-key}}" ]]; then
+-            echo "clear=yes" | tee -a "$GITHUB_OUTPUT"
+-          fi
+-        fi
+-
+-    - name: Setup MSVC
+-      if: runner.os == 'Windows' && !contains(inputs.name, 'MinGW')
+-      uses: ilammy/msvc-dev-cmd@v1 # FIXME: update this
+-
+-    - name: Setup MSYS2
+-      if: runner.os == 'Windows' && contains(inputs.name, 'MinGW')
+-      uses: msys2/setup-msys2@v2
+-      with:
+-        msystem: MINGW64
+-        update: true
+-
+-    - name: Dependencies
+-      env:
+-        DEPS_COMMAND: ${{ inputs.deps_cmdline }}
+-        EXTRA_FILES: ${{ inputs.extra_files }}
+-      run: |
+-        mkdir -p build
+-        mkdir -p .cache/files && cd .cache/files
+-
+-        attempt() (
+-          set +e
+-          local cmd="$*"
+-          local delay=10
+-          for i in {1..4}; do
+-            echo "Running: $cmd"
+-            bash -c "$cmd" &
+-            local cmd_pid=$!
+-
+-            ( sleep 1200 ; kill -9 "$cmd_pid" 2>&1 ; ) &
+-            local watchdog_pid=$!
+-
+-            wait "$cmd_pid" 2>&1
+-            local exit_code=$?
+-
+-            kill "$watchdog_pid" 2>&1
+-            wait "$watchdog_pid" 2>&1
+-
+-            [ $exit_code -eq 0 ] && return 0
+-            echo "::notice ::Attempt $i failed. Retrying in ${delay}s" >&2
+-            sleep "${delay}"
+-            ((delay*=3))
+-          done
+-          return 1
+-        )
+-
+-        echo ::group::Files
+-        files=( $EXTRA_FILES )
+-        for ((i=2;i<=${#files[@]};i+=3)); do
+-          file="${files[i-2]}"
+-          hash="${files[i-1]}"
+-          addr="${files[i]}"
+-          download="curl -fL '${addr}' | tee '${file}' | sha256sum"
+-          if [[ "${hash}" == '-' ]]; then
+-            echo "::warning ::Skipping Checksum for ${file}"
+-            verify="true"
+-          else
+-            verify="echo '${hash} ${file}' | sha256sum -c -"
+-            if [ -f "$file" ]; then
+-              printf 'found: %s\n' "$(sha256sum "${file}")"
+-              if $verify ; then
+-                echo Skipping
+-                continue
+-              else
+-                echo Downloading
+-                rm "${file}"
+-              fi
+-            fi
+-          fi
+-          attempt "set -o pipefail; { $download ; } && { $verify ; }"
+-        done
+-        echo ::endgroup::
+-
+-        echo ::group::Command
+-        command=( $DEPS_COMMAND )
+-        command="${command[*]}"
+-        if [[ -n "$command" ]]; then
+-          attempt "$command"
+-        fi
+-        echo ::endgroup::
+-
+-        echo ::group::List
+-        shopt -s nullglob
+-        cp * ../../build || true
+-        cd ../..
+-        git status || true
+-        find build -ls || true
+-        echo ::endgroup::
+-
+-    - name: Build
+-      env:
+-        BUILD_TYPE: ${{ inputs.build_type }}
+-        BUILD_OPTS: ${{ inputs.build_opts }}
+-      run: |
+-        echo ::group::Cache Inspect
+-        export CCACHE_COMPRESSLEVEL=5
+-        export CCACHE_DIR="$PWD/.cache/ccache"
+-        ccache -v
+-        ccache -s
+-        ccache -p
+-        SECONDS=0
+-        echo ::endgroup::
+-
+-        echo ::group::Configure
+-        cmake \
+-          -B build \
+-          -S . \
+-          -G Ninja \
+-          -D PK3_QUIET_ZIPDIR=ON \
+-          -D CMAKE_C_COMPILER_LAUNCHER=ccache \
+-          -D CMAKE_CXX_COMPILER_LAUNCHER=ccache \
+-          -D USE_PCH=OFF \
+-          -D CMAKE_BUILD_TYPE=$BUILD_TYPE \
+-          $BUILD_OPTS
+-        echo ::endgroup::
+-
+-        echo ::group::Configure Inspect
+-        cat build/CMakeCache.txt | grep -Ev '^$|^[#/]'
+-        echo ::endgroup::
+-
+-        echo ::group::Build
+-        cmake --build build --config $BUILD_TYPE
+-        echo ::endgroup::
+-
+-        echo ::group::Cache Stats
+-        ccache --evict-older-than $((SECONDS+10))s
+-        ccache -s
+-        echo ::endgroup::
+-
+-    - name: Pre Package
+-      id: package
+-      shell: bash
+-      working-directory: build
+-      run: |
+-        mkdir package
+-        7z a package/licenses.zip ../docs/licenses/*
+-
+-        echo "name=${{ runner.os }}-$(uname -m)-UZDoom-$(git describe --tags --exclude x-*)" | tee -a "$GITHUB_OUTPUT"
+-
+-    - name: Package Windows
+-      if: runner.os == 'Windows'
+-      shell: bash
+-      working-directory: build
+-      env:
+-        NAME: ${{ steps.package.outputs.name }}
+-      run: |
+-        function unzip_to_package() {
+-          if [[ ! -f "$1" ]]; then
+-            echo "skipping $1"
+-            return
+-          fi
+-          f=$(unzip -l "$1" | awk -v pattern="$2" '$0 ~ pattern {print $NF; exit}')
+-          echo "$1: $f"
+-          unzip -j "$1" "$f" -d package
+-        }
+-        unzip_to_package oalsoft.zip 'bin/Win64/soft_oal.dll$'
+-        unzip_to_package sndfile.zip 'bin/sndfile.dll$'
+-        unzip_to_package libcurl.zip 'bin/libcurl.*.dll$'
+-
+-        rm -rf soundfonts fm_banks
+-
+-        mkdir -p package/soundfonts
+-        cp -f ../soundfont/uzdoom.sf2 package/soundfonts
+-
+-        mkdir -p package/fm_banks
+-        cp -f ../fm_banks/GENMIDI.GS.wopl ../fm_banks/gs-by-papiezak-and-sneakernets.wopn package/fm_banks
+-
+-        shopt -s nullglob
+-        mv -f *.exe *.pk3 *.pdb package
+-
+-        cd package
+-        7z a -sdel -r "${NAME}.zip" *
+-        cd ..
+-
+-    - name: Package macOS
+-      if: runner.os == 'macOS'
+-      shell: bash
+-      working-directory: build
+-      env:
+-        NAME: ${{ steps.package.outputs.name }}
+-      run: |
+-        if [[ ! -d uzdoom.app ]] && [[ -d ${{ inputs.build_type }}/uzdoom.app ]]; then
+-          mv ${{ inputs.build_type }}/uzdoom.app uzdoom.app
+-        fi
+-
+-        app=UZDoom.app
+-        mv uzdoom.app ${app}
+-        mv package/licenses.zip ${app}/Contents/Resources
+-
+-        if dsymutil ${app}/Contents/MacOS/uzdoom; then
+-          mv ${app}/Contents/MacOS/uzdoom.dSYM ${app}/Contents/Resources/
+-        fi
+-
+-        SIGN_ID="-"
+-        SIGN_OPTS=""
+-
+-        if [[ -n "${{ secrets.MACOS_CERTIFICATE }}" ]]; then
+-          echo "${{ secrets.MACOS_CERTIFICATE }}" | base64 --decode > certificate.p12
+-          security create-keychain -p "" build.keychain
+-          security default-keychain -s build.keychain
+-          security unlock-keychain -p "" build.keychain
+-          security import certificate.p12 -k build.keychain -P "${{ secrets.MACOS_CERTIFICATE_PASSWORD }}" -T /usr/bin/codesign
+-          security set-key-partition-list -S apple-tool:,apple: -s -k "" build.keychain
+-
+-          SIGN_ID="${{ secrets.MACOS_CERTIFICATE_ID }}"
+-          SIGN_OPTS="--options=runtime"
+-        else
+-          echo "::warning ::Self-signing application"
+-        fi
+-
+-        mkdir -p ${app}/Contents/Frameworks
+-        cp -L $(brew --prefix sdl3)/lib/libSDL3.dylib ${app}/Contents/Frameworks/libSDL3.dylib
+-        cp $(brew --prefix molten-vk)/lib/libMoltenVK.dylib ${app}/Contents/Frameworks/
+-        dylibbundler -ns -of -cd -b \
+-          -x ./${app}/Contents/MacOS/uzdoom \
+-          -d ./${app}/Contents/Frameworks \
+-          -p @executable_path/../Frameworks/
+-
+-        xattr -cr ${app}
+-
+-        find ${app}/Contents/Frameworks -type f -name "*.dylib" -print0 | while IFS= read -r -d '' file; do
+-          codesign --remove-signature "$file"
+-          codesign --force $SIGN_OPTS -s "$SIGN_ID" "$file"
+-        done
+-
+-        /usr/bin/codesign --force --deep $SIGN_OPTS -s "$SIGN_ID" ${app} -v
+-
+-        $(brew --prefix python)/bin/python3 -m venv venv
+-        source venv/bin/activate
+-        pip install dmgbuild
+-        dmgbuild -s ../tools/dmgbuild-settings.py -D app=${app} "UZDoom" UZDoom.dmg
+-        mv UZDoom.dmg package
+-
+-        cd ..
+-
+-    - name: Package Linux
+-      if: runner.os == 'Linux'
+-      shell: bash
+-      working-directory: build
+-      env:
+-        NAME: ${{ steps.package.outputs.name }}
+-        OWNER: ${{ github.repository_owner }}
+-        REPO: ${{ github.event.repository.name }}
+-        TAG: ${{ inputs.environment == 'stable' && 'latest' || 'latest-pre' }}
+-      run: |
+-        ldd uzdoom
+-
+-        appdir=AppDir
+-        pfx=$(realpath $appdir)/usr
+-        arch=$(uname -m)
+-        mkdir $appdir
+-
+-        cmake --install . --prefix "${pfx}"
+-
+-        # this is actually in the correct place, but the appimage linter complains
+-        # copying it for now, just in case some tooling wants it there
+-        mv "${pfx}/share/metainfo/org.zdoom.UZDoom.metainfo.xml" "${pfx}/share/metainfo/org.zdoom.UZDoom.appdata.xml"
+-
+-        # cleanup
+-        {
+-          find "${pfx}" -type f \( -iname \*.a -o -iname \*.h -o -iname \*.cmake \) -print -delete
+-          find "${pfx}" -type d -empty -delete -print
+-        } | xargs printf 'deleting: %s\n'
+-
+-        # https://github.com/linuxdeploy/linuxdeploy-plugin-appimage
+-        export LDAI_UPDATE_INFORMATION="gh-releases-zsync|${OWNER}|${REPO}|${TAG}|Linux-UZDoom-*-${arch}.AppImage.zsync"
+-        export LDAI_RUNTIME_FILE=./appimage-runtime
+-
+-        # our metainfo file is correct, but for some reason the checker crashes on it
+-        export LDAI_NO_APPSTREAM=1
+-
+-        if [[ -n "${{ secrets.GPG_PRIVATE_KEY }}" ]]; then
+-          export LDAI_SIGN=1
+-          echo "${{ secrets.GPG_PRIVATE_KEY }}" | gpg --import
+-        else
+-          echo "::warning ::Not signing"
+-        fi
+-
+-        function library() { ldconfig -p | grep -F $1 | head -1 | awk '{print $NF}' ; }
+-
+-        chmod +x linuxdeploy
+-        ./linuxdeploy --output appimage \
+-          --appdir $appdir \
+-          --executable="${pfx}/bin/uzdoom" \
+-          --desktop-file="${pfx}/share/applications/org.zdoom.UZDoom.desktop" \
+-          --library "$(library libopenal.so.)" \
+-          --icon-file="${pfx}/share/icons/hicolor/scalable/apps/org.zdoom.UZDoom.svg"
+-
+-        mv *.AppImage "package/${NAME}.AppImage"
+-        mv *.zsync "package/${NAME}.AppImage.zsync"
+-
+-        rm package/licenses.zip
+-
+-    - name: List
+-      if: always()
+-      shell: bash
+-      run: |
+-        git status || true
+-        find build -ls || true
+-
+-    - name: Upload Artifact
+-      uses: actions/upload-artifact@v7
+-      with:
+-        path: build/package
+-        name: ${{ inputs.name }} ${{ inputs.build_type }}
+-
+-    - name: Prepare Cache
+-      if: steps.cached.outputs.save == 'yes'
+-      env:
+-        GH_TOKEN: ${{ github.token }}
+-        REPO: ${{ github.repository }}
+-        KEY: ${{steps.cache.outputs.cache-primary-key}}
+-      shell: bash
+-      run: |
+-        # https://github.com/actions/cache/issues/342
+-        if [[ "${{ steps.cached.outputs.clear }}" == 'yes' ]]; then
+-          echo ::group::Delete-Remote
+-          if ! err=$(gh api --method DELETE "/repos/${REPO}/actions/caches?key=${KEY}"); then
+-            echo "$err" >&2
+-            echo "::warning ::$(jq -r .message <<<$err)"
+-          fi
+-          sleep 5
+-          echo ::endgroup::
+-        fi
+-
+-    - name: Save Cache
+-      if: steps.cached.outputs.save == 'yes'
+-      uses: actions/cache/save@v5
+-      with:
+-        path: .cache
+-        key: ${{steps.cache.outputs.cache-primary-key}}
+diff --git a/.github/workflows/continuous_integration.yml b/.github/workflows/continuous_integration.yml
+deleted file mode 100644
+index 2d1aa0dec..000000000
+--- a/.github/workflows/continuous_integration.yml
++++ /dev/null
+@@ -1,476 +0,0 @@
+-name: Continuous Integration
+-
+-on: [push, pull_request]
+-
+-permissions:
+-  contents: write
+-  actions: write
+-
+-jobs:
+-  ci-init:
+-    if: ${{ ! startsWith(github.event.ref, 'refs/tags/x-') }}
+-    runs-on: ubuntu-latest
+-    name: CI Init
+-    outputs:
+-      url: ${{ steps.details.outputs.url }}
+-      tag: ${{ steps.tag.outputs.tag }}
+-      mode: ${{ steps.emit.outputs.mode }}
+-      branch: ${{ steps.branch.outputs.branch || steps.tag.outputs.branch }}
+-      primary: ${{ steps.branch.outputs.primary }}
+-    steps:
+-      - id: details
+-        shell: bash
+-        env:
+-          EVENT: ${{ toJson(github) }}
+-        run: |
+-          echo "${EVENT}"
+-          echo "url=${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}" | tee -a "$GITHUB_OUTPUT"
+-
+-      - name: Branch
+-        id: branch
+-        if: ${{ vars.PUBLISH_RELEASES && github.ref_type == 'branch' }}
+-        run: |
+-          branch="${{ github.ref_name }}"
+-          case "$branch" in
+-            trunk) mode=preview ;;
+-            experimental) mode=experimental ;;
+-          esac
+-          if [[ "$branch" == 'trunk' ]] || [[ "$branch" =~ ^[0-9]+\.[0-9]+$ ]]; then
+-            primary=true
+-          fi
+-          echo "mode=$mode" | tee -a "$GITHUB_OUTPUT"
+-          echo "branch=$branch" | tee -a "$GITHUB_OUTPUT"
+-          echo "primary=$primary" | tee -a "$GITHUB_OUTPUT"
+-
+-      - name: Checkout
+-        if: ${{ github.ref_type == 'tag' }}
+-        uses: actions/checkout@v6
+-        with:
+-          fetch-depth: 0
+-
+-      - name: Tag
+-        id: tag
+-        if: ${{ github.ref_type == 'tag' }}
+-        run: |
+-          tag="${{ github.ref_name }}"
+-          if [[ "$tag" =~ ^([0-9]+\.[0-9]+)\.[0-9]+-? ]]; then
+-            branch="${BASH_REMATCH[1]}"
+-            if git merge-base --is-ancestor "$tag" "origin/$branch"; then
+-              mode=stable
+-            fi
+-          fi
+-          echo "tag=$tag" | tee -a "$GITHUB_OUTPUT"
+-          echo "mode=$mode" | tee -a "$GITHUB_OUTPUT"
+-          echo "branch=$branch" | tee -a "$GITHUB_OUTPUT"
+-
+-      - name: Ready
+-        id: emit
+-        run: |
+-          mode=${{ steps.branch.outputs.mode || steps.tag.outputs.mode }}
+-          if [[ "${{ vars.PUBLISH_RELEASES }}" ]]; then
+-            if [[ -n "$mode" ]]; then
+-              echo "::notice::This build will be a '$mode' release"
+-            else
+-              echo "::notice::No release will be created for this build"
+-            fi
+-          else
+-            echo "::notice::This repos has PUBLISH_RELEASES disabled"
+-            mode=
+-          fi
+-          echo "mode=$mode" | tee -a "$GITHUB_OUTPUT"
+-
+-  ci-success:
+-    needs:
+-      - debinfo
+-      - extra
+-      - lint-appstream
+-      - ci-init
+-    runs-on: ubuntu-latest
+-    name: CI Success
+-    steps:
+-      - name: Check Status
+-        run: |
+-          [[ "${{ contains(needs.*.result, 'failure') }}" == "false" ]] || exit 1
+-          [[ "${{ contains(needs.*.result, 'cancelled') }}" == "false" ]] || exit 1
+-
+-# ======================
+-# Release Configuration
+-# ======================
+-
+-  ci-release-preview:
+-    name: Preview
+-    needs:
+-      - release
+-      - ci-init
+-    if: ${{ needs.ci-init.outputs.mode == 'preview' }}
+-    uses: ./.github/workflows/release_core.yml
+-    secrets: inherit
+-    with:
+-      title: Preview
+-      run-id: ${{ github.run_id }}
+-      run-url: ${{ needs.ci-init.outputs.url }}
+-      commit: ${{ github.sha }}
+-      branch: ${{ needs.ci-init.outputs.branch }}
+-      tag-name: x-preview
+-      message: They are development builds, so they may be unstable and have issues. Please report any problems you find.
+-      preview: true
+-
+-  ci-release-experimental:
+-    name: Experimental
+-    needs:
+-      - release
+-      - ci-init
+-    if: ${{ needs.ci-init.outputs.mode == 'experimental' }}
+-    uses: ./.github/workflows/release_core.yml
+-    secrets: inherit
+-    with:
+-      title: Experimental
+-      run-id: ${{ github.run_id }}
+-      run-url: ${{ needs.ci-init.outputs.url }}
+-      commit: ${{ github.sha }}
+-      branch: ${{ needs.ci-init.outputs.branch }}
+-      tag-name: x-testing
+-      message: ⚠️ They are experimental development builds, specifically to test upcoming features. **Use at your own risk**.
+-      label-name: experimental
+-      preview: true
+-
+-  ci-release-stable:
+-    name: Stable
+-    needs:
+-      - release
+-      - ci-init
+-    if: ${{ needs.ci-init.outputs.mode == 'stable' }}
+-    uses: ./.github/workflows/release_core.yml
+-    secrets: inherit
+-    with:
+-      title: Release
+-      run-id: ${{ github.run_id }}
+-      run-url: ${{ needs.ci-init.outputs.url }}
+-      commit: ${{ github.sha }}
+-      branch: ${{ needs.ci-init.outputs.branch }}
+-      tag-name: ${{ needs.ci-init.outputs.tag }}
+-      message: Release Draft
+-      preview: false
+-
+-# ======================
+-# Other Checks
+-# ======================
+-
+-  lint-appstream:
+-    needs:
+-    - ci-init
+-    runs-on: ubuntu-latest
+-    container:
+-      image: ghcr.io/flathub/flatpak-builder-lint:latest
+-    name: Lint Appstream
+-    steps:
+-      - uses: actions/checkout@v6
+-        with:
+-          fetch-depth: 0
+-          ref: ${{ github.ref }}
+-      - run: |
+-          file=src/posix/freedesktop/org.zdoom.UZDoom.metainfo.xml
+-          # These are here twice. First is to get nice output, second is to not make ci fail if network access fails
+-          flatpak-builder-lint --gha-format appstream $file || true
+-          AS_VALIDATE_NONET=1 flatpak-builder-lint appstream $file
+-
+-  update-version:
+-    needs:
+-    - ci-init
+-    runs-on: ubuntu-latest
+-    name: Check for version change
+-    if: ${{ needs.ci-init.outputs.primary == 'true' && github.event_name == 'push' }}
+-    steps:
+-      - uses: actions/checkout@v6
+-        with:
+-          token: ${{ secrets.TAGGER_PAT || '' }}
+-          fetch-depth: 0
+-      - run: |
+-          # Check if version.h has VERSIONSTR updated, and push that as a tag if so
+-          BEFORE="${{ github.event.before }}"
+-          AFTER="${{ github.event.after }}"
+-
+-          info=()
+-          function log() { echo "$1"; info+=("$1"); }
+-          function version() { # grab value of #defined string $1
+-            grep -m1 -iE '^\+?\s*#define\s+'"$1" | sed -E 's/.*\s'$1'\s+"([^"]+)"/\1/'
+-          }
+-          function parent() {
+-            git rev-parse --verify -q "$1" >/dev/null || { echo unknown $1; return 1; }
+-            git merge-base "$1" "$AFTER" >/dev/null || { echo out-of-tree $1; return 1; }
+-          }
+-
+-          if ! parent "$BEFORE"; then
+-            BEFORE=$(git rev-parse --verify -q "${AFTER}~1" || echo "$AFTER")
+-            parent "$BEFORE" || BEFORE="$AFTER"
+-          fi
+-          BEFORE=$(git merge-base "$BEFORE" "$AFTER" || echo "$BEFORE")
+-
+-          VERSION=$(git diff "$BEFORE" "$AFTER" -- src/version.h | version VERSIONSTR)
+-          printf '%s..%s:%s;\n' "$BEFORE" "$AFTER" "$VERSION"
+-
+-          if [[ -n "$VERSION" ]]; then
+-            log "Version updated: $VERSION"
+-            while read -r commit; do
+-              version=$(git show "$commit" -- src/version.h | version VERSIONSTR)
+-              printf ' - %s %s\n' "$commit" "$version"
+-              if [[ "$version" == "$VERSION" ]]; then
+-                COMMIT="$commit"
+-                break
+-              fi
+-            done < <(git rev-list $BEFORE..$AFTER)
+-          fi
+-
+-          if [[ -n "$COMMIT" ]]; then
+-            log "Commit: $COMMIT"
+-            if git rev-parse --verify -q "refs/tags/$VERSION"; then
+-              log "Tag already exists"
+-            elif ! git tag "$VERSION" "$COMMIT"; then
+-              log "Failed to tag commit"
+-            elif ! git push origin "refs/tags/$VERSION"; then
+-              log "Failed to push tag"
+-            else
+-              log "Successfully tagged $COMMIT with $VERSION"
+-            fi
+-          fi
+-
+-          if [[ ${#info[@]} -gt 0 ]]; then
+-            printf "::notice::%s\n" "$(printf "%s%%0A" "${info[@]}")"
+-          fi
+-
+-# ======================
+-# Primary Build Configuration
+-# ======================
+-
+-  debinfo:
+-    needs:
+-    - ci-init
+-    name: ${{ matrix.config.name }} ${{ matrix.config.build_type }}
+-    uses: ./.github/workflows/build_core.yml
+-    secrets: inherit
+-    with:
+-      build_type: RelWithDebInfo
+-      name: ${{ matrix.config.name }}
+-      os: ${{ matrix.config.os }}
+-      os_image: ${{ matrix.config.os_image || '' }}
+-      build_opts: ${{ matrix.config.build_opts }} ${{ matrix.config.build_opts_extra }}
+-      deps_cmdline: ${{ matrix.config.deps_cmdline }}
+-      extra_files: ${{ matrix.config.extra_files }}
+-      environment: ${{ needs.ci-init.outputs.mode }}
+-    strategy:
+-      fail-fast: false
+-      matrix:
+-        # these are shared between multiple build configs
+-        config: &common_config
+-          - name: Windows
+-            os: windows-latest
+-            build_opts: &msvc_opts -DCMAKE_C_COMPILER=cl -DCMAKE_CXX_COMPILER=cl -DUSE_UPDATER=ON
+-            build_opts_extra: ""
+-            deps_cmdline: &msvc_deps >-
+-              winget install --accept-source-agreements --verbose --exact --id=Ccache.Ccache
+-            extra_files: &msvc_x86_files >-
+-              oalsoft.zip
+-                ea8bc36fd7fa05f64e13400d20886de753a227202a4ea3781913489a26b36fc6
+-                https://github.com/kcat/openal-soft/releases/download/1.23.1/openal-soft-1.23.1-bin.zip
+-              sndfile.zip
+-                2173935c0c1ed13cf627951d34483f9d405ead2eb473190461c42ba220643a3f
+-                https://github.com/libsndfile/libsndfile/releases/download/1.2.2/libsndfile-1.2.2-win64.zip
+-              libcurl.zip
+-                d290b4ee475968b04dcb2e0c4f046f2ff25c35c65d3e54259cef7cc6cea069e2
+-                https://curl.se/windows/dl-8.20.0_5/curl-8.20.0_5-win64-mingw.zip
+-
+-          - name: MacOS
+-            os: macos-latest
+-            build_opts: &mac_opts -DHAVE_VULKAN=ON -DHAVE_GLES2=OFF -DDYN_OPENAL=OFF -DDYN_SNDFILE=OFF
+-            build_opts_extra: -DOPENAL_INCLUDE_DIR=/opt/homebrew/opt/openal-soft/include/AL -DOPENAL_LIBRARY=/opt/homebrew/opt/openal-soft/lib/libopenal.dylib
+-            deps_cmdline: &mac_deps >-
+-              brew install
+-                dylibbundler
+-                fluid-synth
+-                openal-soft
+-                vulkan-volk
+-                molten-vk
+-                ccache
+-                libvpx
+-                sdl2
+-            extra_files: ""
+-
+-          - name: Linux
+-            os: ubuntu-latest
+-            os_image: debian:oldstable # use debian/ubuntu distro with oldest glibc, which supports the needed toolchain
+-            build_opts: &linux_opts
+-            build_opts_extra: -DCMAKE_C_COMPILER=clang-19 -DCMAKE_CXX_COMPILER=clang++-19
+-            deps_cmdline: &linux_deps >-
+-              sudo apt-get -q install -y
+-                libopenal-dev
+-                waylandpp-dev
+-                libsdl2-dev
+-                libwebp-dev
+-                libbz2-dev
+-                libvpx-dev
+-                gtk-update-icon-cache
+-                libfile-mimeinfo-perl
+-                desktop-file-utils
+-                build-essential
+-                ninja-build
+-                p7zip-full
+-                appstream
+-                clang-19
+-                ccache
+-                cmake
+-                fuse
+-            extra_files: &linux_files_x86_64 >-
+-              linuxdeploy
+-                c20cd71e3a4e3b80c3483cef793cda3f4e990aca14014d23c544ca3ce1270b4d
+-                https://github.com/linuxdeploy/linuxdeploy/releases/download/1-alpha-20251107-1/linuxdeploy-x86_64.AppImage
+-              linuxdeploy-plugin-appimage
+-                992d502a248e14ab185448ddf6f6e7d25558cb84d4623c354c3af350c25fccb3
+-                https://github.com/linuxdeploy/linuxdeploy-plugin-appimage/releases/download/1-alpha-20250213-1/linuxdeploy-plugin-appimage-x86_64.AppImage
+-              appimage-runtime
+-                2fca8b443c92510f1483a883f60061ad09b46b978b2631c807cd873a47ec260d
+-                https://github.com/AppImage/type2-runtime/releases/download/20251108/runtime-x86_64
+-
+-  extra:
+-    needs:
+-    - ci-init
+-    name: ${{ matrix.config.name }}
+-    uses: ./.github/workflows/build_core.yml
+-    secrets: inherit
+-    with:
+-      name: ${{ matrix.config.name }}
+-      os: ${{ matrix.config.os }}
+-      os_image: ${{ matrix.config.os_image || '' }}
+-      build_opts: ${{ matrix.config.build_opts }} ${{ matrix.config.build_opts_extra }}
+-      deps_cmdline: ${{ matrix.config.deps_cmdline }}
+-      build_type: ${{ matrix.config.build_type }}
+-      extra_files: ${{ matrix.config.extra_files }}
+-      environment: ${{ needs.ci-init.outputs.mode }}
+-    strategy:
+-      fail-fast: false
+-      matrix:
+-        config: # put bespoke configs here
+-          - name: Linux GCC # I'm just here to make sure GCC doesn't break
+-            os: ubuntu-latest
+-            os_image: ubuntu:latest
+-            build_opts: *linux_opts
+-            build_opts_extra: ""
+-            deps_cmdline: *linux_deps
+-            extra_files: *linux_files_x86_64
+-            build_type: RelWithDebInfo
+-
+-          - name: Windows MinGW GCC
+-            os: windows-latest
+-            build_opts: -DCMAKE_C_COMPILER=gcc -DCMAKE_CXX_COMPILER=g++
+-            build_opts_extra: -DFORCE_NO_LTO=true
+-            deps_cmdline: &mingw_deps |
+-              pacman -S --noconfirm --needed
+-                mingw-w64-x86_64-ccache
+-                mingw-w64-x86_64-openal
+-                mingw-w64-x86_64-libvpx
+-                mingw-w64-x86_64-cmake
+-                mingw-w64-x86_64-ninja
+-                mingw-w64-x86_64-bzip2
+-                mingw-w64-x86_64-clang
+-                mingw-w64-x86_64-gcc
+-                mingw-w64-x86_64-git
+-            extra_files: ""
+-            build_type: RelWithDebInfo
+-
+-  optional:
+-    needs:
+-    - ci-init
+-    - ci-success
+-    name: ${{ matrix.config.name }}
+-    uses: ./.github/workflows/build_core.yml
+-    secrets: inherit
+-    with:
+-      name: ${{ matrix.config.name }}
+-      os: ${{ matrix.config.os }}
+-      os_image: ${{ matrix.config.os_image || '' }}
+-      build_opts: ${{ matrix.config.build_opts }} ${{ matrix.config.build_opts_extra }}
+-      deps_cmdline: ${{ matrix.config.deps_cmdline }}
+-      build_type: ${{ matrix.config.build_type }}
+-      extra_files: ${{ matrix.config.extra_files }}
+-      environment: ${{ needs.ci-init.outputs.mode }}
+-    strategy:
+-      fail-fast: false
+-      matrix:
+-        config: # put bespoke configs here
+-          - name: Windows ARM (Testing)
+-            os: windows-11-arm
+-            build_opts: *msvc_opts
+-            build_opts_extra: ""
+-            deps_cmdline: *msvc_deps
+-            extra_files: ""
+-            build_type: RelWithDebInfo
+-
+-          - name: Windows MinGW Clang
+-            os: windows-latest
+-            build_opts: -DCMAKE_C_COMPILER=clang -DCMAKE_CXX_COMPILER=clang++
+-            build_opts_extra: ""
+-            deps_cmdline: *mingw_deps
+-            extra_files: ""
+-            build_type: RelWithDebInfo
+-
+-          - name: Linux ARM (Testing)
+-            os: ubuntu-24.04-arm
+-            build_opts: *linux_opts
+-            build_opts_extra: -DCMAKE_C_COMPILER=clang -DCMAKE_CXX_COMPILER=clang++
+-            deps_cmdline: *linux_deps
+-            extra_files: &linux_files_aarch64 >-
+-              linuxdeploy
+-                620095110d693282b8ebeb244a95b5e911cf8f65f76c88b4b47d16ae6346fcff
+-                https://github.com/linuxdeploy/linuxdeploy/releases/download/1-alpha-20251107-1/linuxdeploy-aarch64.AppImage
+-              linuxdeploy-plugin-appimage
+-                83c292149274965a865dcd44c135cfca8ba28c6b7de3eb628d4b8b5f248af17c
+-                https://github.com/linuxdeploy/linuxdeploy-plugin-appimage/releases/download/1-alpha-20250213-1/linuxdeploy-plugin-appimage-aarch64.AppImage
+-              appimage-runtime
+-                00cbdfcf917cc6c0ff6d3347d59e0ca1f7f45a6df1a428a0d6d8a78664d87444
+-                https://github.com/AppImage/type2-runtime/releases/download/20251108/runtime-aarch64
+-            build_type: RelWithDebInfo
+-
+-# ======================
+-# Secondary Build Configuration
+-# ======================
+-
+-  release:
+-    needs:
+-    - ci-init
+-    - ci-success
+-    name: ${{ matrix.config.name }} ${{ matrix.config.build_type }}
+-    uses: ./.github/workflows/build_core.yml
+-    secrets: inherit
+-    with:
+-      build_type: Release
+-      name: ${{ matrix.config.name }}
+-      os: ${{ matrix.config.os }}
+-      os_image: ${{ matrix.config.os_image || '' }}
+-      build_opts: ${{ matrix.config.build_opts }} ${{ matrix.config.build_opts_extra }}
+-      deps_cmdline: ${{ matrix.config.deps_cmdline }}
+-      extra_files: ${{ matrix.config.extra_files }}
+-      environment: ${{ needs.ci-init.outputs.mode }}
+-    strategy:
+-      fail-fast: false
+-      matrix:
+-        config: *common_config
+-
+-  debug:
+-    needs:
+-    - ci-init
+-    - ci-success
+-    name: ${{ matrix.config.name }} ${{ matrix.config.build_type }}
+-    uses: ./.github/workflows/build_core.yml
+-    secrets: inherit
+-    with:
+-      build_type: Debug
+-      name: ${{ matrix.config.name }}
+-      os: ${{ matrix.config.os }}
+-      os_image: ${{ matrix.config.os_image || '' }}
+-      build_opts: ${{ matrix.config.build_opts }} ${{ matrix.config.build_opts_extra }}
+-      deps_cmdline: ${{ matrix.config.deps_cmdline }}
+-      extra_files: ${{ matrix.config.extra_files }}
+-      environment: ${{ needs.ci-init.outputs.mode }}
+-    strategy:
+-      fail-fast: false
+-      matrix:
+-        config: *common_config
+diff --git a/.github/workflows/pages_deploy.yml b/.github/workflows/pages_deploy.yml
+deleted file mode 100644
+index 28db6d44d..000000000
+--- a/.github/workflows/pages_deploy.yml
++++ /dev/null
+@@ -1,100 +0,0 @@
+-name: Pages Deployment
+-
+-on:
+-  workflow_dispatch:
+-
+-permissions:
+-  contents: read
+-  pages: write
+-  id-token: write
+-  actions: read
+-
+-concurrency:
+-  group: "pages"
+-  cancel-in-progress: true
+-
+-jobs:
+-  build_matrix:
+-    runs-on: ubuntu-latest
+-    name: Build matrix of refs to document
+-    outputs:
+-      json_refs: ${{ steps.generate-matrix.outputs.json_refs }}
+-    steps:
+-      - uses: actions/checkout@v6
+-        with:
+-          fetch-depth: 0
+-      - name: Generate Matrix
+-        id: generate-matrix
+-        run: |
+-          echo "json_refs=$(jq -c . docs/ref_info.json)" >> $GITHUB_OUTPUT
+-
+-  build:
+-    runs-on: ubuntu-latest
+-    name: Build
+-    needs:
+-      - build_matrix
+-    strategy:
+-      matrix:
+-        ref_info: ${{ fromJSON(needs.build_matrix.outputs.json_refs) }}
+-    steps:
+-      - uses: actions-rust-lang/setup-rust-toolchain@v1
+-        with:
+-          cache-shared-key: pages-rust-cache
+-          cache-workspaces: ""
+-          cache-all-crates: true
+-      - name: Display Cargo version
+-        run: |
+-          cargo --version
+-      - name: Install zscdoc
+-        run: |
+-          cargo install --git https://github.com/UZDoom/zscdoc --rev 49743503acfd1fd59d23e8e15b24c74065072179
+-      - name: Display zscdoc version
+-        run: |
+-          zscdoc --version
+-      - uses: actions/checkout@v6
+-        with:
+-          ref: ${{ matrix.ref_info.ref }}
+-      - name: Document ref
+-        run: |
+-          zscdoc -f ./wadsrc/static -o ./output --delete-without-confirm --base-url "/UZDoom/docs/<version>" --target-version '${{ matrix.ref_info.url_part }}' --versions '${{ needs.build_matrix.outputs.json_refs }}' --canonical-domain "https://${{ github.repository_owner }}.github.io"
+-      - uses: actions/upload-artifact@v7
+-        with:
+-          name: ${{ matrix.ref_info.url_part }}
+-          path: output
+-
+-  deploy:
+-    runs-on: ubuntu-latest
+-    name: Deploy
+-    environment:
+-      name: github-pages
+-      url : ${{ steps.deployment.outputs.page_url }}
+-    needs:
+-      - build_matrix
+-      - build
+-    steps:
+-      - uses: actions/checkout@v6
+-        with:
+-          fetch-depth: 0
+-      - uses: actions/configure-pages@v5
+-      - run: gh run download ${{ vars.GITHUB_RUN_ID }} --dir refs
+-        env:
+-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+-      - name: Bundle together
+-        run: |
+-          mkdir public
+-          echo '${{ needs.build_matrix.outputs.json_refs }}' | jq -c '.[]' | while read ref_info; do
+-            ref=$(echo $ref_info | jq -r .ref)
+-            url_part=$(echo $ref_info | jq -r .url_part)
+-
+-            mkdir -p -- public/docs/$url_part
+-            mv refs/$url_part/* public/docs/$url_part
+-          done
+-      - name: List public
+-        run: |
+-          ls -lR public/
+-      - uses: actions/upload-pages-artifact@v3
+-        with:
+-          path: public/
+-      - name: Deploy to GitHub pages
+-        id: deployment
+-        uses: actions/deploy-pages@v4
+diff --git a/.github/workflows/pr_bot.yml b/.github/workflows/pr_bot.yml
+deleted file mode 100644
+index 8ef8a01d0..000000000
+--- a/.github/workflows/pr_bot.yml
++++ /dev/null
+@@ -1,206 +0,0 @@
+-name: Auto-Comment on PR
+-
+-on:
+-  pull_request_target:
+-    types: [opened, synchronize, reopened, edited]
+-
+-jobs:
+-  welcome:
+-    permissions:
+-      pull-requests: write
+-      contents: read
+-      issues: write
+-    if: ${{ vars.USE_PR_BOT }}
+-    runs-on: ubuntu-latest
+-    steps:
+-      - name: Post Comment
+-        uses: actions/github-script@v8
+-        with:
+-          script: |
+-            //
+-            // Preamble stuff
+-            // Probably no need to touch
+-            //
+-
+-            const marker = "our-nice-little-helper-bot-983247854" // used for comment updates
+-            const { repository, pull_request: pr } = context.payload;
+-            const { issues, pulls, repos } = github.rest;
+-            const auth = { owner: context.repo.owner, repo: context.repo.repo };
+-            const base = `${repository.html_url}/blob/${repository.default_branch}`;
+-
+-            const body = [
+-              `<!--${marker}-->`,
+-              "#### Thanks for opening this PR! We'll review it soon.",
+-              "I'm a bot that checks for some common problems. I'll update this comment with anything I find."
+-            ];
+-
+-            console.log(JSON.stringify(pr)); // for debugging
+-
+-            const link = f => `[${f}](${base}/${f})`;
+-
+-            //
+-            // Message body stuff
+-            // Push string to body array to add new sections
+-            //
+-
+-            const newFace = await (async () => {
+-              console.log("newFace", pr.author_association);
+-              if (pr.author_association === "FIRST_TIME_CONTRIBUTOR")
+-                return true;
+-              const commits = await repos.listCommits({...auth, author: pr.user.login})
+-                .then(({data: commits}) => commits.map(c => c.sha.substring(0,8)));
+-              console.log("newFace", commits);
+-              return commits.length === 0;
+-            })();
+-
+-            const canModify = (() => {
+-              console.log("canModify", pr.head.repo.full_name, pr.base.repo.full_name, pr.maintainer_can_modify);
+-              return pr.head.repo.full_name === pr.base.repo.full_name || pr.maintainer_can_modify;
+-            })();
+-
+-            const checkboxProblem = (() => {
+-              const expected = "- [ ] I have reviewed [CONTRIBUTING.md] and agree to its terms.";
+-              const pattern = /- \[ *(.*) *\] I have reviewed \[CONTRIBUTING\.md\](\(.+\))? and agree to its terms\./i;
+-
+-              if (!pattern.test(expected)) throw new Error("expected string does not match test string");
+-              const match = pattern.exec(pr.body);
+-              console.log("checkboxProblem", match);
+-              if (!match) {
+-                return `Ensure this checkbox is in the PR: '${expected}'`;
+-              } else if (match[1].length === 0) {
+-                return `Please agree to the terms in ${link("CONTRIBUTING.md")}, by checking the box in the description.`;
+-              }
+-              return false;
+-            })();
+-
+-            const updated = (await github.paginate(pulls.listFiles, {
+-              ...auth, pull_number: context.issue.number,
+-            })).map(f => f.filename);
+-            console.log("updated", updated);
+-
+-            const blockers = [];
+-            const quibbles = [];
+-
+-            // stuff for first time contributors
+-            if (newFace)
+-            {
+-              const temp = [];
+-
+-              temp.push([
+-                "-",
+-                "Welcome the community and thank you for your contribution!",
+-                `Please take a moment to familiarize yourself with the resources available in our ${link("README.md")} file.`,
+-              ].join(" "));
+-
+-              if (!updated.some(file => file === "CONTRIBUTORS"))
+-              {
+-                temp.push([
+-                  "-",
+-                  `Please take a moment to add your name to the bottom of the ${link("CONTRIBUTORS")} file!`,
+-                ].join(" "));
+-              }
+-
+-              if (checkboxProblem)
+-              {
+-                temp.push([
+-                  "-",
+-                  `Please ensure you have read ${link("CONTRIBUTING.md")} and agree to its terms.`,
+-                  "We cannot accept code before this is done.",
+-                ].join(" "));
+-              }
+-
+-              if (temp.length > 0)
+-              {
+-                body.push(
+-                  "#### Looks like it's your first time contributing!",
+-                  ...temp,
+-                );
+-              }
+-            }
+-
+-            if (checkboxProblem)
+-            {
+-              blockers.push(`- ${checkboxProblem}`);
+-            }
+-
+-            if (!canModify)
+-            {
+-              quibbles.push([
+-                "-",
+-                "While it is not required, allowing edits by maintainers will speed up the review process.",
+-                "We require PRs to be up-to-date in order to merge them, and this permission allows us to quickly rebase the PR in order to merge it.",
+-              ].join(" "));
+-            }
+-
+-            // notify about subtree edits in quibbles section
+-            const subtrees = [
+-              "libraries/Translation/",
+-              "libraries/ZMusic/",
+-              "libraries/ZWidget/",
+-              "libraries/ZVulkan/",
+-            ];
+-            for (const subtree of subtrees)
+-            {
+-              if (updated.some(file => file.startsWith(subtree)))
+-              {
+-                quibbles.push([
+-                  "-",
+-                  `Head's up, \`${subtree}\` is a subtree.`,
+-                  "Please ensure you're pushing these changes upstream.",
+-                ].join(" "));
+-              }
+-            }
+-
+-            if (blockers.length > 0)
+-            {
+-              body.push(
+-                "#### Here are some issues, that must be fixed:",
+-                ...blockers,
+-              );
+-            }
+-
+-            if (quibbles.length > 0)
+-            {
+-              body.push(
+-                "#### Here are some minor issues, that might need fixing:",
+-                ...quibbles,
+-              );
+-            }
+-
+-            if (blockers.length === 0 && quibbles.length === 0)
+-            {
+-              body.push(
+-                "#### Nothing to report. Nice :)"
+-              );
+-            }
+-
+-            //
+-            // Create / Update comment stuff
+-            // Probably no need to touch
+-            //
+-
+-            const data = { ...auth, body: body.join("\n") };
+-
+-            console.log(data);
+-
+-            const { data: comments } = await issues.listComments({
+-              owner: context.repo.owner,
+-              repo: context.repo.repo,
+-              issue_number: context.issue.number,
+-            });
+-            const oldComment = comments.find(c => c.body.includes(marker));
+-
+-            if (oldComment) {
+-              await issues.updateComment({
+-                ...data, comment_id: oldComment.id
+-              });
+-            } else {
+-              await issues.createComment({
+-                ...data, issue_number: context.issue.number
+-              });
+-            }
+-
+-            if (blockers.length > 0)
+-            {
+-              core.setFailed(`There are ${blockers.length} issue(s) that need resolving. See the bot's comment for details`);
+-            }
+diff --git a/.github/workflows/release_core.yml b/.github/workflows/release_core.yml
+deleted file mode 100644
+index eefc16dda..000000000
+--- a/.github/workflows/release_core.yml
++++ /dev/null
+@@ -1,174 +0,0 @@
+-on:
+-  workflow_call:
+-    inputs:
+-      title:
+-        required: true
+-        type: string
+-      run-id:
+-        required: true
+-        type: string
+-      run-url:
+-        required: true
+-        type: string
+-      commit:
+-        required: true
+-        type: string
+-      branch:
+-        required: true
+-        type: string
+-      label-name:
+-        required: false
+-        type: string
+-        default: ''
+-      tag-name:
+-        required: true
+-        type: string
+-      message:
+-        required: true
+-        type: string
+-      preview:
+-        required: true
+-        type: boolean
+-    secrets:
+-      GPG_PRIVATE_KEY:
+-        required: false
+-
+-jobs:
+-  upload_release:
+-    name: Upload Release
+-    runs-on: ubuntu-latest
+-    environment: production
+-    permissions:
+-      contents: write
+-      actions: read
+-    steps:
+-      - name: Checkout
+-        uses: actions/checkout@v6
+-        with:
+-          fetch-depth: 0
+-
+-      - name: Update Tag
+-        if: ${{ inputs.preview }}
+-        run: |
+-          git tag -d ${{ inputs.tag-name }} || true
+-          git push origin :refs/tags/${{ inputs.tag-name }} || true
+-          git tag ${{ inputs.tag-name }} ${{ inputs.commit }}
+-          git push origin ${{ inputs.tag-name }}
+-
+-      - name: Download Artifacts
+-        uses: actions/download-artifact@v8
+-        with:
+-          run-id: ${{ inputs.run-id }}
+-          github-token: ${{ github.token }}
+-          path: artifacts
+-          pattern: "* Release"
+-
+-      - name: Rename
+-        id: files
+-        run: |
+-          mkdir -p release
+-
+-          platforms=""
+-          function move() {
+-            [ "$#" == 3 ] || return;
+-            dir="$(dirname "$1")";
+-            [ -d "$dir" ] && [ -f "$1" ] && mv "$1" "release/$2";
+-            if [ "$3" !=  _ ]; then
+-              [ -z "${platforms}" ] || platforms+=:
+-              platforms+="$3,$2"
+-            fi
+-          }
+-
+-          move artifacts/Windows\ Release/*.zip Windows-UZDoom-${{ inputs.title }}-x86_64.zip windows
+-          move artifacts/MacOS\ Release/*.dmg MacOS-UZDoom-${{ inputs.title }}-ARM64.dmg macos
+-          appimage=Linux-UZDoom-${{ inputs.title }}-x86_64.AppImage
+-          move artifacts/Linux\ Release/*.AppImage ${appimage} linux
+-          move artifacts/Linux\ Release/*.zsync ${appimage}.zsync _
+-
+-          echo "platforms=$platforms" >> $GITHUB_OUTPUT
+-
+-      - id: notes
+-        name: Generate Notes
+-        env:
+-          GH_TOKEN: ${{ github.token }}
+-          COMMIT: ${{ inputs.commit }}
+-          BRANCH: ${{ inputs.branch }}
+-          MESSAGE: ${{ inputs.message }}
+-          RUN: ${{ inputs.run-url }}
+-          LABEL: ${{ inputs.label-name }}
+-          PREVIEW: ${{ inputs.preview && 'true' || '' }}
+-        run: |
+-          version=$(git describe --tags --exclude x-\* ${COMMIT})
+-          tag=$(git describe --tags --abbrev=0 --exclude x-\* ${COMMIT})
+-          distance=$(git rev-list "${tag}..${COMMIT}" --count)
+-          semver="$tag"
+-          if [[ $distance != 0 ]]; then semver+=".${distance}+${COMMIT:0:7}"; fi
+-          commit=$(git log --format=%s -n 1 ${COMMIT})
+-          timestamp=$(date -uIseconds)
+-          if [[ -n "${PREVIEW}" && ${BRANCH} != 'trunk' ]]; then
+-               base=$(git merge-base origin/trunk ${COMMIT})
+-               basetext=$(git log --format=%s -n 1 ${base})
+-               base=$(git describe --tags --exclude x-\* ${base})
+-          fi
+-          if [ -n "${LABEL}" ]; then
+-              prs=$(gh pr list --json url,title --label "${LABEL}" --jq '[.[] | "[\(.title)](\(.url))"] | join(" - ")' || true)
+-          fi
+-          function emit() {
+-            if [ -n "$1" ]; then printf "${@:2}"; fi
+-          }
+-
+-          {
+-              echo 'message<<EOF'
+-              emit "${PREVIEW}" 'These builds are automatically generated based on the latest commit to `%s`.\n' "${BRANCH}"
+-              emit "${PREVIEW}" '\n'
+-              emit 1            '%s\n' "${MESSAGE}"
+-              emit 1            '\n'
+-              emit 1            '**Version:** `%s`\n' "${semver}"
+-              emit "${PREVIEW}" '**Message:** %s\n' "${commit}"
+-              emit "${base}"    '**Base:** `%s`\n' "${base}"
+-              emit "${base}"    '**Base message:** %s\n' "${basetext}"
+-              emit 1            '**Workflow:** [Logs](%s) - [Artifacts](%s)\n' "${RUN}" "https://nightly.link/?url=${RUN}"
+-              emit "${prs}"     '**Pull requests being tested**: %s\n' "$prs"
+-              echo 'EOF'
+-          } >> $GITHUB_OUTPUT
+-
+-          checksums=$(cd release && sha256sum * | jq -Rn 'reduce (inputs | capture("(?<hash>\\w+)\\s+(?<file>.*)")) as $item ({}; .[$item.file] = $item.hash)')
+-          sizes=$(cd release && du -k * | jq -Rn 'reduce (inputs | capture("(?<size>\\d+)\\s+(?<file>.*)")) as $item ({}; .[$item.file] = $item.size)')
+-          assets=$(jq -n --argjson c "${checksums}" --argjson s "${sizes}" '$s | with_entries(.key as $f | .value = {size: .value, sha256: $c[$f]})')
+-          platforms=$(jq -n --arg input "${{ steps.files.outputs.platforms }}" '$input | split(":") | map(split(",")) | map({key: .[0], value: .[1]}) | from_entries')
+-
+-          jq -n '{ commit: $ARGS.named }'      \
+-            --arg version  "${semver}"         \
+-            --arg distance "${distance}"       \
+-            --arg message  "${commit}"         \
+-            --arg commit   "${COMMIT}"         \
+-            --arg branch   "${BRANCH}"         \
+-            --arg parent   "${tag}"            \
+-          | jq '. + { workflow: $ARGS.named }' \
+-            --arg     run       "${RUN}"       \
+-            --arg     timestamp "${timestamp}" \
+-          | jq '. + { assets: $assets }'       \
+-            --argjson assets "${assets}"       \
+-          | jq '. + { platforms: $platforms }' \
+-            --argjson platforms "${platforms}" \
+-          > release/_release.json
+-
+-          if [[ -n "${{ secrets.GPG_PRIVATE_KEY }}" ]]; then
+-            echo "${{ secrets.GPG_PRIVATE_KEY }}" | gpg --import
+-            gpg --detach-sign --armor release/_release.json
+-            gpg --list-secret-keys
+-          else
+-            echo "::warning ::Not signing"
+-          fi
+-
+-      - name: Upload
+-        uses: softprops/action-gh-release@v2.5.0 # FIXME: update this
+-        with:
+-          name: UZDoom ${{ inputs.title }}
+-          tag_name: ${{ inputs.tag-name }}
+-          draft: ${{ ! inputs.preview }}
+-          prerelease: ${{ inputs.preview }}
+-          make_latest: ${{ ! inputs.preview }}
+-          generate_release_notes: false
+-          files: release/**
+-          body: ${{ steps.notes.outputs.message }}
+diff --git a/.github/workflows/trigger_pages.yml b/.github/workflows/trigger_pages.yml
+deleted file mode 100644
+index 295aba276..000000000
+--- a/.github/workflows/trigger_pages.yml
++++ /dev/null
+@@ -1,24 +0,0 @@
+-name: Trigger Pages
+-
+-on:
+-  push:
+-    branches:
+-      - trunk
+-    tags:
+-      - '**'
+-
+-permissions:
+-  actions: write
+-
+-jobs:
+-  trigger_pages:
+-    if: ${{ vars.PUBLISH_PAGES }}
+-    runs-on: ubuntu-latest
+-    name: Trigger a Pages deployment
+-    env:
+-      GH_TOKEN: ${{ github.token }}
+-    steps:
+-      - uses: actions/checkout@v6
+-        with:
+-          fetch-depth: 0
+-      - run: gh workflow run pages_deploy.yml --ref trunk
+diff --git a/README.md b/README.md
+index 637c5cfa0..7578e6a48 100644
+--- a/README.md
++++ b/README.md
+@@ -1,96 +1,61 @@
+-<div align="center">
++# UZDoom para Nintendo Switch
+ 
+-[ <img src="branding/misc/logo-bg.svg" alt="UZDoom Icon" style="height: 8em; width: 100%" /> ][repo]
++Port do [UZDoom](https://github.com/UZDoom/UZDoom) 5.0.3 para o Nintendo Switch
++desbloqueado (Atmosphère / Homebrew Menu), com launcher próprio. Roda qualquer mod
++que rode no UZDoom 5.0.3 do PC: Brutal Doom, Project Brutality, Lexicon,
++Trailblazer, Samsara, WadFusion...
+ 
+-</div>
++Port, launcher e otimizações para Switch: **Renan** (Telegram @aeon1911).
++Baseado no trabalho de fgsfds (port de GZDoom para Switch e launcher original),
++Thorhax (GZDoom-NX-2026), da equipe UZDoom/GZDoom/ZDoom e do devkitPro.
+ 
+-## Welcome to UZDoom!
++## O que é diferente do UZDoom do PC
+ 
+-[![Continuous Integration][badge_git]][status_git]
+-[![Engine Translation status][badge_trans]][status_trans]
+-[![Game Translation status][badge_trans_games]][status_trans_games]
++Os arquivos do motor (`uzdoom.pk3`, `game_support.pk3`, `brightmaps.pk3`,
++`lights.pk3`, `game_widescreen_gfx.pk3`) são exatamente os do UZDoom 5.0.3
++oficial: nenhum mod é alterado. As mudanças são só para o Switch:
+ 
+-**UZDoom** is a modern, feature-rich source port for the classic game **DOOM**.
++- cache de leitura do cartão SD (abertura de mods grandes muito mais rápida);
++- imagens e sons preparados em outro núcleo, prefetch de sprites e mipmaps feitos
++  na CPU (sem travadas quando aparecem sprites novos);
++- shaders pré-preparados, tela de carregamento com tempo restante;
++- 30 FPS travado de verdade (VSync a cada 2 atualizações) e estabilizador de FPS
++  (reduz só detalhes visuais - luzes dinâmicas distantes, efeitos longe - quando
++  uma cena fica pesada demais);
++- luzes dinâmicas com orçamento (as mais próximas iluminam, as outras somem com fade);
++- threads do jogo, do áudio e dos workers distribuídos nos 3 núcleos livres;
++- `perf.log`, `crash.log` e `hang.log` no cartão para diagnóstico;
++- nenhuma mudança de clock (CPU/GPU sempre nos valores normais do console).
+ 
+-A continuation of [ZDoom][zdoom] and [GZDoom][gzdoom], UZDoom enhances the original DOOM engine, providing advanced features like:
++## Instalação
+ 
+-* High-Resolution Graphics
+-* Dynamic lighting
+-* 3D Floors
+-* Extensive Modding Support
+-* Support for modern OpenGL and Vulkan renderers
++Veja [`nx/LEIA-ME.txt`](nx/LEIA-ME.txt): copie `switch/` para a raiz do cartão,
++IWADs em `sd:/switch/gzdoom/iwads/`, mods em `sd:/switch/gzdoom/pwads/` e abra o
++`gzdoom_launcher.nro` pelo Homebrew Menu em modo título (segure R ao abrir um jogo).
+ 
+-UZDoom is **free and open-source software**, built and maintained by a dedicated community of developers and enthusiasts.
++## Compilar
+ 
+-## 🙏 Acknowledgments
++Veja [`nx/build/README.md`](nx/build/README.md).
+ 
+-UZDoom would not be possible without the foundational work of many people. We extend our immense gratitude to:
++## Código
+ 
+-* **id Software** for creating the original DOOM and releasing its source code.
+-* **Marisa Heit** for her foundational work on ZDoom, and **Christoph Oelckers** for his work on GZDoom.
+-* The countless modders, mappers, and artists in the DOOM community who continue to create amazing content.
+-* All the contributors who have submitted code, reported bugs, and helped improve the project over the years.
++- `src/common/platform/posix/nx/`: sistema do Switch (threads, crash log, tela de
++  carregamento, glthread experimental)
++- `tools/nxlauncher/`: launcher
++- `src/common/engine/nx_*`: workers, perf.log e estabilizador de FPS
++- `src/common/rendering/gles/gles_asynctex.*`, `src/rendering/hwrenderer/hw_nx*`:
++  texturas em segundo plano, prefetch e orçamento de luzes
+ 
+-The **UZDoom Icon** was designed by **Carlos "Cardboard Marty" Sanchez**, copyrighted to the UZDoom Team, and licensed under **Creative Commons BY-SA 4.0**.
++O README original do UZDoom está em [`docs/README-UZDoom.md`](docs/README-UZDoom.md).
+ 
+-See the [CONTRIBUTORS](CONTRIBUTORS) file for a full list of code contributors.
++## Licença
+ 
+-## 📄 Legal
++GPLv3, como o UZDoom (veja `LICENSE`). Fontes do launcher (Bebas Neue, Poppins):
++SIL Open Font License.
+ 
+-UZDoom is licensed under the **GNU General Public License (GPL) version 3 or any later version (GPLv3+)**.
++---
+ 
+-This program is distributed in the hope that it will be useful, but **WITHOUT ANY WARRANTY**. See the GNU General Public License for more details.
+-
+-You can view the full license text here: <https://www.gnu.org/licenses/>
+-
+-**Copyrights:**
+-* Copyright 1993-1996 id Software
+-* Copyright 1999-2016 Marisa Heit
+-* Copyright 2002-2016 Christoph Oelckers
+-* Copyright 2017-2025 GZDoom Maintainers and Contributors
+-* Copyright 2025-2026 UZDoom Maintainers and Contributors
+-
+-## 🌐 Resources
+-
+-* [Home Page][home]
+-* [Wiki][wiki]
+-* [Discord Server][community]
+-* [Forum][forum]
+-* [Engine Translation][status_trans]
+-* [Game Translation][status_trans_games]
+-
+-### 🛠️ Building UZDoom
+-
+-To build UZDoom from source, please see UZDoom's GitHub [wiki][gh_wiki] for a full list of dependencies and detailed instructions. Build For [Linux][gh_linux] / [Windows][gh_windows] / [MacOS][gh_apple]
+-
+-<div align="center">
+-
+-[ <img src="branding/UZDoom%20Banner.svg" alt="UZDoom Footer" style="height: 8em; width: 100%" /> ][repo]
+-
+-[<img alt="Translation status" style="width: 49%" src="https://hosted.weblate.org/widget/uzdoom/open-graph.png" />][status_trans]
+-[<img alt="Translation status" style="width: 49%" src="https://hosted.weblate.org/widget/doom-engine-games/open-graph.png" />][status_trans_games]
+-
+-</div>
+-
+-[gzdoom]: https://github.com/ZDoom/gzdoom/
+-[zdoom]: https://github.com/rheit/zdoom/
+-
+-[repo]: https://github.com/UZDoom/UZDoom/
+-[home]: https://zdoom.org/
+-[wiki]: https://zdoom.org/wiki/
+-[forum]: https://forum.zdoom.org/
+-[community]: https://dsc.gg/zdoom
+-
+-[gh_wiki]: https://github.com/UZDoom/UZDoom/wiki/
+-[gh_linux]: https://github.com/UZDoom/UZDoom/wiki/Compilation#linux
+-[gh_windows]: https://github.com/UZDoom/UZDoom/wiki/Compilation#windows
+-[gh_apple]: https://github.com/UZDoom/UZDoom/wiki/Compilation#macos
+-
+-[status_git]: https://github.com/UZDoom/UZDoom/actions/workflows/continuous_integration.yml
+-[badge_git]: https://github.com/UZDoom/UZDoom/actions/workflows/continuous_integration.yml/badge.svg
+-
+-[badge_trans]: https://hosted.weblate.org/widget/uzdoom/svg-badge.svg
+-[status_trans]: https://hosted.weblate.org/engage/uzdoom/
+-
+-[badge_trans_games]: https://hosted.weblate.org/widget/doom-engine-games/svg-badge.svg
+-[status_trans_games]: https://hosted.weblate.org/engage/doom-engine-games/
++*English:* Nintendo Switch (homebrew) port of UZDoom 5.0.3 with its own launcher.
++Engine resources are identical to upstream 5.0.3, so any mod that runs on UZDoom
++5.0.3 works; the changes are Switch-specific loading, threading and frame-rate
++stability work. Build instructions in `nx/build/README.md`.
+diff --git a/docs/README-UZDoom.md b/docs/README-UZDoom.md
+new file mode 100644
+index 000000000..637c5cfa0
+--- /dev/null
++++ b/docs/README-UZDoom.md
+@@ -0,0 +1,96 @@
++<div align="center">
++
++[ <img src="branding/misc/logo-bg.svg" alt="UZDoom Icon" style="height: 8em; width: 100%" /> ][repo]
++
++</div>
++
++## Welcome to UZDoom!
++
++[![Continuous Integration][badge_git]][status_git]
++[![Engine Translation status][badge_trans]][status_trans]
++[![Game Translation status][badge_trans_games]][status_trans_games]
++
++**UZDoom** is a modern, feature-rich source port for the classic game **DOOM**.
++
++A continuation of [ZDoom][zdoom] and [GZDoom][gzdoom], UZDoom enhances the original DOOM engine, providing advanced features like:
++
++* High-Resolution Graphics
++* Dynamic lighting
++* 3D Floors
++* Extensive Modding Support
++* Support for modern OpenGL and Vulkan renderers
++
++UZDoom is **free and open-source software**, built and maintained by a dedicated community of developers and enthusiasts.
++
++## 🙏 Acknowledgments
++
++UZDoom would not be possible without the foundational work of many people. We extend our immense gratitude to:
++
++* **id Software** for creating the original DOOM and releasing its source code.
++* **Marisa Heit** for her foundational work on ZDoom, and **Christoph Oelckers** for his work on GZDoom.
++* The countless modders, mappers, and artists in the DOOM community who continue to create amazing content.
++* All the contributors who have submitted code, reported bugs, and helped improve the project over the years.
++
++The **UZDoom Icon** was designed by **Carlos "Cardboard Marty" Sanchez**, copyrighted to the UZDoom Team, and licensed under **Creative Commons BY-SA 4.0**.
++
++See the [CONTRIBUTORS](CONTRIBUTORS) file for a full list of code contributors.
++
++## 📄 Legal
++
++UZDoom is licensed under the **GNU General Public License (GPL) version 3 or any later version (GPLv3+)**.
++
++This program is distributed in the hope that it will be useful, but **WITHOUT ANY WARRANTY**. See the GNU General Public License for more details.
++
++You can view the full license text here: <https://www.gnu.org/licenses/>
++
++**Copyrights:**
++* Copyright 1993-1996 id Software
++* Copyright 1999-2016 Marisa Heit
++* Copyright 2002-2016 Christoph Oelckers
++* Copyright 2017-2025 GZDoom Maintainers and Contributors
++* Copyright 2025-2026 UZDoom Maintainers and Contributors
++
++## 🌐 Resources
++
++* [Home Page][home]
++* [Wiki][wiki]
++* [Discord Server][community]
++* [Forum][forum]
++* [Engine Translation][status_trans]
++* [Game Translation][status_trans_games]
++
++### 🛠️ Building UZDoom
++
++To build UZDoom from source, please see UZDoom's GitHub [wiki][gh_wiki] for a full list of dependencies and detailed instructions. Build For [Linux][gh_linux] / [Windows][gh_windows] / [MacOS][gh_apple]
++
++<div align="center">
++
++[ <img src="branding/UZDoom%20Banner.svg" alt="UZDoom Footer" style="height: 8em; width: 100%" /> ][repo]
++
++[<img alt="Translation status" style="width: 49%" src="https://hosted.weblate.org/widget/uzdoom/open-graph.png" />][status_trans]
++[<img alt="Translation status" style="width: 49%" src="https://hosted.weblate.org/widget/doom-engine-games/open-graph.png" />][status_trans_games]
++
++</div>
++
++[gzdoom]: https://github.com/ZDoom/gzdoom/
++[zdoom]: https://github.com/rheit/zdoom/
++
++[repo]: https://github.com/UZDoom/UZDoom/
++[home]: https://zdoom.org/
++[wiki]: https://zdoom.org/wiki/
++[forum]: https://forum.zdoom.org/
++[community]: https://dsc.gg/zdoom
++
++[gh_wiki]: https://github.com/UZDoom/UZDoom/wiki/
++[gh_linux]: https://github.com/UZDoom/UZDoom/wiki/Compilation#linux
++[gh_windows]: https://github.com/UZDoom/UZDoom/wiki/Compilation#windows
++[gh_apple]: https://github.com/UZDoom/UZDoom/wiki/Compilation#macos
++
++[status_git]: https://github.com/UZDoom/UZDoom/actions/workflows/continuous_integration.yml
++[badge_git]: https://github.com/UZDoom/UZDoom/actions/workflows/continuous_integration.yml/badge.svg
++
++[badge_trans]: https://hosted.weblate.org/widget/uzdoom/svg-badge.svg
++[status_trans]: https://hosted.weblate.org/engage/uzdoom/
++
++[badge_trans_games]: https://hosted.weblate.org/widget/doom-engine-games/svg-badge.svg
++[status_trans_games]: https://hosted.weblate.org/engage/doom-engine-games/
+diff --git a/nx/LEIA-ME.txt b/nx/LEIA-ME.txt
+new file mode 100644
+index 000000000..a0e9b95fe
+--- /dev/null
++++ b/nx/LEIA-ME.txt
+@@ -0,0 +1,184 @@
++UZDoom 5.0.3 para Nintendo Switch  (build "uz5.0.3-nx4.1")
++=====================================================================
++Port, launcher e otimizações para Switch: Renan  -  Telegram @aeon1911
++=====================================================================
++
++nx4.1 - estabilidade em cenas pesadas
++-------------------------------------
++Em mapas com muito fogo, tochas e efeitos o FPS caía. Cada luz dinâmica
++(tocha, vela, fogo, bola de fogo, clarão) custa processador em cada
++parede, chão e sprite que ela ilumina, e o driver de vídeo do Switch
++cobra caro por cada objeto desenhado.
++
++- NOVA OPÇÃO "Estabilizar FPS" (Automático por padrão): enquanto os
++  quadros passam do limite de FPS, o jogo corta aos poucos só o que é
++  visual - menos luzes dinâmicas (as mais próximas ficam), efeitos e
++  decorações muito distantes, efeitos quase invisíveis, alcance das
++  sombras de sprites e, no aperto maior, a luz dinâmica sobre sprites.
++  Quando sobra tempo, os detalhes voltam devagar. Monstros, projéteis,
++  itens, dano e scripts nunca mudam.
++- LUZES DINÂMICAS COM ORÇAMENTO: no "Equilibrado" só as 16 luzes mais
++  próximas (até 2500 unidades) iluminam o cenário; as outras apagam com
++  um fade suave (sem piscar). "Qualidade" continua sem limite.
++- Dados de luz repetidos não são reenviados ao driver a cada parede
++  (paredes vizinhas iluminadas pelas mesmas tochas).
++- Partículas distantes seguem o mesmo corte dos outros efeitos.
++- Todos os perfis passam uma vez para "30 FPS travado" (o modo mais
++  estável no Switch) com o estabilizador ligado. Dá para mudar em OPÇÕES.
++- perf.log mostra também chamadas de desenho por quadro, luzes usadas,
++  uploads de luz evitados e o nível do estabilizador (coluna "stab").
++
++nx4.0 - versão geral
++--------------------
++Até a nx3.8 o port era ajustado para o Project Brutality. A nx4.0 é o
++UZDoom 5.0.3 original com só a camada do Switch por cima, para rodar
++qualquer mod (Brutal Doom, Project Brutality, Lexicon, Trailblazer,
++Samsara, WadFusion...):
++
++- Os .pk3 do motor (uzdoom.pk3, game_support.pk3, brightmaps.pk3,
++  lights.pk3, game_widescreen_gfx.pk3) são exatamente os do UZDoom 5.0.3
++  oficial. Saiu o gancho "NXFxSkip" que existia no uzdoom.pk3.
++- Saiu do motor o "nx_fx_thin" (apagava efeitos do Brutality pelo nome
++  da classe). O jogo não remove nem troca mais nada de nenhum mod.
++- O launcher não procura mais "brutal"/"pb" no nome dos mods: nenhum mod
++  recebe opções próprias (antes o Brutal Doom também era tratado como
++  Project Brutality). Saiu a opção "Efeitos de tiro (Brutality)" e os
++  ajustes automáticos de perfil quando o PB era adicionado.
++- Continua tudo o que é do Switch: cache de leitura do cartão SD,
++  imagens e sons preparados em segundo plano, shaders pré-preparados,
++  tela de carregamento, 30 FPS travado, uso dos núcleos, perf.log,
++  crash.log/hang.log. Nenhuma opção mexe em clock.
++
++Se você jogou o Brutality com as versões nx3.x: o launcher antigo gravou
++as opções leves do PB (pb_*, nashgore_*) no seu uzdoom.ini. Elas ficam
++salvas lá. Para voltar ao padrão do PB, use o menu de opções do próprio
++PB (restaurar padrões) ou apague sd:/switch/gzdoom/uzdoom.ini (perde as
++outras configurações do motor, como controles).
++
++
++Instalação (por cima de uma versão anterior)
++--------------------------------------------
++Copie a pasta "switch" deste pacote para a raiz do cartão SD e aceite
++substituir os arquivos:
++    sd:/switch/gzdoom_launcher.nro       <- abra ESTE no Homebrew Menu
++    sd:/switch/gzdoom/gzdoom.nro         <- o motor
++    sd:/switch/gzdoom/*.pk3              <- recursos do motor (originais)
++Ela NÃO mexe no seu uzdoom.ini, shadervariants.txt, launcher.ini, nem
++em iwads/, pwads/ e save/.
++
++Instalação do zero
++------------------
++Copie a pasta "switch" e depois também a pasta
++"so-para-instalacao-do-zero/switch" (uzdoom.ini padrão e a lista
++inicial de shaders). Coloque os IWADs em sd:/switch/gzdoom/iwads/ e os
++mods em sd:/switch/gzdoom/pwads/.
++
++
++Launcher
++--------
++Abra o Homebrew Menu em MODO TÍTULO (segure R ao abrir qualquer jogo).
++Pelo Álbum só há ~400 MB de RAM, pouco para mods grandes.
++
++  L / R            troca de aba (JOGOS, MODS, OPÇÕES)
++  +                joga com o perfil selecionado (de qualquer aba)
++  B                volta / sai
++
++JOGOS
++  cima/baixo       escolhe o perfil
++  A                jogar
++  Y                novo perfil (nome + jogo base; pode copiar os mods
++                   do perfil selecionado)
++  -                duplica o perfil selecionado
++  X                exclui (só perfis criados por você)
++  Cada jogo em iwads/ (doom2.wad, doom_fusion.ipk3...) já tem um perfil
++  próprio, que também guarda mods e opções.
++
++MODS  (duas listas: ORDEM DE CARREGAMENTO | DISPONÍVEIS em pwads/)
++  esquerda/direita troca de lista
++  A (Disponíveis)  adiciona o mod ao fim da ordem
++  A (Ordem)        "pega" o mod: mova com cima/baixo e aperte A para
++                   soltar (B cancela)
++  ZL / ZR          sobe / desce o mod direto, sem pegar
++  X                remove o mod da ordem (o arquivo não é apagado)
++  Tudo é salvo na hora em sd:/switch/gzdoom/launcher.ini.
++
++  Ordem: siga a do autor do mod. Em geral mapas primeiro e o mod de
++  gameplay por último (ex.: Lexicon + Brutal Doom = arquivos do Lexicon
++  e depois o Brutal Doom). Samsara e Trailblazer são mods de gameplay.
++
++OPÇÕES (do perfil selecionado)
++  Desempenho, Resolução de renderização (100% a 60%), Limite de FPS,
++  Driver de vídeo em outro núcleo (experimental), Mostrar FPS,
++  Tela de carregamento, Dificuldade, Monstros, Mapa inicial, Classe,
++  Carregar save, Gravar log, Argumentos extras, Renomear perfil,
++  Trocar jogo base.
++
++  Desempenho (só opções do motor, iguais para todos os mods):
++    Qualidade     - tudo ligado, como no PC.
++    Equilibrado   - luzes dinâmicas leves (até 6 por superfície, as 16
++                    mais próximas), menos partículas e decalques, filtro
++                    anisotrópico 4x, efeitos muito distantes cortados.
++    Switch (leve) - sem luzes dinâmicas, efeitos mínimos; efeitos e
++                    decorações distantes (fora monstros, projéteis,
++                    itens e o que pode ser atingido) não são desenhados.
++  Mods pesados (Brutality, Brutal Doom) ficam mais fluidos em
++  "Switch (leve)" + Limite de FPS 30. As opções de efeitos do próprio
++  mod (sangue, cápsulas etc.) ficam no menu do mod, dentro do jogo.
++
++  Limite de FPS: 30 (travado, VSync a cada 2 atualizações), 35, 40 ou
++  sem limite (VSync 60 Hz). Para o jogo mais estável: 30 FPS travado.
++
++  Estabilizar FPS: Automático (padrão) / Desligado. Mira no limite de
++  FPS (30 quando não há limite). Não mexe em clock nem na resolução.
++
++
++Sobre o tempo de carregamento
++-----------------------------
++- A primeira abertura de um conjunto de mods é a mais lenta e a tela
++  mostra "medindo o tempo". Nas seguintes aparece o tempo restante.
++- Com mods grandes, a etapa mais longa é "Compilando scripts do mod":
++  é o motor compilando o ZScript do mod - trabalho de CPU que não dá
++  para pular.
++- Depois da tela de carregamento aparece a tela de início do UZDoom
++  enquanto os shaders salvos são preparados; em seguida vem o menu.
++
++
++Ajustes avançados (em OPÇÕES > "Argumentos extras" do perfil)
++-------------------------------------------------------------
++  gles_async_textures 0/1     preparar imagens em segundo plano (1)
++  snd_asyncload 0/1           preparar sons em segundo plano (1)
++  nx_workers 1-2              threads de preparo em segundo plano (1)
++  gles_async_prefetch_mb N    memória para imagens pré-carregadas (192)
++  gles_async_preupload_ms N   tempo por quadro enviando imagens prontas
++                              para a GPU antes de serem usadas (1.5)
++  nx_perflog 0/1              gravar perf.log (1)
++  nx_dynlight_max N           máximo de luzes dinâmicas por quadro (0 = sem limite)
++  nx_dynlight_dist N          distância máxima das luzes dinâmicas (0 = sem limite)
++  nx_stabilizer N             FPS alvo do estabilizador (0 = desligado)
++  Ex. em "Argumentos extras":  +set nx_perflog 0
++
++
++Problemas
++---------
++- Erro fatal: a mensagem aparece na tela e fica em sd:/switch/gzdoom/error.log
++- Fechou ("o software foi fechado..."): o motivo fica em
++  sd:/switch/gzdoom/crash.log e em sd:/atmosphere/crash_reports/.
++- Lento em alguma cena: sd:/switch/gzdoom/perf.log (logo depois de jogar,
++  antes de abrir de novo - ele é refeito a cada abertura).
++- Tela preta/travou logo depois da tela de carregamento: desligue
++  "Tela de carregamento" em OPÇÕES.
++- Congelou com "Driver de vídeo em outro núcleo" ligado: desligue a
++  opção (o hang.log em sd:/switch/gzdoom/ diz onde travou).
++- Para zerar os shaders guardados: apague sd:/switch/gzdoom/shadervariants.txt
++  (ele se refaz sozinho). loadtimes.txt guarda só os tempos de abertura.
++
++
++Créditos
++--------
++Port para Switch, launcher, tela de carregamento e otimizações:
++Renan  -  Telegram @aeon1911
++
++Baseado em: UZDoom/GZDoom/ZDoom teams (GPLv3), fgsfds (port de Switch e
++launcher original), Thorhax (GZDoom-NX-2026), devkitPro (devkitA64, libnx).
++Fontes Bebas Neue e Poppins: SIL Open Font License (dentro do launcher).
++Código-fonte (GPLv3): repositório do projeto no GitHub.
+diff --git a/nx/build/README.md b/nx/build/README.md
+new file mode 100644
+index 000000000..3982da5fb
+--- /dev/null
++++ b/nx/build/README.md
+@@ -0,0 +1,50 @@
++# Compilando o port para Switch
++
++## Com o devkitPro instalado (o normal)
++
++Pacotes do devkitPro (`dkp-pacman -S ...`):
++
++```
++switch-dev switch-mesa switch-libdrm_nouveau switch-sdl2 switch-openal-soft
++switch-libvpx switch-libogg switch-libvorbis switch-libopus switch-flac
++switch-mpg123 switch-zlib switch-pkg-config switch-cmake
++```
++
++O libsndfile não existe nos pacotes do devkitPro:
++
++```
++git clone --depth 1 --branch 1.2.2 https://github.com/libsndfile/libsndfile.git
++nx/build/build-libsndfile.sh libsndfile
++```
++
++No PC também é preciso `cmake`, `ninja`, `python3` e um compilador C/C++ (para as
++ferramentas zipdir/re2c/lemon usadas durante a compilação). Depois:
++
++```
++nx/build/build-switch.sh
++```
++
++O pacote para o cartão SD sai em `build/package/` (`switch/` + `so-para-instalacao-do-zero/` + `LEIA-ME.txt`).
++
++## Sem acesso aos servidores do devkitPro
++
++`nx/build/toolchain-from-source/` monta tudo a partir do GitHub (é assim que as
++builds deste repositório foram feitas): devkitA64 (GCC 16.1.0, binutils 2.46,
++newlib do devkitPro), libnx 4.12.0, switch-tools e os portlibs com as receitas e
++patches do `devkitPro/pacman-packages`.
++
++```
++cd nx/build/toolchain-from-source
++./fetch-sources.sh          # clona tudo em ./src e aplica os patches
++./build-toolchain.sh        # instala em /opt/devkitpro
++./build-portlibs.sh         # libnx, mesa, SDL2, OpenAL, codecs, zlib, libsndfile...
++cd ../../.. && nx/build/build-switch.sh
++```
++
++## Checagem obrigatória
++
++A libnx nunca configura o registrador de thread pointer (`tpidr_el0`): todo código
++tem que ser compilado com `-mtp=soft`. O `build-switch.sh` falha se o executável
++usar `tpidr_el0`. Nunca passe `-DCMAKE_C_FLAGS=`/`-DCMAKE_CXX_FLAGS=` para projetos
++do Switch: isso apaga as flags do toolchain; flags extras vão por `CFLAGS`/`CXXFLAGS`
++de ambiente.
+diff --git a/nx/build/build-libsndfile.sh b/nx/build/build-libsndfile.sh
+new file mode 100755
+index 000000000..09414d358
+--- /dev/null
++++ b/nx/build/build-libsndfile.sh
+@@ -0,0 +1,20 @@
++#!/bin/bash
++# libsndfile is not packaged by devkitPro: build it into the switch portlibs.
++# Needs switch-libogg, switch-libvorbis, switch-libopus and switch-flac.
++#   build-libsndfile.sh <libsndfile 1.2.2 source dir>
++set -e
++SRC=$1
++export DEVKITPRO=${DEVKITPRO:-/opt/devkitpro}
++source "$DEVKITPRO/switchvars.sh"
++# extra flags go through the environment: -DCMAKE_C_FLAGS=... would replace
++# the toolchain's (-mtp=soft etc.) and produce a crashing binary
++unset CFLAGS CXXFLAGS CPPFLAGS LDFLAGS
++cmake -S "$SRC" -B "$SRC/build-nx" -G "Unix Makefiles" \
++	-DCMAKE_TOOLCHAIN_FILE="$DEVKITPRO/cmake/Switch.cmake" \
++	-DCMAKE_INSTALL_PREFIX="$PORTLIBS_PREFIX" -DBUILD_SHARED_LIBS=OFF \
++	-DBUILD_PROGRAMS=OFF -DBUILD_EXAMPLES=OFF -DBUILD_TESTING=OFF -DENABLE_CPACK=OFF \
++	-DENABLE_EXTERNAL_LIBS=ON -DENABLE_MPEG=OFF -DINSTALL_MANPAGES=OFF -DBUILD_REGTEST=OFF
++make -C "$SRC/build-nx" -j"$(nproc)"
++make -C "$SRC/build-nx" install
++# ZMusic's CMake on the Switch expects an (empty) libdl
++[ -f "$PORTLIBS_PREFIX/lib/libdl.a" ] || aarch64-none-elf-ar rcs "$PORTLIBS_PREFIX/lib/libdl.a"
+diff --git a/nx/build/build-switch.sh b/nx/build/build-switch.sh
+new file mode 100755
+index 000000000..ac3ec2f52
+--- /dev/null
++++ b/nx/build/build-switch.sh
+@@ -0,0 +1,46 @@
++#!/bin/bash
++# Builds the Switch port: gzdoom.nro (engine), gzdoom_launcher.nro and the
++# engine .pk3 files, then assembles the SD card package.
++#
++# Needs a devkitPro install (devkitA64 + libnx + the switch portlibs listed in
++# nx/build/README.md) and, on the host, cmake, ninja and a C/C++ compiler.
++#
++#   nx/build/build-switch.sh            # build + package into build/package
++#   JOBS=4 nx/build/build-switch.sh
++set -e
++ROOT=$(cd "$(dirname "$0")/../.." && pwd)
++OUT=${OUT:-$ROOT/build}
++JOBS=${JOBS:-$(nproc)}
++export DEVKITPRO=${DEVKITPRO:-/opt/devkitpro}
++export PORTLIBS_PREFIX=$DEVKITPRO/portlibs/switch
++export PATH=$DEVKITPRO/tools/bin:$DEVKITPRO/devkitA64/bin:$PORTLIBS_PREFIX/bin:$PATH
++
++# 1. host tools (zipdir, re2c, lemon) used while building
++if [ ! -f "$OUT/native/ImportExecutables.cmake" ]; then
++	cmake -S "$ROOT" -B "$OUT/native" -G Ninja -DCMAKE_BUILD_TYPE=Release
++fi
++ninja -C "$OUT/native" -j"$JOBS" zipdir re2c lemon
++
++# 2. the Switch build
++if [ ! -f "$OUT/nx/build.ninja" ]; then
++	cmake -S "$ROOT" -B "$OUT/nx" -G Ninja \
++		-DCMAKE_TOOLCHAIN_FILE="$DEVKITPRO/cmake/Switch.cmake" \
++		-DCMAKE_BUILD_TYPE=Release \
++		-DNINTENDO_SWITCH=ON \
++		-DDYN_OPENAL=OFF -DDYN_SNDFILE=OFF -DDYN_MPG123=OFF \
++		-DIMPORT_EXECUTABLES="$OUT/native/ImportExecutables.cmake" \
++		-DSNDFILE_INCLUDE_DIR="$PORTLIBS_PREFIX/include" \
++		-DSNDFILE_LIBRARY="$PORTLIBS_PREFIX/lib/libsndfile.a"
++fi
++ninja -C "$OUT/nx" -j"$JOBS"
++
++# 3. sanity check: libnx never sets up the hardware thread pointer, so no code
++#    may use TLS through tpidr_el0 (everything must be built with -mtp=soft)
++for elf in "$OUT/nx/uzdoom.elf" "$OUT/nx/tools/nxlauncher/gzdoom_launcher.elf"; do
++	[ -f "$elf" ] || continue
++	n=$(aarch64-none-elf-objdump -d "$elf" | grep -c tpidr_el0 || true)
++	if [ "$n" != "0" ]; then echo "ERROR: $elf uses tpidr_el0 ($n times)"; exit 1; fi
++done
++
++# 4. SD card package
++"$ROOT/nx/build/package.sh" "$OUT/nx" "$OUT/package"
+diff --git a/nx/build/package.sh b/nx/build/package.sh
+new file mode 100755
+index 000000000..2977ec2a7
+--- /dev/null
++++ b/nx/build/package.sh
+@@ -0,0 +1,14 @@
++#!/bin/bash
++# Assembles the SD card layout from a finished Switch build directory.
++#   package.sh <build dir> <output dir>
++set -e
++ROOT=$(cd "$(dirname "$0")/../.." && pwd)
++B=$1; P=$2
++rm -rf "$P"
++mkdir -p "$P/switch/gzdoom/temp" "$P/so-para-instalacao-do-zero/switch/gzdoom"
++cp "$B/gzdoom_launcher.nro" "$P/switch/"
++cp "$B/gzdoom.nro" "$B"/*.pk3 "$P/switch/gzdoom/"
++cp -r "$B/soundfonts" "$B/fm_banks" "$P/switch/gzdoom/"
++cp "$ROOT/nx/uzdoom.ini" "$ROOT/nx/shadervariants.txt" "$P/so-para-instalacao-do-zero/switch/gzdoom/"
++cp "$ROOT/nx/LEIA-ME.txt" "$P/"
++echo "package: $P"
+diff --git a/nx/build/toolchain-from-source/build-portlibs.sh b/nx/build/toolchain-from-source/build-portlibs.sh
+new file mode 100755
+index 000000000..c153b1acf
+--- /dev/null
++++ b/nx/build/toolchain-from-source/build-portlibs.sh
+@@ -0,0 +1,102 @@
++#!/bin/bash
++# libnx + the Switch portlibs used by this port, built from GitHub sources with
++# the devkitPro pacman-packages recipes/patches (run fetch-sources.sh first).
++# Also needs the host tools/cmake files installed by build-toolchain.sh.
++#   build-portlibs.sh [libnx drm mesa sdl2 openal ogg vorbis opus flac mpg123 sndfile vpx zlib]
++set -e
++set -o pipefail
++export DEVKITPRO=/opt/devkitpro
++export PATH=$DEVKITPRO/tools/bin:$DEVKITPRO/devkitA64/bin:$DEVKITPRO/portlibs/switch/bin:$PATH
++SRC=${SRC:-$PWD/src}
++PK=$SRC/pacman-packages/switch
++J=${J:-3}
++stamp() { echo "=== $(date +%T) $*"; }
++only="$*"
++want() { [ -z "$only" ] || [[ " $only " == *" $1 "* ]]; }
++sv() { source $DEVKITPRO/devkita64.sh; source $DEVKITPRO/switchvars.sh; }
++
++if want libnx; then stamp libnx
++  cd $SRC/libnx/nx && make -j$J && make install
++fi
++if want drm; then stamp libdrm_nouveau
++  cd $SRC/libdrm_nouveau && make -j$J && make install
++fi
++if want mesa; then stamp mesa
++  cd $SRC/mesa-20.1.0-rc3
++  if [ ! -f .patched ]; then
++    patch -p1 -i $PK/mesa/switch-mesa-20.1.0-5.patch
++    patch -p1 -i $PK/mesa/gl_XML.py.patch
++    patch -p1 -i $PK/mesa/glX_XML.py.patch
++    touch .patched
++  fi
++  rm -rf build
++  ( sv; $DEVKITPRO/meson-cross.sh switch ../crossfile.txt build -Db_ndebug=true )
++  ninja -C build -j$J || exit 1
++  ninja -C build install || exit 1
++  sed -i "s,-lEGL ,-lEGL -ldrm_nouveau ," $DEVKITPRO/portlibs/switch/lib/pkgconfig/egl.pc || true
++  install -Dm644 $PK/mesa/OpenGLConfig.cmake $DEVKITPRO/portlibs/switch/lib/cmake/OpenGL/OpenGLConfig.cmake
++fi
++if want sdl2; then stamp SDL2
++  cd $SRC/SDL2-2.28.5
++  [ -f .patched ] || { patch -p1 -i $PK/SDL2/SDL2-2.28.5.patch; touch .patched; }
++  ( sv; ./configure --prefix="${PORTLIBS_PREFIX}" --host=aarch64-none-elf --disable-shared --enable-static \
++    --enable-audio --enable-joystick --disable-power --disable-filesystem --enable-cpuinfo --enable-pthreads \
++    --enable-timers --enable-video && make -j$J && make install ) || exit 1
++fi
++if want openal; then stamp openal-soft
++  cd $SRC/openal-soft-1.21.1
++  [ -f .patched ] || { patch -Np1 -i $PK/openal-soft/avoid-readlink.patch; sed -i 's#SDL2/##' alc/backends/sdl2.cpp; touch .patched; }
++  rm -rf build-nx && mkdir build-nx && cd build-nx
++  ( sv; unset CFLAGS CXXFLAGS CPPFLAGS LDFLAGS; aarch64-none-elf-cmake -G"Unix Makefiles" -DUSE_SWITCH=ON -DALSOFT_UTILS=OFF -DLIBTYPE=STATIC \
++    -DALSOFT_EXAMPLES=OFF -DALSOFT_REQUIRE_SDL2=ON -DALSOFT_BACKEND_SDL2=ON -DSDL2_INCLUDE_DIR="${PORTLIBS_PREFIX}/include" \
++    -DCMAKE_INSTALL_PREFIX="${PORTLIBS_PREFIX}" .. && make -j$J && make install ) || exit 1
++fi
++if want ogg; then stamp libogg
++  cd $SRC/libogg-1.3.4 && [ -f configure ] || ./autogen.sh
++  ( sv; ./configure --prefix="${PORTLIBS_PREFIX}" --host=aarch64-none-elf --disable-shared --enable-static && make -j$J && make install ) || exit 1
++fi
++if want vorbis; then stamp libvorbis
++  cd $SRC/libvorbis-1.3.7 && [ -f configure ] || ./autogen.sh
++  ( sv; ./configure --prefix="${PORTLIBS_PREFIX}" --host=aarch64-none-elf --disable-shared --enable-static --disable-examples --disable-docs && make -j$J && make install ) || exit 1
++fi
++if want opus; then stamp opus
++  cd $SRC/opus-1.3 && [ -f configure ] || ./autogen.sh
++  ( sv; ./configure --prefix="${PORTLIBS_PREFIX}" --host=aarch64-none-elf --disable-shared --enable-static --disable-doc --disable-extra-programs && make -j$J && make install ) || exit 1
++fi
++if want flac; then stamp flac
++  cd $SRC/flac-1.3.2
++  # only the compat.h part applies to the git tree (the rest patches generated Makefile.in files)
++  [ -f .patched ] || { patch -Np1 -i $PK/flac/flac-1.3.2.patch || true; touch .patched; }
++  [ -f configure ] || ./autogen.sh
++  ( sv; CFLAGS="${CFLAGS} -D__SWITCH__ " ./configure --prefix="${PORTLIBS_PREFIX}" --host=aarch64-none-elf \
++    --disable-shared --enable-static --disable-xmms-plugin --enable-cpplibs --disable-sse --disable-doxygen-docs \
++    && make -C src/libFLAC -j$J && make -C src/libFLAC install && make -C include install )
++  install -Dm644 $SRC/flac-1.3.2/src/libFLAC/flac.pc $DEVKITPRO/portlibs/switch/lib/pkgconfig/flac.pc || true
++fi
++if want mpg123; then stamp mpg123
++  cd $SRC/mpg123-1.31.3
++  [ -f .patched ] || { patch -Np1 -i $PK/mpg123/mpg123-1.31.3.patch || true; touch .patched; }
++  autoreconf -fi
++  ( sv; export CFLAGS="${CFLAGS} -Wno-error=incompatible-pointer-types"; LIBS="-lnx -lm" ./configure --prefix="${PORTLIBS_PREFIX}" --host=aarch64-none-elf --disable-shared --enable-static \
++    --enable-fifo=no --enable-ipv6=no --enable-network=no --enable-int-quality=no --with-cpu=generic \
++    --with-default-audio=dummy --disable-components --enable-libmpg123 && make -j$J && make install ) || exit 1
++fi
++if want sndfile; then stamp libsndfile
++  cd $SRC/libsndfile-1.2.2 && rm -rf build-nx && mkdir build-nx && cd build-nx
++  ( sv; unset CFLAGS CXXFLAGS CPPFLAGS LDFLAGS; aarch64-none-elf-cmake -G"Unix Makefiles" -DCMAKE_INSTALL_PREFIX="${PORTLIBS_PREFIX}" \
++    -DBUILD_SHARED_LIBS=OFF -DBUILD_PROGRAMS=OFF -DBUILD_EXAMPLES=OFF -DBUILD_TESTING=OFF -DENABLE_CPACK=OFF \
++    -DENABLE_EXTERNAL_LIBS=ON -DENABLE_MPEG=OFF -DINSTALL_MANPAGES=OFF -DBUILD_REGTEST=OFF .. && make -j$J && make install ) || exit 1
++fi
++if want vpx; then stamp libvpx
++  cd $SRC/libvpx-1.8.0
++  [ -f .patched ] || { patch -p1 -i $PK/libvpx/libvpx.patch; touch .patched; }
++  ( sv; CROSS=aarch64-none-elf- ./configure --prefix="${PORTLIBS_PREFIX}" --target=generic-gnu --disable-examples \
++    --disable-tools --disable-docs --disable-unit-tests --disable-shared --enable-static && make -j$J && make install ) || exit 1
++fi
++if want zlib; then stamp zlib
++  cd $SRC/zlib-1.3.1
++  ( sv; CHOST=aarch64-none-elf ./configure --prefix="${PORTLIBS_PREFIX}" --static && make -j$J libz.a && make install ) || exit 1
++fi
++# ZMusic's CMake on the Switch expects an (empty) libdl
++[ -f $DEVKITPRO/portlibs/switch/lib/libdl.a ] || aarch64-none-elf-ar rcs $DEVKITPRO/portlibs/switch/lib/libdl.a
++stamp DONE
+diff --git a/nx/build/toolchain-from-source/build-toolchain.sh b/nx/build/toolchain-from-source/build-toolchain.sh
+new file mode 100755
+index 000000000..a8220b982
+--- /dev/null
++++ b/nx/build/toolchain-from-source/build-toolchain.sh
+@@ -0,0 +1,73 @@
++#!/bin/bash
++# devkitA64 (GCC 16.1.0 / binutils 2.46 / newlib devkitPro) built from GitHub
++# sources, plus the devkitPro host tools and CMake/meson/pkg-config helpers.
++# Run fetch-sources.sh first. Installs to /opt/devkitpro (must be writable).
++# Only needed where devkitPro's own packages can't be installed.
++set -e
++export prefix=/opt/devkitpro/devkitA64
++export target=aarch64-none-elf
++export PATH=$prefix/bin:$PATH
++SRC=${SRC:-$PWD/src}
++B=${B:-$PWD/build}
++J=${J:-3}
++mkdir -p $B/binutils $B/gcc $B/newlib
++stamp() { echo "=== $(date +%T) $*"; }
++
++stamp binutils
++cd $B/binutils
++[ -f .done ] || { $SRC/binutils-2.46.0/configure --prefix=$prefix --target=$target --disable-nls --disable-werror \
++  --disable-shared --disable-debug --enable-lto --enable-plugins --enable-poison-system-directories \
++  --disable-gdb --disable-gdbserver --disable-sim --disable-readline --disable-libdecnumber --disable-gprofng \
++  && make -j$J MAKEINFO=true && make install MAKEINFO=true && touch .done; }
++
++stamp gcc-stage1
++cd $B/gcc
++[ -f .stage1 ] || { CFLAGS_FOR_TARGET="-O2 -ffunction-sections -fdata-sections" \
++  CXXFLAGS_FOR_TARGET="-O2 -ffunction-sections -fdata-sections" LDFLAGS_FOR_TARGET="" \
++  $SRC/gcc-16.1.0/configure --target=$target --prefix=$prefix --enable-languages=c,c++,lto \
++  --with-gnu-as --with-gnu-ld --with-gcc --enable-cxx-flags='-ffunction-sections' --disable-libstdcxx-verbose \
++  --enable-poison-system-directories --enable-threads=posix --disable-win32-registry --disable-nls --disable-debug \
++  --disable-libmudflap --disable-libssp --disable-libgomp --disable-libstdcxx-pch --enable-libstdcxx-time=yes \
++  --enable-libstdcxx-filesystem-ts --with-newlib=yes --with-native-system-header-dir=/include \
++  --with-sysroot=$prefix/$target --enable-lto --disable-tm-clone-registry --disable-__cxa_atexit \
++  --with-bugurl="https://devkitpro.org" --with-march=armv8 --enable-multilib --with-pkgversion="devkitA64" \
++  --disable-bootstrap \
++  && make -j$J all-gcc MAKEINFO=true && make install-gcc MAKEINFO=true && touch .stage1; }
++
++stamp newlib
++cd $B/newlib
++[ -f .done ] || { unset CFLAGS CC CXX; CFLAGS_FOR_TARGET="-O2 -ffunction-sections -fdata-sections" \
++  $SRC/newlib-dkp/configure --disable-newlib-supplied-syscalls --enable-newlib-mb --disable-newlib-wide-orient \
++  --enable-newlib-register-fini --target=$target --prefix=$prefix \
++  && make -j$J MAKEINFO=true && make install -j1 MAKEINFO=true && touch .done; }
++
++stamp gcc-stage2
++cd $B/gcc
++[ -f .stage2 ] || { make -j$J MAKEINFO=true && make install-strip MAKEINFO=true && touch .stage2; }
++
++# stage1 generated limits.h without the newlib syslimits chain (no PATH_MAX): regenerate it
++GI=$prefix/lib/gcc/$target/16.1.0/include
++cat $SRC/gcc-16.1.0/gcc/limitx.h $SRC/gcc-16.1.0/gcc/glimits.h $SRC/gcc-16.1.0/gcc/limity.h > $GI/limits.h
++
++stamp rules
++cd $SRC/devkita64-rules-1.1.1 && make install DEVKITPRO=/opt/devkitpro || cp -v *rules* /opt/devkitpro/devkitA64/ 
++stamp host-tools
++for t in switch-tools general-tools; do
++  (cd $SRC/$t && ./autogen.sh && ./configure --prefix=/opt/devkitpro/tools && make -j$J && make install)
++done
++
++stamp cmake-meson-pkgconfig
++D=/opt/devkitpro; PP=$SRC/pacman-packages
++mkdir -p $D/cmake/Platform $D/portlibs/switch/bin $D/portlibs/switch/lib
++cp $PP/cmake/common-utils/dkp-*.cmake $D/cmake/
++cp $PP/cmake/common-utils/Generic-dkP.cmake $D/cmake/Platform/
++cp $PP/cmake/devkita64/aarch64-none-elf-cmake $D/devkitA64/bin/
++cp $PP/cmake/devkita64/devkitA64.cmake $PP/cmake/switch/Switch.cmake $D/cmake/
++cp $PP/cmake/switch/NintendoSwitch.cmake $D/cmake/Platform/
++cp $PP/cmake/switch/aarch64-none-elf-cmake $D/portlibs/switch/bin/
++install -m755 $PP/dkp-meson-scripts/meson-cross.sh $PP/dkp-meson-scripts/meson-toolchain.sh $D/
++install -m644 $PP/dkp-toolchain-vars/devkita64.sh $PP/dkp-toolchain-vars/switchvars.sh $D/
++install -m755 $PP/dkp-toolchain-vars/portlibs_prefix.sh $D/
++install -m755 $PP/switch/pkg-config/pkg-config.in $D/portlibs/switch/bin/aarch64-none-elf-pkg-config
++chmod +x $D/devkitA64/bin/aarch64-none-elf-cmake $D/portlibs/switch/bin/aarch64-none-elf-cmake
++stamp DONE
+diff --git a/nx/build/toolchain-from-source/fetch-sources.sh b/nx/build/toolchain-from-source/fetch-sources.sh
+new file mode 100755
+index 000000000..d7c99a382
+--- /dev/null
++++ b/nx/build/toolchain-from-source/fetch-sources.sh
+@@ -0,0 +1,43 @@
++#!/bin/bash
++# Fetches everything needed to build devkitA64 + libnx + the switch portlibs
++# from GitHub (for machines where the devkitPro package servers can't be
++# reached). Normal setups should just install devkitPro with its pacman.
++#   fetch-sources.sh [src dir]
++set -e
++SRC=${1:-$PWD/src}
++mkdir -p "$SRC" && cd "$SRC"
++c() { [ -d "$3" ] || git clone -q --depth 1 --branch "$2" "https://github.com/$1.git" "$3"; }
++c devkitPro/buildscripts master buildscripts
++c devkitPro/pacman-packages master pacman-packages
++c gnutools/binutils-gdb binutils-2_46 binutils-2.46.0
++c gcc-mirror/gcc releases/gcc-16.1.0 gcc-16.1.0
++c devkitPro/newlib devkitPro newlib-dkp
++c devkitPro/devkita64-rules v1.1.1 devkita64-rules-1.1.1
++c switchbrew/libnx v4.12.0 libnx
++c switchbrew/switch-tools v1.13.1 switch-tools
++c devkitPro/general-tools v1.4.4 general-tools
++c devkitPro/libdrm_nouveau v1.0.1 libdrm_nouveau
++c chaotic-cx/mesa-mirror mesa-20.1.0-rc3 mesa-20.1.0-rc3
++c libsdl-org/SDL release-2.28.5 SDL2-2.28.5
++c kcat/openal-soft 1.21.1 openal-soft-1.21.1
++c webmproject/libvpx v1.8.0 libvpx-1.8.0
++c xiph/ogg v1.3.4 libogg-1.3.4
++c xiph/vorbis v1.3.7 libvorbis-1.3.7
++c xiph/opus v1.3 opus-1.3
++c xiph/flac 1.3.2 flac-1.3.2
++c libsndfile/libsndfile 1.2.2 libsndfile-1.2.2
++c libsdl-org/mpg123 v1.31.3-SDL mpg123-1.31.3
++c madler/zlib v1.3.1 zlib-1.3.1
++
++P=buildscripts/patches
++[ -f binutils-2.46.0/.patched ] || { (cd binutils-2.46.0 && patch -p1 -s < ../$P/binutils-2.46.0-1.patch && touch .patched); }
++[ -f gcc-16.1.0/.patched ] || { (cd gcc-16.1.0 && patch -p1 -s < ../$P/gcc-16.1.0-1.patch && touch .patched); }
++# (the devkitPro branch of newlib already contains newlib-4.6.0.20260123-4.patch)
++
++# fixes needed with GCC 16 / current newlib:
++# - newlib now declares timespec_get(): mesa's C11 fallback must use another name
++grep -q mesa_timespec_get mesa-20.1.0-rc3/include/c11/threads.h || \
++	sed -i 's|^#include <sys/time.h>$|#include <sys/time.h>\n#define timespec_get mesa_timespec_get|' mesa-20.1.0-rc3/include/c11/threads.h
++# - openal-soft 1.21.1 has a typo in a template that GCC 16 no longer ignores
++sed -i 's/const T& operator\*() const& { return this->mValue; }/const T\& operator*() const\& { return mStore.mValue; }/' openal-soft-1.21.1/common/aloptional.h
++echo "sources ready in $SRC"
+diff --git a/nx/shadervariants.txt b/nx/shadervariants.txt
+new file mode 100644
+index 000000000..b952cf3b2
+--- /dev/null
++++ b/nx/shadervariants.txt
+@@ -0,0 +1,19 @@
++UZDoom-GLES-variants 2
++Ep003 00807200
++Mp000 00807200
++Mp000 00807208
++Mp000 00807280
++Mp000 00807284
++Mp000 0080f200
++Mp000 0080f205
++Mp000 0080f208
++Mp000 0080f280
++Mp006 00807202
++Mp006 00807280
++Mp006 00807288
++Np000 00807200
++Np000 00807202
++Np000 00807208
++Np000 0080f200
++Np000 0080f204
++Np000 0080f208
+-- 
+2.56.0
+

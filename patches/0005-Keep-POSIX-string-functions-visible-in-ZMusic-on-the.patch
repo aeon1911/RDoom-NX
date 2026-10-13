@@ -1,0 +1,59 @@
+From 7e87c327897d8a46bd7f55a132fc804e90be3f32 Mon Sep 17 00:00:00 2001
+From: Aeon <171243930+aeon1911@users.noreply.github.com>
+Date: Mon, 28 Sep 2026 12:14:58 -0300
+Subject: [PATCH 05/46] Keep POSIX string functions visible in ZMusic on the
+ Switch.
+
+newlib hides strdup and strcasecmp when ZMusic forces -std=c++17. On the Switch, compile that library with extensions on and define _GNU_SOURCE so TiMidity++ and the other music backends see them.
+---
+ libraries/ZMusic/CMakeLists.txt | 20 ++++++++++++++++++--
+ 1 file changed, 18 insertions(+), 2 deletions(-)
+
+diff --git a/libraries/ZMusic/CMakeLists.txt b/libraries/ZMusic/CMakeLists.txt
+index 571b67b13..625072df8 100644
+--- a/libraries/ZMusic/CMakeLists.txt
++++ b/libraries/ZMusic/CMakeLists.txt
+@@ -6,7 +6,13 @@ set(CMAKE_VISIBILITY_INLINES_HIDDEN ON)
+ 
+ set(CMAKE_CXX_STANDARD 17)
+ set(CMAKE_CXX_STANDARD_REQUIRED ON)
+-set(CMAKE_CXX_EXTENSIONS OFF) 
++# The Switch port turns extensions on so newlib declares strdup and strcasecmp.
++# Forcing them off here compiles TiMidity++ as strict C++17 and hides both.
++if(NINTENDO_SWITCH)
++	set(CMAKE_CXX_EXTENSIONS ON)
++else()
++	set(CMAKE_CXX_EXTENSIONS OFF)
++endif()
+ 
+ if (VCPKG_LIBSNDFILE)
+ 	list(APPEND VCPKG_MANIFEST_FEATURES "vcpkg-libsndfile")
+@@ -31,7 +37,11 @@ list(APPEND CMAKE_MODULE_PATH ${PROJECT_SOURCE_DIR}/cmake)
+ 
+ set(CMAKE_CXX_STANDARD 17)
+ set(CMAKE_CXX_STANDARD_REQUIRED ON)
+-set(CMAKE_CXX_EXTENSIONS OFF) 
++if(NINTENDO_SWITCH)
++	set(CMAKE_CXX_EXTENSIONS ON)
++else()
++	set(CMAKE_CXX_EXTENSIONS OFF)
++endif()
+ 
+ include(CMakePackageConfigHelpers)
+ include(GNUInstallDirs)
+@@ -165,6 +175,12 @@ if (WIN32 AND MINGW)
+ 	add_compile_definitions(-D__USE_MINGW_ANSI_STDIO=1)
+ endif()
+ 
++if(NINTENDO_SWITCH)
++	# newlib hides POSIX string helpers unless this is set, including when a
++	# target is still compiled as -std=c++17.
++	add_compile_definitions(_GNU_SOURCE)
++endif()
++
+ add_subdirectory(thirdparty)
+ add_subdirectory(source)
+ 
+-- 
+2.56.0
+

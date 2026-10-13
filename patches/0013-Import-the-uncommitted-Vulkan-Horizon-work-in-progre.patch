@@ -1,0 +1,1952 @@
+From 313881790b3141a61ecfa1341a3998fae9a57af1 Mon Sep 17 00:00:00 2001
+From: RDoom Build <171243930+aeon1911@users.noreply.github.com>
+Date: Sun, 11 Oct 2026 07:21:29 -0300
+Subject: [PATCH 13/46] Import the uncommitted Vulkan/Horizon work-in-progress
+ from uz5.0.3-nx4.13.
+
+Taken unchanged from the working tree of the earlier Switch port so later
+RDoom commits show exactly what was revised.
+---
+ CMakeLists.txt                                |   8 +-
+ libraries/ZVulkan/CMakeLists.txt              |  20 ++--
+ libraries/ZVulkan/include/zvulkan/volk/volk.h |  40 ++++++-
+ .../ZVulkan/include/zvulkan/vulkanobjects.h   |  18 ++-
+ libraries/ZVulkan/src/volk/volk.c             |  66 +++++++++++
+ libraries/ZVulkan/src/vulkanbuilders.cpp      |   2 +
+ libraries/ZVulkan/src/vulkandevice.cpp        |  23 +++-
+ libraries/ZVulkan/src/vulkanswapchain.cpp     |  16 ++-
+ nx/LEIA-ME.txt                                | 105 +++++++++++++++++-
+ src/CMakeLists.txt                            |  15 ++-
+ src/common/engine/nx_perf.cpp                 |  30 ++++-
+ src/common/engine/nx_perf.h                   |   9 ++
+ src/common/platform/posix/nx/i_nxsystem.cpp   |  88 +++++++++++++++
+ src/common/platform/posix/nx/nx_glthread.cpp  |  96 +++++++++++++---
+ src/common/platform/posix/nx/nx_glthread.h    |   7 +-
+ .../platform/posix/nx/nx_loadscreen.cpp       |  38 ++++++-
+ src/common/platform/posix/nx/nx_loadscreen.h  |   3 +
+ src/common/platform/posix/sdl/i_main.cpp      |   6 +-
+ src/common/platform/posix/sdl/sdlglvideo.cpp  |  94 +++++++++++++++-
+ src/common/rendering/gles/gles_asynctex.cpp   |   8 +-
+ .../rendering/gles/gles_framebuffer.cpp       |   2 +
+ src/common/rendering/gles/gles_hwtexture.cpp  |  22 +++-
+ src/common/rendering/gles/gles_hwtexture.h    |   6 +
+ .../rendering/gles/gles_renderstate.cpp       |  13 ++-
+ .../hwrenderer/data/hw_lightbuffer.cpp        |  14 +++
+ src/common/rendering/v_video.h                |   5 +-
+ .../rendering/vulkan/shaders/vk_shader.cpp    |   6 +-
+ .../rendering/vulkan/shaders/vk_shader.h      |   2 +-
+ .../rendering/vulkan/system/vk_buffer.cpp     |  14 +++
+ .../rendering/vulkan/system/vk_buffer.h       |   1 +
+ .../vulkan/system/vk_commandbuffer.cpp        |  10 ++
+ .../vulkan/textures/vk_hwtexture.cpp          |   4 +
+ src/d_main.cpp                                |  20 ++++
+ src/d_net.cpp                                 |  44 ++++++++
+ src/rendering/hwrenderer/hw_nxlights.cpp      |  19 +++-
+ tools/nxlauncher/CMakeLists.txt               |   4 +-
+ tools/nxlauncher/src/data.c                   |  40 ++++++-
+ tools/nxlauncher/src/data.h                   |   1 +
+ tools/nxlauncher/src/platform.h               |   2 +-
+ tools/nxlauncher/src/ui.c                     |   9 +-
+ 40 files changed, 864 insertions(+), 66 deletions(-)
+
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index dcc19933b..969ecabb4 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -73,7 +73,7 @@ if( NINTENDO_SWITCH )
+ 	# unless we just do this
+ 	set( CMAKE_CXX_EXTENSIONS ON )
+ 	# used in both gzdoom and launcher
+-	set( SWITCH_APP_VERSION "uz5.0.3-nx4.1" )
++	set( SWITCH_APP_VERSION "uz5.0.3-nx4.13" )
+ endif()
+ 
+ # Recursive function to place PK3 archive source files into a hierarchy of source file in the IDE
+@@ -300,8 +300,12 @@ endif()
+ option (NO_DISCORDRPC "Disable Discord RPC support" OFF)
+ 
+ if( NINTENDO_SWITCH )
+-	set( HAVE_VULKAN OFF )
+ 	set( NO_DISCORDRPC ON )
++	# Vulkan is optional. The launcher selects it; if the device fails to
++	# come up, the existing GLES renderer still starts the game.
++	if( HAVE_VULKAN )
++		add_compile_definitions( VK_USE_PLATFORM_VI_NN=1 )
++	endif()
+ endif()
+ 
+ if( MSVC )
+diff --git a/libraries/ZVulkan/CMakeLists.txt b/libraries/ZVulkan/CMakeLists.txt
+index 8bea41350..7cd68141c 100644
+--- a/libraries/ZVulkan/CMakeLists.txt
++++ b/libraries/ZVulkan/CMakeLists.txt
+@@ -2,14 +2,20 @@ cmake_minimum_required(VERSION 3.22)
+ 
+ project(zvulkan)
+ 
+-option( VULKAN_USE_XLIB "Use Vulkan xlib (X11) WSI integration" ON )
+-option( VULKAN_USE_WAYLAND "Use Vulkan Wayland WSI integration" OFF )
+-
+-if ( VULKAN_USE_XLIB )
+-	add_definitions( -DVULKAN_USE_XLIB=1 )
++if (NINTENDO_SWITCH)
++	set( VULKAN_USE_XLIB OFF CACHE BOOL "" FORCE )
++	set( VULKAN_USE_WAYLAND OFF CACHE BOOL "" FORCE )
++	add_definitions( -DVK_USE_PLATFORM_VI_NN=1 -D__SWITCH__=1 )
+ else()
+-	if (VULKAN_USE_WAYLAND)
+-		add_definitions( -DVULKAN_USE_WAYLAND=1 )
++	option( VULKAN_USE_XLIB "Use Vulkan xlib (X11) WSI integration" ON )
++	option( VULKAN_USE_WAYLAND "Use Vulkan Wayland WSI integration" OFF )
++
++	if ( VULKAN_USE_XLIB )
++		add_definitions( -DVULKAN_USE_XLIB=1 )
++	else()
++		if (VULKAN_USE_WAYLAND)
++			add_definitions( -DVULKAN_USE_WAYLAND=1 )
++		endif()
+ 	endif()
+ endif()
+ 
+diff --git a/libraries/ZVulkan/include/zvulkan/volk/volk.h b/libraries/ZVulkan/include/zvulkan/volk/volk.h
+index 47fbed239..136f28192 100644
+--- a/libraries/ZVulkan/include/zvulkan/volk/volk.h
++++ b/libraries/ZVulkan/include/zvulkan/volk/volk.h
+@@ -10,6 +10,43 @@
+ #ifndef VOLK_H_
+ #define VOLK_H_
+ 
++#if defined(__SWITCH__)
++#ifndef VK_USE_PLATFORM_VI_NN
++#define VK_USE_PLATFORM_VI_NN 1
++#endif
++#include <vulkan/vulkan.h>
++#include <vulkan/vulkan_vi.h>
++
++#define VOLK_HEADER_VERSION 270
++
++#ifdef __cplusplus
++extern "C" {
++#endif
++
++struct VolkDeviceTable;
++
++VkResult volkInitialize(void);
++void volkInitializeCustom(PFN_vkGetInstanceProcAddr handler);
++void volkFinalize(void);
++uint32_t volkGetInstanceVersion(void);
++void volkLoadInstance(VkInstance instance);
++void volkLoadInstanceOnly(VkInstance instance);
++void volkLoadDevice(VkDevice device);
++VkInstance volkGetLoadedInstance(void);
++VkDevice volkGetLoadedDevice(void);
++void volkLoadDeviceTable(struct VolkDeviceTable* table, VkDevice device);
++
++struct VolkDeviceTable
++{
++	int dummy;
++};
++
++#ifdef __cplusplus
++}
++#endif
++
++#else /* !defined(__SWITCH__) */
++
+ #if defined(VULKAN_H_) && !defined(VK_NO_PROTOTYPES)
+ #	error To use volk, you need to define VK_NO_PROTOTYPES before including vulkan.h
+ #endif
+@@ -1952,7 +1989,8 @@ extern PFN_vkAcquireNextImage2KHR vkAcquireNextImage2KHR;
+ }
+ #endif
+ 
+-#endif
++#endif /* !defined(__SWITCH__) */
++#endif /* VOLK_H_ */
+ 
+ #ifdef VOLK_IMPLEMENTATION
+ #undef VOLK_IMPLEMENTATION
+diff --git a/libraries/ZVulkan/include/zvulkan/vulkanobjects.h b/libraries/ZVulkan/include/zvulkan/vulkanobjects.h
+index 701dadf23..38ff2df40 100644
+--- a/libraries/ZVulkan/include/zvulkan/vulkanobjects.h
++++ b/libraries/ZVulkan/include/zvulkan/vulkanobjects.h
+@@ -1,5 +1,9 @@
+ #pragma once
+ 
++#if defined(__SWITCH__)
++#include <switch.h>
++#endif
++
+ #include "vulkandevice.h"
+ 
+ class VulkanCommandPool;
+@@ -63,6 +67,8 @@ public:
+ 	VkBuffer buffer;
+ 	VmaAllocation allocation;
+ 	size_t size = 0;
++	void *mappedPtr = nullptr;
++	size_t mappedSize = 0;
+ 
+ 	void *Map(size_t offset, size_t size);
+ 	void Unmap();
+@@ -507,11 +513,21 @@ inline void *VulkanBuffer::Map(size_t offset, size_t size)
+ {
+ 	void *data;
+ 	VkResult result = vmaMapMemory(device->allocator, allocation, &data);
+-	return (result == VK_SUCCESS) ? ((uint8_t*)data) + offset : nullptr;
++	if (result != VK_SUCCESS) return nullptr;
++	mappedPtr = data;
++	mappedSize = (size == 0 || size == (size_t)-1) ? this->size : size;
++	return ((uint8_t*)data) + offset;
+ }
+ 
+ inline void VulkanBuffer::Unmap()
+ {
++#if defined(__SWITCH__)
++	// Tegra X1 does not snoop the CPU dcache. HOST_COHERENT is not enough.
++	if (mappedPtr && mappedSize > 0)
++		armDCacheClean(mappedPtr, mappedSize);
++#endif
++	mappedPtr = nullptr;
++	mappedSize = 0;
+ 	vmaUnmapMemory(device->allocator, allocation);
+ }
+ 
+diff --git a/libraries/ZVulkan/src/volk/volk.c b/libraries/ZVulkan/src/volk/volk.c
+index 67f85c7f8..a610e5741 100644
+--- a/libraries/ZVulkan/src/volk/volk.c
++++ b/libraries/ZVulkan/src/volk/volk.c
+@@ -1,4 +1,68 @@
+ 
++#if defined(__SWITCH__)
++
++#include "volk/volk.h"
++
++static VkInstance s_loadedInstance = VK_NULL_HANDLE;
++static VkDevice s_loadedDevice = VK_NULL_HANDLE;
++
++VkResult volkInitialize(void)
++{
++	return VK_SUCCESS;
++}
++
++void volkInitializeCustom(PFN_vkGetInstanceProcAddr handler)
++{
++	(void)handler;
++}
++
++void volkFinalize(void)
++{
++	s_loadedInstance = VK_NULL_HANDLE;
++	s_loadedDevice = VK_NULL_HANDLE;
++}
++
++uint32_t volkGetInstanceVersion(void)
++{
++	uint32_t apiVersion = 0;
++	if (vkEnumerateInstanceVersion && vkEnumerateInstanceVersion(&apiVersion) == VK_SUCCESS)
++		return apiVersion;
++	return VK_API_VERSION_1_0;
++}
++
++void volkLoadInstance(VkInstance instance)
++{
++	s_loadedInstance = instance;
++}
++
++void volkLoadInstanceOnly(VkInstance instance)
++{
++	s_loadedInstance = instance;
++}
++
++void volkLoadDevice(VkDevice device)
++{
++	s_loadedDevice = device;
++}
++
++VkInstance volkGetLoadedInstance(void)
++{
++	return s_loadedInstance;
++}
++
++VkDevice volkGetLoadedDevice(void)
++{
++	return s_loadedDevice;
++}
++
++void volkLoadDeviceTable(struct VolkDeviceTable* table, VkDevice device)
++{
++	(void)table;
++	(void)device;
++}
++
++#else /* !defined(__SWITCH__) */
++
+ #if defined(_WIN32)
+ #define VK_USE_PLATFORM_WIN32_KHR
+ #elif defined(__APPLE__)
+@@ -3053,3 +3117,5 @@ PFN_vkAcquireNextImage2KHR vkAcquireNextImage2KHR;
+ }
+ #endif
+ /* clang-format on */
++
++#endif /* !defined(__SWITCH__) */
+diff --git a/libraries/ZVulkan/src/vulkanbuilders.cpp b/libraries/ZVulkan/src/vulkanbuilders.cpp
+index be18a8632..6c35f1e4b 100644
+--- a/libraries/ZVulkan/src/vulkanbuilders.cpp
++++ b/libraries/ZVulkan/src/vulkanbuilders.cpp
+@@ -1715,6 +1715,8 @@ VulkanInstanceBuilder& VulkanInstanceBuilder::RequireSurfaceExtensions(bool enab
+ 		RequireExtension(VK_MVK_MACOS_SURFACE_EXTENSION_NAME);
+ #elif defined(VK_USE_PLATFORM_XLIB_KHR)
+ 		RequireExtension(VK_KHR_XLIB_SURFACE_EXTENSION_NAME);
++#elif defined(__SWITCH__) || defined(VK_USE_PLATFORM_VI_NN)
++		RequireExtension(VK_NN_VI_SURFACE_EXTENSION_NAME);
+ #endif
+ 
+ 		OptionalExtension(VK_EXT_SWAPCHAIN_COLOR_SPACE_EXTENSION_NAME); // For HDR support
+diff --git a/libraries/ZVulkan/src/vulkandevice.cpp b/libraries/ZVulkan/src/vulkandevice.cpp
+index 0adfff5c2..607b055cb 100644
+--- a/libraries/ZVulkan/src/vulkandevice.cpp
++++ b/libraries/ZVulkan/src/vulkandevice.cpp
+@@ -51,7 +51,12 @@ void VulkanDevice::CreateAllocator()
+ 	allocinfo.physicalDevice = PhysicalDevice.Device;
+ 	allocinfo.device = device;
+ 	allocinfo.instance = Instance->Instance;
++#if defined(__SWITCH__)
++	// 64 MB blocks exhaust the 4 GB heap once mods upload light and texture data.
++	allocinfo.preferredLargeHeapBlockSize = 16 * 1024 * 1024;
++#else
+ 	allocinfo.preferredLargeHeapBlockSize = 64 * 1024 * 1024;
++#endif
+ 	if (vmaCreateAllocator(&allocinfo, &allocator) != VK_SUCCESS)
+ 		VulkanError("Unable to create allocator");
+ }
+@@ -93,7 +98,14 @@ void VulkanDevice::CreateDevice()
+ 	deviceFeatures2.features = EnabledFeatures.Features;
+ 
+ 	void** next = const_cast<void**>(&deviceCreateInfo.pNext);
+-	if (SupportsExtension(VK_KHR_GET_PHYSICAL_DEVICE_PROPERTIES_2_EXTENSION_NAME))
++#if defined(__SWITCH__)
++	// NVK on Horizon rejects a 1.1 feature chain on a 1.0 instance, and
++	// pEnabledFeatures must stay null once pNext is used.
++	const bool chainFeatures = Instance->ApiVersion >= VK_API_VERSION_1_1;
++#else
++	const bool chainFeatures = SupportsExtension(VK_KHR_GET_PHYSICAL_DEVICE_PROPERTIES_2_EXTENSION_NAME);
++#endif
++	if (chainFeatures)
+ 	{
+ 		*next = &deviceFeatures2;
+ 		next = &deviceFeatures2.pNext;
+@@ -103,26 +115,27 @@ void VulkanDevice::CreateDevice()
+ 		deviceCreateInfo.pEnabledFeatures = &deviceFeatures2.features;
+ 	}
+ 
+-	if (SupportsExtension(VK_KHR_BUFFER_DEVICE_ADDRESS_EXTENSION_NAME))
++	if (chainFeatures && SupportsExtension(VK_KHR_BUFFER_DEVICE_ADDRESS_EXTENSION_NAME))
+ 	{
+ 		*next = &EnabledFeatures.BufferDeviceAddress;
+ 		next = &EnabledFeatures.BufferDeviceAddress.pNext;
+ 	}
+-	if (SupportsExtension(VK_KHR_ACCELERATION_STRUCTURE_EXTENSION_NAME))
++	if (chainFeatures && SupportsExtension(VK_KHR_ACCELERATION_STRUCTURE_EXTENSION_NAME))
+ 	{
+ 		*next = &EnabledFeatures.AccelerationStructure;
+ 		next = &EnabledFeatures.AccelerationStructure.pNext;
+ 	}
+-	if (SupportsExtension(VK_KHR_RAY_QUERY_EXTENSION_NAME))
++	if (chainFeatures && SupportsExtension(VK_KHR_RAY_QUERY_EXTENSION_NAME))
+ 	{
+ 		*next = &EnabledFeatures.RayQuery;
+ 		next = &EnabledFeatures.RayQuery.pNext;
+ 	}
+-	if (SupportsExtension(VK_EXT_DESCRIPTOR_INDEXING_EXTENSION_NAME))
++	if (chainFeatures && SupportsExtension(VK_EXT_DESCRIPTOR_INDEXING_EXTENSION_NAME))
+ 	{
+ 		*next = &EnabledFeatures.DescriptorIndexing;
+ 		next = &EnabledFeatures.DescriptorIndexing.pNext;
+ 	}
++	*next = nullptr;
+ 
+ 	VkResult result = vkCreateDevice(PhysicalDevice.Device, &deviceCreateInfo, nullptr, &device);
+ 	CheckVulkanError(result, "Could not create vulkan device");
+diff --git a/libraries/ZVulkan/src/vulkanswapchain.cpp b/libraries/ZVulkan/src/vulkanswapchain.cpp
+index 299913d8c..613934a1c 100644
+--- a/libraries/ZVulkan/src/vulkanswapchain.cpp
++++ b/libraries/ZVulkan/src/vulkanswapchain.cpp
+@@ -50,10 +50,13 @@ void VulkanSwapChain::Create(int width, int height, int imageCount, bool vsync,
+ 				.Image(image.get(), format.format)
+ 				.DebugName("SwapchainImageView")
+ 				.Create(device);
+-			images.push_back(std::move(image));
+-			views.push_back(std::move(view));
++		images.push_back(std::move(image));
++		views.push_back(std::move(view));
+ 		}
+ 	}
++
++	if (!swapchain)
++		VulkanError("Could not create the Vulkan swapchain");
+ }
+ 
+ void VulkanSwapChain::SelectFormat(const VulkanSurfaceCapabilities& caps, bool hdr)
+@@ -227,7 +230,14 @@ int VulkanSwapChain::AcquireImage(VulkanSemaphore* semaphore, VulkanFence* fence
+ 		return -1;
+ 
+ 	uint32_t imageIndex;
+-	VkResult result = vkAcquireNextImageKHR(device->device, swapchain, 1'000'000'000, semaphore ? semaphore->semaphore : VK_NULL_HANDLE, fence ? fence->fence : VK_NULL_HANDLE, &imageIndex);
++	// On Horizon a one-second timeout gives up before the first buffer is
++	// released, so nothing is ever queued and the screen stays black.
++#if defined(__SWITCH__)
++	const uint64_t acquireTimeout = UINT64_MAX;
++#else
++	const uint64_t acquireTimeout = 1'000'000'000;
++#endif
++	VkResult result = vkAcquireNextImageKHR(device->device, swapchain, acquireTimeout, semaphore ? semaphore->semaphore : VK_NULL_HANDLE, fence ? fence->fence : VK_NULL_HANDLE, &imageIndex);
+ 	if (result == VK_SUCCESS || result == VK_SUBOPTIMAL_KHR)
+ 	{
+ 		return imageIndex;
+diff --git a/nx/LEIA-ME.txt b/nx/LEIA-ME.txt
+index a0e9b95fe..f249a216c 100644
+--- a/nx/LEIA-ME.txt
++++ b/nx/LEIA-ME.txt
+@@ -1,8 +1,108 @@
+-UZDoom 5.0.3 para Nintendo Switch  (build "uz5.0.3-nx4.1")
++UZDoom 5.0.3 para Nintendo Switch  (build "uz5.0.3-nx4.13")
+ =====================================================================
+ Port, launcher e otimizações para Switch: Renan  -  Telegram @aeon1911
+ =====================================================================
+ 
++nx4.13 - Vulkan é o renderizador
++--------------------------------
++A tela preta depois do loading era a janela da tela de loading: ao fechar,
++o formato da imagem ficava 0 e o compositor não mostrava o quadro do
++Vulkan. O formato volta ao valor inicial antes do Vulkan registrar a
++imagem. O jogo abre em Vulkan. O rodapé tem que mostrar uz5.0.3-nx4.13.
++
++nx4.12 - a tela preta depois do loading
++----------------------------------------
++A nx4.11 abria em Vulkan e soltava a tela de loading antes de mostrar a
++imagem, então o console ficava preto. O padrão voltou para OpenGL ES.
++Vulkan continua em OPÇÕES → Vídeo. Se ele não conseguir abrir a imagem,
++o jogo segue em OpenGL ES. O rodapé tem que mostrar uz5.0.3-nx4.12.
++
++nx4.11 - Vulkan como opção de vídeo
++------------------------------------
++O motor agora também desenha com Vulkan (driver Mesa NVK do Tegra X1),
++no mesmo UZDoom 5.0.3. Brutal Doom, Lexicon e WadFusion continuam neste
++motor. Em OPÇÕES, "Vídeo" escolhe Vulkan ou OpenGL ES. O padrão novo é
++Vulkan. Se o Vulkan não abrir, o jogo volta sozinho para OpenGL ES.
++O rodapé tem que mostrar uz5.0.3-nx4.11.
++
++nx4.10 - a luta não empilha mais vários tics antes de desenhar
++--------------------------------------------------------------
++No Brutal Doom um tic custa vários milissegundos. Quando o quadro
++atrasava, o motor rodava os 4 a 6 tics atrasados antes de mostrar a
++imagem, e a tela ficava parada (no perf.log isso aparece como um quadro
++de ~150 ms com dezenas de milissegundos só em thinkers). Agora, numa
++fase, em um jogador, cada quadro roda um tic, ou dois se o quadro
++anterior coube em 30 fps. Rede e demo continuam iguais. Para voltar ao
++comportamento antigo: +set nx_simcap 0
++O rodapé tem que mostrar uz5.0.3-nx4.10.
++
++nx4.9 - a abertura do Brutal volta a ler o controle
++----------------------------------------------------
++Essa tela de fogo é o mapa TITLEMAP do Brutal22test6. O jogo mostrava
++um quadro e ficava preso na espera da tela de 30 fps, então o botão
++nunca era lido. A abertura apresenta a cada atualização da tela, como
++a build que jogava. Dentro de uma fase o limite de 30 fps continua.
++O rodapé tem que mostrar uz5.0.3-nx4.9.
++
++nx4.8 - a intro do WadFusion volta a sair da cidade em chamas
++--------------------------------------------------------------
++Essa tela é um mapa (wf_newgame), não o title 2D. A 4.1 passou a montar
++o mipmap de todas as texturas enquanto ela estava na tela, e o quadro
++não voltava. O lote de texturas voltou ao caminho da build que jogava.
++Sprite que aparece no meio da fase continua com mipmap na CPU.
++O rodapé tem que mostrar uz5.0.3-nx4.8.
++
++nx4.7 - o title usa o mesmo caminho da build que abria
++-------------------------------------------------------
++A comparação com a nx3.7 (a última que entrava nesse pack) mostra que o
++laço do title não foi reescrito. O que a 4.1 acrescentou e ainda rodava
++ali era o mipmap na CPU, o corte de luzes e o cache de upload de luz,
++inclusive enquanto os mods terminavam de carregar. Isso fica desligado
++no title e nas duas telas de loading. Dentro do mapa continua ligado.
++O rodapé tem que mostrar uz5.0.3-nx4.7.
++
++nx4.6 - a intro do WadFusion não fica mais parada no title
++----------------------------------------------------------
++Brutal Doom + Lexicon + WadFusion mostravam o title do Doom e não saíam
++dali. O mapa seguinte precacheia todas as texturas, e o mipmap na CPU
++nessas imagens grandes travava com o title ainda na tela. Sprite pequeno
++continua na CPU; title, céu e parede grande voltam ao caminho antigo.
++O rodapé tem que mostrar uz5.0.3-nx4.6.
++
++nx4.5 - o mixer volta ao outro núcleo depois da tela de carregamento
++---------------------------------------------------------------------
++A nx4.4 deixou o mixer no mesmo núcleo do jogo para a tela de carregamento
++abrir. Em mod com muito som (Brutal Doom) o jogo esperava o mixer a todo
++momento e travava na intro ou no meio da fase. O mixer continua fora desse
++núcleo enquanto a tela de carregamento desenha, e passa para o outro núcleo
++quando ela termina. Luzes, estabilizador e mipmaps continuam. O rodapé tem
++que mostrar uz5.0.3-nx4.5.
++
++nx4.4 - o mixer de áudio saiu do núcleo da tela de carregamento
++----------------------------------------------------------------
++A nx4.1 passou o mixer para o mesmo núcleo dessa tela, com prioridade
++maior, e o primeiro quadro nunca era desenhado. A tela voltou ao jeito
++da build que abria, e o mixer ficou onde estava. O rodapé tem que mostrar
++uz5.0.3-nx4.4. Se ainda ficar preta, em sdmc:/switch/gzdoom/boot.log a
++primeira linha diz se o gzdoom.nro chegou a abrir.
++
++nx4.3 - a tela de carregamento abre na hora do Jogar
++----------------------------------------------------
++A nx4.2 ainda ficava preta: o primeiro quadro era desenhado num núcleo que
++o mixer de áudio (e, na prioridade nova, o driver de vídeo) não soltava.
++Agora esse quadro é desenhado na thread principal, antes do jogo começar,
++e a animação fica no outro núcleo. O rodapé do launcher tem que mostrar
++uz5.0.3-nx4.3. A pasta da nx4.2 não serve.
++
++nx4.2 - a tela de carregamento voltou a abrir
++---------------------------------------------
++Na nx4.1, ao apertar Jogar a tela ficava preta e a tela de carregamento
++da homebrew não aparecia. O mixer de áudio tinha passado a ocupar o
++mesmo núcleo dessa tela, com prioridade maior, e uma lista grande de
++mods podia estourar o limite de linha de comando do Atmosphere (2048
++bytes), corrompendo o caminho do gzdoom.nro. Os dois foram corrigidos.
++As opções de desempenho da nx4.1 continuam iguais.
++
+ nx4.1 - estabilidade em cenas pesadas
+ -------------------------------------
+ Em mapas com muito fogo, tochas e efeitos o FPS caía. Cada luz dinâmica
+@@ -179,6 +279,7 @@ Port para Switch, launcher, tela de carregamento e otimizações:
+ Renan  -  Telegram @aeon1911
+ 
+ Baseado em: UZDoom/GZDoom/ZDoom teams (GPLv3), fgsfds (port de Switch e
+-launcher original), Thorhax (GZDoom-NX-2026), devkitPro (devkitA64, libnx).
++launcher original), Thorhax (GZDoom-NX-2026), NaGa e danfromtico
++(Mesa NVK / Vulkan no Horizon), devkitPro (devkitA64, libnx).
+ Fontes Bebas Neue e Poppins: SIL Open Font License (dentro do launcher).
+ Código-fonte (GPLv3): repositório do projeto no GitHub.
+diff --git a/src/CMakeLists.txt b/src/CMakeLists.txt
+index 575294f76..05ba338b5 100644
+--- a/src/CMakeLists.txt
++++ b/src/CMakeLists.txt
+@@ -1327,9 +1327,17 @@ list( REMOVE_ITEM GAME_NONPCH_SOURCES ${PCH_SOURCES} )
+ if( NINTENDO_SWITCH )
+ 	list( REMOVE_ITEM PROJECT_LIBRARIES dl )
+ 	set( PROJECT_LIBRARIES ${PROJECT_LIBRARIES} EGL glapi drm_nouveau )
++	if( HAVE_VULKAN )
++		# Mesa NVK is loaderless: libvulkan.a is the driver. expat/zstd/elf/z
++		# are the archives the Switch Vulkan SDK exports next to it.
++		set( PROJECT_LIBRARIES ${PROJECT_LIBRARIES} vulkan expat zstd z )
++	endif()
+ 	# static ZMusic pulls in libsndfile (+ codecs) and mpg123
+ 	set( ZMUSIC_LIBRARIES ${ZMUSIC_LIBRARIES} sndfile FLAC opus vorbisenc vorbis ogg mpg123 m )
+-	link_directories( $ENV{DEVKITPRO}/portlibs/switch/lib )
++	# nx/deps/libvulkan.a is the Horizon NVK built with -mtp=soft.
++	# Mesa 26.2.4 in portlibs uses tpidr_el0 (libnx never sets that
++	# register) and must not be linked ahead of this archive.
++	link_directories( ${CMAKE_SOURCE_DIR}/nx/deps/switch $ENV{DEVKITPRO}/portlibs/switch/lib )
+ endif()
+ 
+ add_executable( zdoom MACOSX_BUNDLE ${GAME_SOURCES} )
+@@ -1384,6 +1392,11 @@ endif()
+ if( NINTENDO_SWITCH )
+ 	# everything is static on Switch, so let the linker resolve the circular deps
+ 	target_link_libraries( zdoom -Wl,--start-group ${PROJECT_LIBRARIES} lzma ${ZMUSIC_LIBRARIES} absl::base absl::flat_hash_map absl::strings absl::hash nx -Wl,--end-group )
++	if( HAVE_VULKAN )
++		# Mesa and newlib both define a few libc helpers. The ICD entry points
++		# must stay linked even though volk does not load them on Switch.
++		target_link_options( zdoom PRIVATE "-Wl,--allow-multiple-definition" "-Wl,-u,vk_icdGetInstanceProcAddr" "-Wl,-u,vk_icdNegotiateLoaderICDInterfaceVersion" "-pthread" )
++	endif()
+ 	# Mesa glthread support (nx_glthread.cpp): count driver-thread syncs, big stack for the driver thread
+ 	target_link_options( zdoom PRIVATE "-Wl,--wrap=_mesa_glthread_finish_before" "-Wl,--wrap=pthread_create" "-Wl,--wrap=nwindowDequeueBuffer" "-Wl,--wrap=nwindowQueueBuffer" "-Wl,--wrap=_util_queue_fence_wait" )
+ else()
+diff --git a/src/common/engine/nx_perf.cpp b/src/common/engine/nx_perf.cpp
+index 9394148f5..2212c9dac 100644
+--- a/src/common/engine/nx_perf.cpp
++++ b/src/common/engine/nx_perf.cpp
+@@ -12,7 +12,12 @@
+ #include "c_cvars.h"
+ #include "i_time.h"
+ #include "fs_files.h"
+-#include "c_cvars.h"
++#include "gamestate.h"
++
++bool NXInPlay()
++{
++	return gamestate == GS_LEVEL;
++}
+ 
+ // 0 = off, 1 = log frames slower than nx_perfthreshold, 2 = log every frame
+ #ifdef __SWITCH__
+@@ -25,6 +30,9 @@ CVAR(Int, nx_perfthreshold, 90, CVAR_ARCHIVE | CVAR_GLOBALCONFIG)
+ NXPerfCounters nxperf;
+ 
+ static double lastFrame = -1;
++static double lastFrameMS = 0;
++static double lastSimMS = 0;
++static double lastTicMS = 0;
+ static double startTime = -1;
+ static int linesWritten = 0;
+ static FILE *perfFile = nullptr;
+@@ -65,7 +73,7 @@ static void WriteSettings(FILE *f)
+ 		"vid_vsync", "vid_maxfps", "cl_capfps", "vid_scalefactor", "nx_effect_cull", "nx_effect_minalpha", "r_actorspriteshadowdist", "vid_preferbackend", "gl_multithread", "r_dynlights", "gles_max_lights_per_surface",
+ 		"r_actorspriteshadow", "gl_texture_filter", "gl_texture_filter_anisotropic", "r_maxparticles", "cl_maxdecals",
+ 		"snd_channels", "snd_efx", "snd_samplerate", "gles_async_textures", "snd_asyncload", "nx_workers",
+-		"gl_sort_textures", "nx_dynlight_max", "nx_dynlight_dist", "nx_stabilizer", "nx_glthread", "nx_glthread_core", "nx_swapinterval", "r_ticstability", "nx_lateswap", nullptr };
++		"gl_sort_textures", "nx_dynlight_max", "nx_dynlight_dist", "nx_stabilizer", "nx_glthread", "nx_glthread_core", "nx_swapinterval", "r_ticstability", "nx_lateswap", "nx_simcap", nullptr };
+ 	fprintf(f, "# settings:");
+ 	for (int i = 0; names[i]; i++)
+ 	{
+@@ -81,12 +89,30 @@ double NXPerf_NowMS()
+ 	return I_nsTime() / 1000000.0;
+ }
+ 
++double NXPerf_LastFrameMS()
++{
++	return lastFrameMS;
++}
++
++double NXPerf_LastSimMS()
++{
++	return lastSimMS;
++}
++
++double NXPerf_LastTicMS()
++{
++	return lastTicMS;
++}
++
+ void NXPerf_EndFrame()
+ {
+ 	double now = NXPerf_NowMS();
+ 	if (startTime < 0) startTime = now;
+ 	double frame = lastFrame < 0 ? 0 : now - lastFrame;
+ 	lastFrame = now;
++	lastFrameMS = frame;
++	lastSimMS = nxperf.tic_ms;
++	lastTicMS = (nxperf.tics > 0) ? nxperf.tic_ms / nxperf.tics : 0;
+ 
+ 	uint64_t hits, misses, bytes;
+ 	FileSys::GetBlockCacheStats(hits, misses, bytes);
+diff --git a/src/common/engine/nx_perf.h b/src/common/engine/nx_perf.h
+index 0d1d360f5..3a9feac55 100644
+--- a/src/common/engine/nx_perf.h
++++ b/src/common/engine/nx_perf.h
+@@ -41,6 +41,10 @@ struct NXPerfCounters
+ extern NXPerfCounters nxperf;
+ double NXPerf_NowMS();
+ void NXPerf_EndFrame();
++// last completed frame, the simulation time inside it, and the average cost of one tic (0 if none ran)
++double NXPerf_LastFrameMS();
++double NXPerf_LastSimMS();
++double NXPerf_LastTicMS();
+ // set by the game code: writes a breakdown (e.g. which actor classes cost the most) into the summary
+ extern void (*NXPerf_SummaryHook)(FILE *f);
+ // true for the one game tic per second whose thinkers get profiled by class
+@@ -56,3 +60,8 @@ struct NXPerfScope
+ };
+ 
+ #define NXPERF_SCOPE(msfield, countfield) NXPerfScope nxperf_scope_(&nxperf.msfield, countfield)
++
++// True only while a map is being played. The title screen and both loading
++// screens stay on the pre-4.1 render path; the light budget and CPU mipmaps
++// turn on after the player is actually in a level.
++bool NXInPlay();
+diff --git a/src/common/platform/posix/nx/i_nxsystem.cpp b/src/common/platform/posix/nx/i_nxsystem.cpp
+index 65bf5ef8d..5547bd8fc 100644
+--- a/src/common/platform/posix/nx/i_nxsystem.cpp
++++ b/src/common/platform/posix/nx/i_nxsystem.cpp
+@@ -37,12 +37,21 @@
+ #include <switch.h>
+ #include "nx_loadscreen.h"
+ 
++void NX_AudioAfterLoadScreen();
++void NX_StartHangWatch();
++
+ #ifdef _DEBUG
+ static int nxlink_sock = -1;
+ #endif
+ 
+ extern "C" void userAppInit(void)
+ {
++	FILE *f = fopen("boot.log", "w");
++	if (f)
++	{
++		fputs("uz5.0.3-nx4.13 userAppInit\n", f);
++		fclose(f);
++	}
+ 	socketInitializeDefault();
+ #ifdef _DEBUG
+ 	nxlink_sock = nxlinkStdio();
+@@ -125,6 +134,8 @@ void I_NXShowFatalError(const char *title, const char *message)
+ #include <string.h>
+ #include <exception>
+ #include <typeinfo>
++#include <string>
++#include <vector>
+ 
+ extern "C" {
+ 	extern char __start__;
+@@ -290,10 +301,86 @@ static void NXAtExit()
+ 	NXLS_SetBoost(false);
+ }
+ 
++// The launcher passes @temp/nxargs.txt instead of the full command line.
++// hbloader only has 2048 bytes for that line; envSetNextLoad copies it with
++// strcpy, and anything longer spills into the path of the next .nro. The
++// engine then never starts and the console stays on a black screen.
++static bool NXIsSpace(char c)
++{
++	return c == ' ' || c == '\t' || c == '\n' || c == '\r';
++}
++
++static void NXAppendArgs(std::vector<std::string> &out, const std::string &data)
++{
++	const char *s = data.c_str();
++	while (*s)
++	{
++		while (*s && NXIsSpace(*s)) s++;
++		if (!*s) break;
++		std::string tok;
++		if (*s == '"')
++		{
++			s++;
++			while (*s && *s != '"') tok.push_back(*s++);
++			if (*s == '"') s++;
++		}
++		else
++		{
++			while (*s && !NXIsSpace(*s)) tok.push_back(*s++);
++		}
++		out.push_back(std::move(tok));
++	}
++}
++
++static void NXExpandResponseFiles(int &argc, char **&argv)
++{
++	bool any = false;
++	for (int i = 1; i < argc; i++)
++		if (argv[i] && argv[i][0] == '@' && argv[i][1]) any = true;
++	if (!any) return;
++
++	std::vector<std::string> out;
++	out.push_back(argv[0] ? argv[0] : "");
++	for (int i = 1; i < argc; i++)
++	{
++		const char *a = argv[i];
++		if (!a) continue;
++		if (a[0] != '@' || !a[1]) { out.push_back(a); continue; }
++		FILE *f = fopen(a + 1, "rb");
++		if (!f) { out.push_back(a); continue; }
++		std::string data;
++		char buf[4096];
++		size_t n;
++		while ((n = fread(buf, 1, sizeof(buf), f)) > 0) data.append(buf, n);
++		fclose(f);
++		NXAppendArgs(out, data);
++	}
++
++	static std::vector<std::string> keep;
++	static std::vector<char *> ptrs;
++	keep = std::move(out);
++	ptrs.clear();
++	ptrs.reserve(keep.size() + 1);
++	for (auto &s : keep) ptrs.push_back(const_cast<char *>(s.c_str()));
++	ptrs.push_back(nullptr);
++	argc = (int)keep.size();
++	argv = ptrs.data();
++}
++
+ int I_NXRunWithBigStack(int (*fn)(int, char **), int argc, char **argv)
+ {
++	FILE *bf = fopen("boot.log", "a");
++	if (bf)
++	{
++		fprintf(bf, "main argc=%d\n", argc);
++		for (int i = 0; i < argc && i < 6; i++)
++			fprintf(bf, " arg %s\n", argv[i] ? argv[i] : "(null)");
++		fclose(bf);
++	}
+ 	std::set_terminate(I_NXTerminate);
+ 	FindModuleRange();
++	NX_StartHangWatch();
++	NXExpandResponseFiles(argc, argv);
+ 
+ 	// switches that are only meant for this port and must not reach the engine
+ 	bool boost = false, loadscreen = true;
+@@ -311,6 +398,7 @@ int I_NXRunWithBigStack(int (*fn)(int, char **), int argc, char **argv)
+ 	atexit(NXAtExit);
+ 	if (boost) NXLS_SetBoost(true);
+ 	if (loadscreen) NXLS_Start(argc, argv);
++	else NX_AudioAfterLoadScreen();
+ 
+ 	NXMainArgs args = { fn, argc, argv, 0 };
+ 	pthread_attr_t attr;
+diff --git a/src/common/platform/posix/nx/nx_glthread.cpp b/src/common/platform/posix/nx/nx_glthread.cpp
+index 653e022f3..d131747db 100644
+--- a/src/common/platform/posix/nx/nx_glthread.cpp
++++ b/src/common/platform/posix/nx/nx_glthread.cpp
+@@ -61,28 +61,66 @@ template<class T> static T &At(void *base, size_t off) { return *(T *)((char *)b
+ 
+ // The driver thread is created with the default (small) pthread stack; Mesa
+ // compiles shaders on it, so give it a large one.
+-// SDL's own threads (the audio thread, which also runs OpenAL's mixer) are
+-// created by libnx on core 0 with the lowest priority: there they can only mix
+-// sound while the game's thread waits, and whenever the game needs the audio
+-// lock that the preempted mixer holds, the game has to wait for it. They go to
+-// core 2 instead (above the asset worker), away from the game.
+-CVAR(Bool, nx_audio_core2, true, CVAR_ARCHIVE | CVAR_GLOBALCONFIG)
++//
++// SDL's audio thread also runs the OpenAL mixer. libnx starts it on core 0 at
++// the lowest priority, next to the game thread (core 0, priority 0x2C). The
++// mixer can then run only while the game waits, and every time the game needs
++// the lock the mixer is holding the frame stalls. Brutal Doom hits that on
++// almost every tic. Core 2 is the fix, but the loading screen draws on core 2
++// until NXLS_Stop joins it: moving the mixer there any earlier starves that
++// screen and Jogar stays black. Threads created during the load stay on core 0
++// and are moved once the screen thread is gone. Threads created later go
++// straight to core 2.
++
+ extern "C" int SDL_SYS_CreateThread(void *thread);
++
+ struct NXThreadStart { void *(*fn)(void *); void *arg; };
++static Mutex gAudioLock;
++static Handle gAudioHandles[16];
++static int gAudioCount;
++static bool gAudioCoreOpen;
++
++static void PinAudioHandle(Handle h)
++{
++	if (!h) return;
++	svcSetThreadCoreMask(h, 2, 1u << 2);
++	svcSetThreadPriority(h, 0x2D);
++}
++
+ static void *NXSDLThreadEntry(void *p)
+ {
+ 	NXThreadStart t = *(NXThreadStart *)p;
+ 	free(p);
+-	svcSetThreadCoreMask(CUR_THREAD_HANDLE, 2, 1ULL << 2);
+-	svcSetThreadPriority(CUR_THREAD_HANDLE, 0x2D);
++	Handle h = threadGetCurHandle();
++	bool pin = false;
++	mutexLock(&gAudioLock);
++	if (gAudioCoreOpen) pin = true;
++	else if (gAudioCount < 16) gAudioHandles[gAudioCount++] = h;
++	mutexUnlock(&gAudioLock);
++	if (pin) PinAudioHandle(h);
+ 	return t.fn(t.arg);
+ }
+ 
++void NX_AudioAfterLoadScreen()
++{
++	if (gAudioCoreOpen) return;
++	Handle local[16];
++	int n = 0;
++	mutexLock(&gAudioLock);
++	gAudioCoreOpen = true;
++	n = gAudioCount;
++	if (n > 16) n = 16;
++	for (int i = 0; i < n; i++) local[i] = gAudioHandles[i];
++	gAudioCount = 0;
++	mutexUnlock(&gAudioLock);
++	for (int i = 0; i < n; i++) PinAudioHandle(local[i]);
++}
++
+ extern "C" int __wrap_pthread_create(pthread_t *thread, const pthread_attr_t *attr, void *(*fn)(void *), void *arg)
+ {
+ 	uintptr_t ra = (uintptr_t)__builtin_return_address(0);
+ 	uintptr_t sdl = (uintptr_t)&SDL_SYS_CreateThread;
+-	if (nx_audio_core2 && ra >= sdl && ra < sdl + 0x100)
++	if (ra >= sdl && ra < sdl + 0x100)
+ 	{
+ 		auto t = (NXThreadStart *)malloc(sizeof(NXThreadStart));
+ 		if (t)
+@@ -197,7 +235,19 @@ static bool gWatchdogStarted;
+ void NX_GLCrumb(const char *what)
+ {
+ 	if (gEnabled && threadGetCurHandle() == gWorkerHandle) { gCrumbWorker = what; gCrumbWorkerTime = armGetSystemTick(); }
+-	else { gCrumbMain = what; gCrumbMainTime = armGetSystemTick(); }
++	else { gCrumbMain = what ? what : "?"; gCrumbMainTime = armGetSystemTick(); }
++}
++
++void NX_Phase(const char *what)
++{
++	NX_GLCrumb(what);
++	static const char *last = nullptr;
++	if (what == last) return;
++	last = what;
++	FILE *f = fopen("phase.log", "a");
++	if (!f) return;
++	fprintf(f, "%llu %s\n", (unsigned long long)gCrumbMainTime, what ? what : "?");
++	fclose(f);
+ }
+ 
+ extern "C" Result __wrap_nwindowDequeueBuffer(NWindow *nw, s32 *out_slot, NvMultiFence *out_fence)
+@@ -319,15 +369,25 @@ static void *WatchdogThread(void *)
+ 	uint32_t last = nx_heartbeat;
+ 	int still = 0;
+ 	int reported = 0;
++	bool seenFrame = false;
+ 	for (;;)
+ 	{
+ 		svcSleepThread(1000000000ULL);
+ 		uint32_t hb = nx_heartbeat;
+-		if (hb != last) { last = hb; still = 0; reported = 0; continue; }
++		if (hb != last)
++		{
++			last = hb;
++			still = 0;
++			reported = 0;
++			seenFrame = true;
++			continue;
++		}
++		// The homebrew loader and the engine mod screen present nothing through
++		// this counter. Only time the gap after a real frame has been shown,
++		// which is the opening picture that stops taking buttons.
++		if (!seenFrame) continue;
+ 		still++;
+-		// loading a level with a big mod can take a while: only report long stalls,
+-		// and again every 30 s while it lasts
+-		if (still >= 25 && (reported == 0 || still - reported >= 30))
++		if (still >= 8 && (reported == 0 || still - reported >= 30))
+ 		{
+ 			WriteHangLog(still);
+ 			reported = still;
+@@ -336,6 +396,14 @@ static void *WatchdogThread(void *)
+ 	return nullptr;
+ }
+ 
++static void StartWatchdog();
++
++void NX_StartHangWatch()
++{
++	if (!gMainHandle) gMainHandle = threadGetCurHandle();
++	StartWatchdog();
++}
++
+ static void StartWatchdog()
+ {
+ 	if (gWatchdogStarted) return;
+diff --git a/src/common/platform/posix/nx/nx_glthread.h b/src/common/platform/posix/nx/nx_glthread.h
+index 536266f7d..bab1ee147 100644
+--- a/src/common/platform/posix/nx/nx_glthread.h
++++ b/src/common/platform/posix/nx/nx_glthread.h
+@@ -7,6 +7,11 @@ void NX_GLThreadStart();		// call with the GL context current, after init
+ void NX_GLThreadFinish();		// wait until the driver thread executed everything (before swap / EGL calls)
+ bool NX_GLThreadEnabled();
+ const char *NX_GLThreadStatus();	// for perf.log
+-void NX_GLCrumb(const char *what);	// last GL step (hang.log)
++void NX_GLCrumb(const char *what);	// last step, kept for hang.log
++void NX_Phase(const char *what);		// same, and one line appended to phase.log
++void NX_StartHangWatch();		// arm the hang report from the first presented frame
+ extern volatile uint32_t nx_heartbeat;	// bumped by every presented frame
+ void NX_GLThreadWriteStats(FILE *f);
++// Call once the loading-screen thread has exited. SDL audio threads created
++// before that stay off its core; afterwards they run on core 2.
++void NX_AudioAfterLoadScreen();
+diff --git a/src/common/platform/posix/nx/nx_loadscreen.cpp b/src/common/platform/posix/nx/nx_loadscreen.cpp
+index f0fbb2bb7..bcc5a8bf4 100644
+--- a/src/common/platform/posix/nx/nx_loadscreen.cpp
++++ b/src/common/platform/posix/nx/nx_loadscreen.cpp
+@@ -32,6 +32,7 @@
+ 
+ #ifdef __SWITCH__
+ #include <switch.h>
++void NX_AudioAfterLoadScreen();
+ #else
+ #include <thread>
+ #include <chrono>
+@@ -363,6 +364,7 @@ uint32_t gHist[MS_COUNT];	// previous run
+ std::string gHistKey;
+ 
+ std::atomic<bool> gActive{ false };
++bool gClaimed = false;
+ std::atomic<bool> gQuit{ false };
+ bool gBoost = false;
+ 
+@@ -711,6 +713,16 @@ Framebuffer gFB;
+ Thread gThread;
+ bool gFBOpen = false;
+ bool gThreadOpen = false;
++std::atomic<int> gFrames{ 0 };
++
++void PresentOnce(float dt)
++{
++	u32 stride = 0;
++	uint32_t *buf = (uint32_t *)framebufferBegin(&gFB, &stride);
++	if (buf) RenderFrame(buf, stride / 4, dt);
++	framebufferEnd(&gFB);
++	gFrames.fetch_add(1);
++}
+ 
+ void DrawThread(void *)
+ {
+@@ -720,10 +732,7 @@ void DrawThread(void *)
+ 		uint64_t now = NowMS();
+ 		float dt = std::min((now - last) / 1000.f, 0.1f);
+ 		last = now;
+-		u32 stride = 0;
+-		uint32_t *buf = (uint32_t *)framebufferBegin(&gFB, &stride);
+-		if (buf) RenderFrame(buf, stride / 4, dt);
+-		framebufferEnd(&gFB);
++		PresentOnce(dt);
+ 		// ~30 fps is plenty and leaves the CPU alone
+ 		uint64_t spent = NowMS() - now;
+ 		if (spent < 33) svcSleepThread((33 - spent) * 1000000ull);
+@@ -790,6 +799,11 @@ bool NXLS_Active()
+ 	return gActive.load();
+ }
+ 
++bool NXLS_ClaimedDisplay()
++{
++	return gClaimed;
++}
++
+ // The port never changes the console's CPU/GPU clocks (not even the
+ // official loading boost), so this does nothing any more.
+ void NXLS_SetBoost(bool on)
+@@ -857,21 +871,32 @@ void NXLS_Start(int argc, char **argv)
+ 
+ #ifdef __SWITCH__
+ 	if (R_FAILED(framebufferCreate(&gFB, nwindowGetDefault(), SW, SH, PIXEL_FORMAT_RGBA_8888, 2)))
++	{
++		NX_AudioAfterLoadScreen();
+ 		return;
++	}
+ 	gFBOpen = true;
++	// framebufferClose leaves the window format at 0. Vulkan must see that
++	// this process owned the scanout, or the compositor stays black.
++	gClaimed = true;
+ 	if (R_FAILED(framebufferMakeLinear(&gFB)))
+ 	{
+ 		framebufferClose(&gFB);
+ 		gFBOpen = false;
++		NX_AudioAfterLoadScreen();
+ 		return;
+ 	}
+ 	gQuit = false;
+-	// core 2: the engine's main thread runs on core 0
++	gFrames = 0;
++	// Core 2, priority 0x30: this is the setup that actually put the screen
++	// on the display. The audio mixer stays off this core until NXLS_Stop
++	// has joined this thread (see nx_glthread.cpp).
+ 	if (R_FAILED(threadCreate(&gThread, DrawThread, nullptr, nullptr, 0x40000, 0x30, 2)) &&
+ 		R_FAILED(threadCreate(&gThread, DrawThread, nullptr, nullptr, 0x40000, 0x30, -2)))
+ 	{
+ 		framebufferClose(&gFB);
+ 		gFBOpen = false;
++		NX_AudioAfterLoadScreen();
+ 		return;
+ 	}
+ 	gThreadOpen = true;
+@@ -900,6 +925,9 @@ void NXLS_Stop()
+ 		framebufferClose(&gFB);
+ 		gFBOpen = false;
+ 	}
++	// The mixer stays on the game core through Brutal's title map. Moving it
++	// here made that opening present once and never return, so the button
++	// was never read. It moves when a real level starts.
+ #endif
+ 	SaveHistory();
+ 	gBackground.clear();
+diff --git a/src/common/platform/posix/nx/nx_loadscreen.h b/src/common/platform/posix/nx/nx_loadscreen.h
+index bc4a56236..53d5293b6 100644
+--- a/src/common/platform/posix/nx/nx_loadscreen.h
++++ b/src/common/platform/posix/nx/nx_loadscreen.h
+@@ -17,6 +17,9 @@ void NXLS_Start(int argc, char **argv);
+ // releases the framebuffer; must be called before SDL creates its window
+ void NXLS_Stop();
+ bool NXLS_Active();
++// true after this process registered buffers on the default NWindow.
++// Stays true after NXLS_Stop so Vulkan can restore the scanout format.
++bool NXLS_ClaimedDisplay();
+ // feed engine console output (used to track the startup stages)
+ void NXLS_OnPrint(const char *text);
+ // texture manager / startup window progress
+diff --git a/src/common/platform/posix/sdl/i_main.cpp b/src/common/platform/posix/sdl/i_main.cpp
+index 7333f71d2..3b960e844 100644
+--- a/src/common/platform/posix/sdl/i_main.cpp
++++ b/src/common/platform/posix/sdl/i_main.cpp
+@@ -230,7 +230,11 @@ int main (int argc, char **argv)
+ 	Args = new FArgs(argc, argv);
+ 
+ #ifdef __SWITCH__
+-	// HACK: force GL4.3 since that's the max available on Switch
++	// HACK: force GL4.3 since that's the max available on Switch.
++	// The file collector skips argument 0. If a loader starts us with no
++	// argv, -glversion would sit in that slot and "4.3" would be loaded as a wad.
++	if (Args->NumArgs() == 0)
++		Args->AppendRawArg("uzdoom");
+ 	Args->AppendRawArg("-glversion");
+ 	Args->AppendRawArg("4.3");
+ #endif // __SWITCH__
+diff --git a/src/common/platform/posix/sdl/sdlglvideo.cpp b/src/common/platform/posix/sdl/sdlglvideo.cpp
+index 3793c63c6..8b9333b24 100644
+--- a/src/common/platform/posix/sdl/sdlglvideo.cpp
++++ b/src/common/platform/posix/sdl/sdlglvideo.cpp
+@@ -28,10 +28,15 @@
+ #include "nx_perf.h"
+ #ifdef __SWITCH__
+ #include "common/platform/posix/nx/nx_glthread.h"
++#include "common/platform/posix/nx/nx_loadscreen.h"
++#include "gamestate.h"
++#include <switch.h>
+ #endif
+ 
+ #ifdef HAVE_VULKAN
++#if !defined(__SWITCH__)
+ #include <SDL2/SDL_vulkan.h>
++#endif
+ #include <zvulkan/vulkanbuilders.h>
+ #include <zvulkan/vulkandevice.h>
+ #include <zvulkan/vulkaninstance.h>
+@@ -323,22 +328,62 @@ private:
+ void I_GetVulkanDrawableSize(int *width, int *height)
+ {
+ 	assert(Priv::vulkanEnabled);
++#if defined(__SWITCH__)
++	if (width) *width = 1280;
++	if (height) *height = 720;
++#else
+ 	assert(Priv::window != nullptr);
+ 	SDL_Vulkan_GetDrawableSize(Priv::window, width, height);
++#endif
+ }
+ 
+ bool I_GetVulkanPlatformExtensions(unsigned int *count, const char **names)
+ {
+ 	assert(Priv::vulkanEnabled);
++#if defined(__SWITCH__)
++	static const char *exts[] = {
++		VK_KHR_SURFACE_EXTENSION_NAME,
++		VK_NN_VI_SURFACE_EXTENSION_NAME
++	};
++	if (names)
++	{
++		names[0] = exts[0];
++		names[1] = exts[1];
++	}
++	*count = 2;
++	return true;
++#else
+ 	assert(Priv::window != nullptr);
+ 	return SDL_Vulkan_GetInstanceExtensions(Priv::window, count, names) == SDL_TRUE;
++#endif
+ }
+ 
+ bool I_CreateVulkanSurface(VkInstance instance, VkSurfaceKHR *surface)
+ {
+ 	assert(Priv::vulkanEnabled);
++#if defined(__SWITCH__)
++	NWindow *win = nwindowGetDefault();
++	// The loading screen registered its own buffers, then framebufferClose
++	// disconnects the window and stores format 0. nwindowConfigureBuffer
++	// only copies the scanout format when this field is still the creation
++	// sentinel. With format 0 the compositor never shows the Vulkan image.
++	// Do this only when that screen owned the window. Releasing buffers on
++	// a window we never claimed drops the layer and the present never shows.
++	if (NXLS_ClaimedDisplay())
++	{
++		nwindowReleaseBuffers(win);
++		win->format = ~0u;
++		win->usage = 0;
++		nwindowSetDimensions(win, 1280, 720);
++	}
++	VkViSurfaceCreateInfoNN createInfo = {};
++	createInfo.sType = VK_STRUCTURE_TYPE_VI_SURFACE_CREATE_INFO_NN;
++	createInfo.window = (void*)win;
++	return vkCreateViSurfaceNN(instance, &createInfo, nullptr, surface) == VK_SUCCESS;
++#else
+ 	assert(Priv::window != nullptr);
+ 	return SDL_Vulkan_CreateSurface(Priv::window, instance, surface) == SDL_TRUE;
++#endif
+ }
+ #endif
+ 
+@@ -362,12 +407,18 @@ SDLVideo::SDLVideo ()
+ 
+ 	if (Priv::vulkanEnabled)
+ 	{
++#if defined(__SWITCH__)
++		// SDL2 on Horizon only creates EGL windows. Vulkan draws on the
++		// default NWindow, so this path does not open an SDL window.
++		Priv::updateDisplayInfo();
++#else
+ 		Priv::CreateWindow(SDL_WINDOW_VULKAN | SDL_WINDOW_HIDDEN | (vid_fullscreen ? SDL_WINDOW_FULLSCREEN_DESKTOP : 0));
+ 
+ 		if (Priv::window == nullptr)
+ 		{
+ 			Priv::vulkanEnabled = false;
+ 		}
++#endif
+ 	}
+ #endif
+ }
+@@ -426,6 +477,9 @@ DFrameBuffer *SDLVideo::CreateFrameBuffer ()
+ 		}
+ 		catch (CVulkanError const &error)
+ 		{
++#ifdef __SWITCH__
++			I_FatalError("Vulkan:\n%s\n", error.what());
++#else
+ 			if (Priv::window != nullptr)
+ 			{
+ 				Priv::DestroyWindow();
+@@ -433,6 +487,7 @@ DFrameBuffer *SDLVideo::CreateFrameBuffer ()
+ 
+ 			Printf(TEXTCOLOR_RED "Initialization of Vulkan failed: %s\n", error.what());
+ 			Priv::vulkanEnabled = false;
++#endif
+ 		}
+ 	}
+ #endif
+@@ -471,7 +526,11 @@ int SystemBaseFrameBuffer::GetClientWidth()
+ 
+ #ifdef HAVE_VULKAN
+ 	assert(Priv::vulkanEnabled);
++#if defined(__SWITCH__)
++	width = 1280;
++#else
+ 	SDL_Vulkan_GetDrawableSize(Priv::window, &width, nullptr);
++#endif
+ #endif
+ 
+ 	return width;
+@@ -483,7 +542,11 @@ int SystemBaseFrameBuffer::GetClientHeight()
+ 
+ #ifdef HAVE_VULKAN
+ 	assert(Priv::vulkanEnabled);
++#if defined(__SWITCH__)
++	height = 720;
++#else
+ 	SDL_Vulkan_GetDrawableSize(Priv::window, nullptr, &height);
++#endif
+ #endif
+ 
+ 	return height;
+@@ -491,11 +554,15 @@ int SystemBaseFrameBuffer::GetClientHeight()
+ 
+ bool SystemBaseFrameBuffer::IsFullscreen ()
+ {
++#if defined(__SWITCH__)
++	if (Priv::window == nullptr) return true;
++#endif
+ 	return (SDL_GetWindowFlags(Priv::window) & SDL_WINDOW_FULLSCREEN_DESKTOP) != 0;
+ }
+ 
+ void SystemBaseFrameBuffer::ToggleFullscreen(bool yes)
+ {
++	if (Priv::window == nullptr) return;
+ 	SDL_ShowWindow(Priv::window);
+ 	SDL_SetWindowFullscreen(Priv::window, yes ? SDL_WINDOW_FULLSCREEN_DESKTOP : 0);
+ 	if ( !yes )
+@@ -526,7 +593,7 @@ void SystemBaseFrameBuffer::SetWindowSize(int w, int h)
+ 	{
+ 		vid_fullscreen = false;
+ 	}
+-	else
++	else if (Priv::window != nullptr)
+ 	{
+ 		win_maximized = false;
+ 		SDL_SetWindowSize(Priv::window, w, h);
+@@ -577,6 +644,9 @@ SystemGLFrameBuffer::SystemGLFrameBuffer(void *hMonitor, bool fullscreen)
+ 	for ( ; glvers[glveridx][0] > 0; ++glveridx)
+ 	{
+ 		Priv::SetupPixelFormat(0, glvers[glveridx]);
++#ifdef __SWITCH__
++		nwindowReleaseBuffers(nwindowGetDefault());
++#endif
+ 		Priv::CreateWindow(SDL_WINDOW_OPENGL | SDL_WINDOW_HIDDEN | (fullscreen ? SDL_WINDOW_FULLSCREEN_DESKTOP : 0));
+ 
+ 		if (Priv::window == nullptr)
+@@ -627,6 +697,18 @@ int SystemGLFrameBuffer::GetClientHeight()
+ 	return height;
+ }
+ 
++#ifdef __SWITCH__
++// Brutal's opening is a title map, not a level. Interval 2 waits inside the
++// Switch display driver and never returns, so the controller is never read.
++// A real level keeps the interval chosen in the launcher.
++static int NXPresentInterval(bool vsync)
++{
++	if (!vsync) return 0;
++	if (gamestate != GS_LEVEL) return 1;
++	return clamp<int>(nx_swapinterval, 1, 4);
++}
++#endif
++
+ void SystemGLFrameBuffer::SetVSync( bool vsync )
+ {
+ #if defined (__APPLE__)
+@@ -636,8 +718,7 @@ void SystemGLFrameBuffer::SetVSync( bool vsync )
+ #ifdef __SWITCH__
+ 	// the panel is 60 Hz: interval 2 presents every other refresh = a real 30 fps lock
+ 	NX_GLThreadFinish();
+-	int interval = vsync ? clamp<int>(nx_swapinterval, 1, 4) : 0;
+-	SDL_GL_SetSwapInterval(interval);
++	SDL_GL_SetSwapInterval(NXPresentInterval(vsync));
+ #else
+ 	if (vsync)
+ 	{
+@@ -657,6 +738,13 @@ void SystemGLFrameBuffer::SwapBuffers()
+ #ifdef __SWITCH__
+ 	// everything recorded for this frame must reach the driver before the swap
+ 	NX_GLThreadFinish();
++	static int applied = -1;
++	int interval = NXPresentInterval(vid_vsync);
++	if (interval != applied)
++	{
++		SDL_GL_SetSwapInterval(interval);
++		applied = interval;
++	}
+ #endif
+ 	NXPERF_SCOPE(swap_ms, nullptr);
+ 	SDL_GL_SwapWindow(Priv::window);
+diff --git a/src/common/rendering/gles/gles_asynctex.cpp b/src/common/rendering/gles/gles_asynctex.cpp
+index a09cd4bd3..7da35a5cd 100644
+--- a/src/common/rendering/gles/gles_asynctex.cpp
++++ b/src/common/rendering/gles/gles_asynctex.cpp
+@@ -272,9 +272,11 @@ static void PreUpload()
+ 		auto hw = static_cast<FHardwareTexture *>(mat->GetLayer(layerindex, 0, &layer));
+ 		if (hw == nullptr || hw->GetTextureHandle() != 0 || layer->layerTexture != key.tex || (layer->scaleFlags | CTF_ProcessData) != key.flags) continue;
+ 		preuploading = true;
+-		// with mipmaps (built on the CPU): world sprites need them, and a texture created without
+-		// them would get them from glGenerateMipmap in the middle of drawing (slow on the Switch)
+-		hw->BindOrCreate(key.tex, 0, CLAMP_XY, 0, layer->scaleFlags);
++		// No mipmaps in this batch. nx3.7 uploaded the same way. Building the
++		// chain here, for every sprite of the pack, stalled on the title picture.
++		NX_PushSkipCpuMipmaps();
++		hw->BindOrCreate(key.tex, 0, CLAMP_XY_NOMIP, 0, layer->scaleFlags);
++		NX_PopSkipCpuMipmaps();
+ 		preuploading = false;
+ 		count++;
+ 	}
+diff --git a/src/common/rendering/gles/gles_framebuffer.cpp b/src/common/rendering/gles/gles_framebuffer.cpp
+index db7e696e7..5120e6793 100644
+--- a/src/common/rendering/gles/gles_framebuffer.cpp
++++ b/src/common/rendering/gles/gles_framebuffer.cpp
+@@ -324,6 +324,7 @@ IHardwareTexture *OpenGLFrameBuffer::CreateHardwareTexture(int numchannels)
+ void OpenGLFrameBuffer::PrecacheMaterial(FMaterial *mat, int translation)
+ {
+ 	if (mat->Source()->GetUseType() == ETextureType::SWCanvas) return;
++	NX_PushSkipCpuMipmaps();
+ 
+ 	int numLayers = mat->NumLayers();
+ 	MaterialLayerInfo* layer;
+@@ -337,6 +338,7 @@ void OpenGLFrameBuffer::PrecacheMaterial(FMaterial *mat, int translation)
+ 			systex->BindOrCreate(layer->layerTexture, i, CLAMP_NONE, 0, layer->scaleFlags);
+ 		}
+ 	}
++	NX_PopSkipCpuMipmaps();
+ 	// unbind everything.
+ 	FHardwareTexture::UnbindAll();
+ 	gl_RenderState.ClearLastMaterial();
+diff --git a/src/common/rendering/gles/gles_hwtexture.cpp b/src/common/rendering/gles/gles_hwtexture.cpp
+index fe07fe82c..6260fbdec 100644
+--- a/src/common/rendering/gles/gles_hwtexture.cpp
++++ b/src/common/rendering/gles/gles_hwtexture.cpp
+@@ -73,6 +73,22 @@ unsigned int FHardwareTexture::lastbound[FHardwareTexture::MAX_TEXTURES];
+ 
+ CVAR(Bool, gles_cpu_mipmaps, true, CVAR_GLOBALCONFIG)
+ 
++static int nxSkipCpuMips;
++
++void NX_PushSkipCpuMipmaps() { nxSkipCpuMips++; }
++void NX_PopSkipCpuMipmaps() { if (nxSkipCpuMips > 0) nxSkipCpuMips--; }
++
++// Sprites are small powers of two: a box filter on the CPU is cheaper than
++// Mesa's blitter. Large and non-power-of-two images (the WadFusion title
++// picture, skies, hi-res walls) stay on glGenerateMipmap. Running the CPU
++// path on those while the next map was precached left the title picture
++// on screen and never came back.
++static bool NXCpuMipmapSize(int w, int h)
++{
++	if (w < 1 || h < 1 || w > 512 || h > 512) return false;
++	return (w & (w - 1)) == 0 && (h & (h - 1)) == 0;
++}
++
+ static void NXDownsample(const unsigned char *src, int sw, int sh, unsigned char *dst, int dw, int dh, int bpp)
+ {
+ 	// 2x2 box filter (1x2 or 2x1 once one side is down to 1 pixel)
+@@ -221,7 +237,11 @@ unsigned int FHardwareTexture::CreateTexture(unsigned char * buffer, int w, int
+ 
+ 	if (mipmap && TexFilter[gl_texture_filter].mipmapping)
+ 	{
+-		if (gles_cpu_mipmaps && buffer && (glTextureBytes == 1 || glTextureBytes == 4))
++		// One sprite at a time, during play, is cheap on the CPU. A precache or a
++		// background batch of a whole mod is not: that runs while the WadFusion
++		// title is already on screen and never comes back. Those batches use
++		// the same path as nx3.7.
++		if (nxSkipCpuMips == 0 && gles_cpu_mipmaps && buffer && (glTextureBytes == 1 || glTextureBytes == 4) && NXCpuMipmapSize(rw, rh))
+ 			NXUploadMipmaps(buffer, rw, rh, glTextureBytes, texformat, sourcetype);
+ 		else
+ 			glGenerateMipmap(GL_TEXTURE_2D);
+diff --git a/src/common/rendering/gles/gles_hwtexture.h b/src/common/rendering/gles/gles_hwtexture.h
+index a72a747a4..fa6b356b1 100644
+--- a/src/common/rendering/gles/gles_hwtexture.h
++++ b/src/common/rendering/gles/gles_hwtexture.h
+@@ -103,4 +103,10 @@ public:
+ 	int numChannels() { return glTextureBytes; }
+ };
+ 
++// While a level is precaching, or while finished pictures are uploaded in a
++// batch, mipmaps stay on the nx3.7 path. Building them for every texture
++// before the next frame is what left the WadFusion title on screen.
++void NX_PushSkipCpuMipmaps();
++void NX_PopSkipCpuMipmaps();
++
+ }
+diff --git a/src/common/rendering/gles/gles_renderstate.cpp b/src/common/rendering/gles/gles_renderstate.cpp
+index 04b3b9679..d69fb0425 100644
+--- a/src/common/rendering/gles/gles_renderstate.cpp
++++ b/src/common/rendering/gles/gles_renderstate.cpp
+@@ -368,11 +368,18 @@ bool FGLRenderState::ApplyShader()
+ 
+ 		auto &last = activeShader->cur->nxLastLights;
+ 		const unsigned nfloats = unsigned(totalVectors) * 4;
+-		if (last.Size() != nfloats || memcmp(last.Data(), lightPtr, nfloats * sizeof(float)))
++		// Only reuse the previous upload during play. On the title screen this
++		// cache is not used, same as before 4.1.
++		const bool same = NXInPlay() && last.Size() == nfloats &&
++			(nfloats == 0 || (lightPtr && memcmp(last.Data(), lightPtr, nfloats * sizeof(float)) == 0));
++		if (!same)
+ 		{
+ 			glUniform4fv(activeShader->cur->lights_index, totalVectors, lightPtr);
+-			last.Resize(nfloats);
+-			if (nfloats) memcpy(last.Data(), lightPtr, nfloats * sizeof(float));
++			if (NXInPlay())
++			{
++				last.Resize(nfloats);
++				if (nfloats && lightPtr) memcpy(last.Data(), lightPtr, nfloats * sizeof(float));
++			}
+ 			nxperf.lightuploads++;
+ 		}
+ 		else nxperf.lightskips++;
+diff --git a/src/common/rendering/hwrenderer/data/hw_lightbuffer.cpp b/src/common/rendering/hwrenderer/data/hw_lightbuffer.cpp
+index bbf3ca965..a8d29544b 100644
+--- a/src/common/rendering/hwrenderer/data/hw_lightbuffer.cpp
++++ b/src/common/rendering/hwrenderer/data/hw_lightbuffer.cpp
+@@ -18,6 +18,9 @@
+ #include "hw_lightbuffer.h"
+ #include "hw_dynlightdata.h"
+ #include "shaderuniforms.h"
++#if defined(__SWITCH__)
++#include <switch.h>
++#endif
+ 
+ static const int ELEMENTS_PER_LIGHT = 4;			// each light needs 4 vec4's.
+ static const int ELEMENT_SIZE = (4*sizeof(float));
+@@ -52,6 +55,14 @@ FLightBuffer::FLightBuffer(int pipelineNbr):
+ 	{
+ 		mBufferPipeline[n] = screen->CreateDataBuffer(LIGHTBUF_BINDINGPOINT, mBufferType, false);
+ 		mBufferPipeline[n]->SetData(mByteSize, nullptr, BufferUsageType::Persistent);
++#if defined(__SWITCH__)
++		void *mem = mBufferPipeline[n]->Memory();
++		if (mem)
++		{
++			memset(mem, 0, mByteSize);
++			armDCacheClean(mem, mByteSize);
++		}
++#endif
+ 	}
+ 
+ 	Clear();
+@@ -114,6 +125,9 @@ int FLightBuffer::UploadLights(FDynLightData &data)
+ 		memcpy(&copyptr[4], &data.arrays[0][0], size0 * ELEMENT_SIZE);
+ 		memcpy(&copyptr[4 + 4*size0], &data.arrays[1][0], size1 * ELEMENT_SIZE);
+ 		memcpy(&copyptr[4 + 4*(size0 + size1)], &data.arrays[2][0], size2 * ELEMENT_SIZE);
++#if defined(__SWITCH__)
++		armDCacheClean(copyptr, totalsize * ELEMENT_SIZE);
++#endif
+ 		return thisindex;
+ 	}
+ 	else
+diff --git a/src/common/rendering/v_video.h b/src/common/rendering/v_video.h
+index d4163f641..5ddf57c19 100644
+--- a/src/common/rendering/v_video.h
++++ b/src/common/rendering/v_video.h
+@@ -68,8 +68,9 @@ enum EHWCaps
+ };
+ 
+ #if defined(__SWITCH__) && !defined(VID_BACKEND)
+-// Switch: OpenGL ES backend by default (lighter on the Tegra X1); desktop OpenGL also works
+-#define VID_BACKEND 2
++// Switch: Vulkan. The loading screen must restore the window format first,
++// or the compositor keeps a black scanout.
++#define VID_BACKEND 1
+ #endif
+ 
+ enum {
+diff --git a/src/common/rendering/vulkan/shaders/vk_shader.cpp b/src/common/rendering/vulkan/shaders/vk_shader.cpp
+index 237dd5059..dd87d3122 100644
+--- a/src/common/rendering/vulkan/shaders/vk_shader.cpp
++++ b/src/common/rendering/vulkan/shaders/vk_shader.cpp
+@@ -351,7 +351,11 @@ static const char *shaderBindings = R"(
+ 	#define uDetailParms data[uDataIndex].uDetailParms
+ 	#define uNpotEmulation data[uDataIndex].uNpotEmulation
+ 
+-	#define SUPPORTS_SHADOWMAPS
++)"
++#ifndef __SWITCH__
++"#define SUPPORTS_SHADOWMAPS\n"
++#endif
++R"(
+ 	#define VULKAN_COORDINATE_SYSTEM
+ 	#define HAS_UNIFORM_VERTEX_DATA
+ 
+diff --git a/src/common/rendering/vulkan/shaders/vk_shader.h b/src/common/rendering/vulkan/shaders/vk_shader.h
+index cb59a3ff8..dd11c2080 100644
+--- a/src/common/rendering/vulkan/shaders/vk_shader.h
++++ b/src/common/rendering/vulkan/shaders/vk_shader.h
+@@ -76,7 +76,7 @@ struct PushConstants
+ 	int uBoneIndexBase;
+ 
+ 	int uDataIndex;
+-	int padding1, padding2, padding3;
++	int padding2, padding3;
+ };
+ 
+ class VkShaderProgram
+diff --git a/src/common/rendering/vulkan/system/vk_buffer.cpp b/src/common/rendering/vulkan/system/vk_buffer.cpp
+index b15b07151..7d2246866 100644
+--- a/src/common/rendering/vulkan/system/vk_buffer.cpp
++++ b/src/common/rendering/vulkan/system/vk_buffer.cpp
+@@ -24,6 +24,9 @@
+ #include "vk_hwbuffer.h"
+ #include "vulkan/renderer/vk_streambuffer.h"
+ #include "hwrenderer/data/shaderuniforms.h"
++#if defined(__SWITCH__)
++#include <switch.h>
++#endif
+ 
+ VkBufferManager::VkBufferManager(VulkanRenderDevice* fb) : fb(fb)
+ {
+@@ -52,6 +55,17 @@ void VkBufferManager::AddBuffer(VkHardwareBuffer* buffer)
+ 	buffer->it = Buffers.insert(Buffers.end(), buffer);
+ }
+ 
++void VkBufferManager::FlushPersistentBuffers()
++{
++#if defined(__SWITCH__)
++	for (auto buf : Buffers)
++	{
++		if (buf && buf->mPersistent && buf->Memory() && buf->Size() > 0)
++			armDCacheClean(buf->Memory(), buf->Size());
++	}
++#endif
++}
++
+ void VkBufferManager::RemoveBuffer(VkHardwareBuffer* buffer)
+ {
+ 	buffer->Reset();
+diff --git a/src/common/rendering/vulkan/system/vk_buffer.h b/src/common/rendering/vulkan/system/vk_buffer.h
+index 7d3339d1e..c8537553a 100644
+--- a/src/common/rendering/vulkan/system/vk_buffer.h
++++ b/src/common/rendering/vulkan/system/vk_buffer.h
+@@ -48,6 +48,7 @@ public:
+ 
+ 	void AddBuffer(VkHardwareBuffer* buffer);
+ 	void RemoveBuffer(VkHardwareBuffer* buffer);
++	void FlushPersistentBuffers();
+ 
+ 	VkHardwareDataBuffer* ViewpointUBO = nullptr;
+ 	VkHardwareDataBuffer* LightBufferSSO = nullptr;
+diff --git a/src/common/rendering/vulkan/system/vk_commandbuffer.cpp b/src/common/rendering/vulkan/system/vk_commandbuffer.cpp
+index c99da68fd..6cd173f2d 100644
+--- a/src/common/rendering/vulkan/system/vk_commandbuffer.cpp
++++ b/src/common/rendering/vulkan/system/vk_commandbuffer.cpp
+@@ -29,6 +29,11 @@
+ #include "vulkan/renderer/vk_postprocess.h"
+ #include "hw_clock.h"
+ #include "v_video.h"
++#include "vulkan/system/vk_buffer.h"
++#include "vulkan/system/vk_hwbuffer.h"
++#if defined(__SWITCH__)
++#include <switch.h>
++#endif
+ 
+ extern int rendered_commandbuffers;
+ int current_rendered_commandbuffers;
+@@ -126,6 +131,11 @@ void VkCommandBufferManager::FlushCommands(VulkanCommandBuffer** commands, size_
+ 	if (!lastsubmit)
+ 		submit.AddSignal(mSubmitSemaphore[currentIndex].get());
+ 
++#if defined(__SWITCH__)
++	if (fb && fb->GetBufferManager())
++		fb->GetBufferManager()->FlushPersistentBuffers();
++#endif
++
+ 	submit.Execute(fb->device.get(), fb->device->GraphicsQueue, mSubmitFence[currentIndex].get());
+ 	mNextSubmit++;
+ }
+diff --git a/src/common/rendering/vulkan/textures/vk_hwtexture.cpp b/src/common/rendering/vulkan/textures/vk_hwtexture.cpp
+index 47d1e491f..5381ae2e7 100644
+--- a/src/common/rendering/vulkan/textures/vk_hwtexture.cpp
++++ b/src/common/rendering/vulkan/textures/vk_hwtexture.cpp
+@@ -182,7 +182,11 @@ void VkHardwareTexture::CreateTexture(int w, int h, int pixelsize, VkFormat form
+ 
+ 	// If we queued more than 64 MB of data already: wait until the uploads finish before continuing
+ 	fb->GetCommands()->TransferDeleteList->Add(std::move(stagingBuffer));
++#if defined(__SWITCH__)
++	if (fb->GetCommands()->TransferDeleteList->TotalSize > 16 * 1024 * 1024)
++#else
+ 	if (fb->GetCommands()->TransferDeleteList->TotalSize > 64 * 1024 * 1024)
++#endif
+ 		fb->GetCommands()->WaitForCommands(false, true);
+ }
+ 
+diff --git a/src/d_main.cpp b/src/d_main.cpp
+index 3348a20d8..7d8bea679 100644
+--- a/src/d_main.cpp
++++ b/src/d_main.cpp
+@@ -108,6 +108,7 @@
+ #include "nx_perf.h"
+ #ifdef __SWITCH__
+ #include "common/platform/posix/nx/nx_loadscreen.h"
++#include "common/platform/posix/nx/nx_glthread.h"
+ #endif
+ #include "swrenderer/r_swcolormaps.h"
+ #include "teaminfo.h"
+@@ -1606,22 +1607,41 @@ void D_DoomLoop ()
+ 			}
+ 			I_SetFrameTime();
+ 
++#ifdef __SWITCH__
++			if (gamestate == GS_LEVEL)
++				NX_AudioAfterLoadScreen();
++			NX_Phase("tic");
++#endif
+ 			TryRunTics (); // will run at least one tic
+ 			// Update display, next frame, with current state.
+ 			{
+ 				NXPERF_SCOPE(input_ms, nullptr);
++#ifdef __SWITCH__
++				NX_Phase("input");
++#endif
+ 				I_StartTic ();
+ 				D_ProcessEvents();
+ 			}
+ 			{
+ 				NXPERF_SCOPE(display_ms, nullptr);
++#ifdef __SWITCH__
++				NX_Phase(gamestate == GS_DEMOSCREEN ? "display title" :
++					gamestate == GS_LEVEL ? "display level" :
++					gamestate == GS_TITLELEVEL ? "display titlelevel" : "display");
++#endif
+ 				D_Display ();
+ 			}
+ 			{
+ 				NXPERF_SCOPE(music_ms, nullptr);
++#ifdef __SWITCH__
++				NX_Phase("music");
++#endif
+ 				S_UpdateMusic();
+ 			}
+ 			NXPerf_EndFrame();
++#ifdef __SWITCH__
++			NX_Phase("frame done");
++#endif
+ 
+ 			if (gameloop_abort)
+ 			{
+diff --git a/src/d_net.cpp b/src/d_net.cpp
+index b132338a0..bea64b127 100644
+--- a/src/d_net.cpp
++++ b/src/d_net.cpp
+@@ -2185,6 +2185,41 @@ static void CalculateNetStabilityBuffer(int diff)
+ 	StabilityBuffer = unstableCount > 0 ? static_cast<int>(ceil(total / unstableCount)) : 0;
+ }
+ 
++//
++// How many gameplay tics a single player frame may run on the Switch.
++//
++// Brutal Doom's tic is several milliseconds of ZScript, and the picture
++// costs the rest of a 30 fps budget. The stock loop runs every tic that
++// became due during a late frame — often 4 to 6 — before it draws again.
++// That is the slideshow: one recorded frame spent 99 ms only on thinkers.
++// A console game keeps presenting. One tic always runs. A second tic runs
++// only when the last picture left room for it inside 33 ms. Network games
++// and demos keep the original catch-up.
++//
++#ifdef __SWITCH__
++CVAR(Int, nx_simcap, 1, CVAR_ARCHIVE | CVAR_GLOBALCONFIG)
++
++static int NXSinglePlayerSimCap()
++{
++	if (nx_simcap <= 0 || netgame || demoplayback || gamestate != GS_LEVEL)
++		return 8;
++	const double frame = NXPerf_LastFrameMS();
++	const double perTic = NXPerf_LastTicMS();
++	if (frame <= 0 || perTic <= 0)
++		return 2;
++	double outside = frame - NXPerf_LastSimMS();
++	if (outside < 0)
++		outside = 0;
++	const double budget = (1000.0 / 30.0) - outside;
++	int cap = int(budget / perTic);
++	if (cap < 1)
++		cap = 1;
++	if (cap > 2)
++		cap = 2;
++	return cap;
++}
++#endif
++
+ //
+ // TryRunTics
+ //
+@@ -2220,6 +2255,11 @@ void TryRunTics()
+ 	int totalTics = EnterTic - LastEnterTic;
+ 	if (totalTics > 1 && singletics)
+ 		totalTics = 1;
++#ifdef __SWITCH__
++	const int simCap = NXSinglePlayerSimCap();
++	if (totalTics > simCap)
++		totalTics = simCap;
++#endif
+ 
+ 	// Listen for other clients and send out data as needed. This is also
+ 	// needed for singleplayer! But is instead handled entirely through local
+@@ -2273,6 +2313,10 @@ void TryRunTics()
+ 		if (totalTics < availableTics - StabilityBuffer)
+ 			++runTics;
+ 	}
++#ifdef __SWITCH__
++	if (runTics > simCap)
++		runTics = simCap;
++#endif
+ 
+ 	const int worldTimer = primaryLevel->LocalWorldTimer;
+ 	// If there are no tics to run, check for possible stall conditions and new
+diff --git a/src/rendering/hwrenderer/hw_nxlights.cpp b/src/rendering/hwrenderer/hw_nxlights.cpp
+index 9842edc64..33c203212 100644
+--- a/src/rendering/hwrenderer/hw_nxlights.cpp
++++ b/src/rendering/hwrenderer/hw_nxlights.cpp
+@@ -22,6 +22,7 @@
+ #include "i_time.h"
+ #include "tarray.h"
+ #include <algorithm>
++#include <cmath>
+ #include "nx_perf.h"
+ #include "nx_governor.h"
+ 
+@@ -37,6 +38,13 @@ static uint64_t nxLastTime = 0;
+ 
+ void NXLights_Select(FLevelLocals *Level, const DVector3 &viewpos)
+ {
++	// Title, intermission and both loading screens use the pre-4.1 light path.
++	if (!NXInPlay())
++	{
++		nxLightBudget = false;
++		return;
++	}
++
+ 	// the frame rate stabilizer can tighten both limits while frames are late
+ 	const int maxlights = NXGov_LightMax(nx_dynlight_max);
+ 	const double maxdist = NXGov_LightDist(nx_dynlight_dist);
+@@ -67,7 +75,10 @@ void NXLights_Select(FLevelLocals *Level, const DVector3 &viewpos)
+ 	static TArray<Cand> cands;
+ 	cands.Clear();
+ 
+-	for (auto light = Level->lights; light; light = light->next)
++	// a corrupt or cyclic light list must not hang the frame (intro maps of
++	// heavy packs walk this list on the first rendered view)
++	int seen = 0;
++	for (auto light = Level->lights; light && seen < 20000; light = light->next, seen++)
+ 	{
+ 		if (!light->IsActive())
+ 		{
+@@ -79,6 +90,12 @@ void NXLights_Select(FLevelLocals *Level, const DVector3 &viewpos)
+ 		if (radius <= 0) continue;
+ 		// distance from the camera to the edge of the light's sphere (0 = inside it)
+ 		double d = (light->Pos - viewpos).Length() - radius;
++		if (!std::isfinite(d))
++		{
++			light->nxFade = 0.f;
++			light->nxCut = false;
++			continue;
++		}
+ 		if (d < 0) d = 0;
+ 		if (maxdist > 0 && d >= maxdist)
+ 		{
+diff --git a/tools/nxlauncher/CMakeLists.txt b/tools/nxlauncher/CMakeLists.txt
+index 44c4ce015..875c03652 100644
+--- a/tools/nxlauncher/CMakeLists.txt
++++ b/tools/nxlauncher/CMakeLists.txt
+@@ -1,4 +1,4 @@
+-cmake_minimum_required( VERSION 3.1.0 )
++cmake_minimum_required( VERSION 3.5 )
+ 
+ if( NINTENDO_SWITCH )
+ 	set(APP_NAME "UZDoom Launcher")
+@@ -15,5 +15,5 @@ if( NINTENDO_SWITCH )
+ 	add_custom_command( TARGET gzdoom_launcher POST_BUILD
+ 		COMMAND nacptool --create "${APP_NAME}" "${APP_AUTHOR}" "${APP_VERSION}" "gzdoom_launcher.nacp"
+ 		COMMAND ${CMAKE_STRIP} -o gzdoom_launcher_stripped.elf $<TARGET_FILE:gzdoom_launcher>
+-		COMMAND elf2nro gzdoom_launcher_stripped.elf "${CMAKE_BINARY_DIR}/gzdoom_launcher.nro" --icon="${APP_ICON}" --nacp=gzdoom_launcher.nacp --romfsdir="${APP_RESDIR}" )
++		COMMAND elf2nro gzdoom_launcher_stripped.elf ${CMAKE_BINARY_DIR}/gzdoom_launcher.nro --icon=${APP_ICON} --nacp=gzdoom_launcher.nacp --romfsdir=${APP_RESDIR} )
+ endif()
+diff --git a/tools/nxlauncher/src/data.c b/tools/nxlauncher/src/data.c
+index fd411dfe8..4c6164af8 100644
+--- a/tools/nxlauncher/src/data.c
++++ b/tools/nxlauncher/src/data.c
+@@ -152,6 +152,7 @@ static void profile_defaults(Profile *p)
+ {
+ 	memset(p, 0, sizeof(*p));
+ 	p->preset = PRESET_BALANCED;
++	p->renderer = 1;
+ 	p->scale = 100;
+ 	p->fpslimit = 30;
+ 	p->glthread = 0;
+@@ -246,6 +247,7 @@ static void load_ini(void)
+ 			if (val[0] && p->nmods < MAX_MODS && data_find_mod(p, val) < 0) strncpy(p->mods[p->nmods++], val, MAX_PATH_LEN - 1);
+ 		}
+ 		else if (!strcasecmp(key, "Preset")) p->preset = atoi(val);
++		else if (!strcasecmp(key, "Renderer")) p->renderer = atoi(val);
+ 		else if (!strcasecmp(key, "Boost")) p->boost = 0;	// option removed (no clock changes)
+ 		else if (!strcasecmp(key, "NoLoadScreen")) p->noloadscreen = atoi(val);
+ 		else if (!strcasecmp(key, "RenderScale")) p->scale = atoi(val);
+@@ -276,7 +278,7 @@ int data_save(void)
+ 	mkdir(BASEDIR, 0755);
+ 	FILE *f = fopen(BASEDIR "/launcher.ini.tmp", "w");
+ 	if (!f) return -1;
+-	fprintf(f, "; UZDoom Switch launcher profiles\n\n[@Launcher]\nVersion = 7\n");
++	fprintf(f, "; UZDoom Switch launcher profiles\n\n[@Launcher]\nVersion = 10\n");
+ 	if (cur_profile >= 0 && cur_profile < nprofiles) fprintf(f, "LastProfile = %s\n", profiles[cur_profile].name);
+ 	fprintf(f, "PlayCounter = %d\n\n", play_counter);
+ 	for (int i = 0; i < nprofiles; i++)
+@@ -286,6 +288,7 @@ int data_save(void)
+ 		fprintf(f, "IWAD = %s\n", p->iwad);
+ 		for (int m = 0; m < p->nmods; m++) fprintf(f, "Mod = %s\n", p->mods[m]);
+ 		fprintf(f, "Preset = %d\n", p->preset);
++		fprintf(f, "Renderer = %d\n", p->renderer);
+ 		fprintf(f, "Boost = %d\n", p->boost);
+ 		if (p->noloadscreen) fprintf(f, "NoLoadScreen = %d\n", p->noloadscreen);
+ 		fprintf(f, "RenderScale = %d\n", p->scale);
+@@ -359,12 +362,19 @@ int data_init(void)
+ 			if (profiles[i].fpslimit == 0) profiles[i].fpslimit = 30;
+ 		}
+ 	}
++	// uz5.0.3-nx4.13: Vulkan is the renderer. The black screen was the
++	// loading screen leaving the window format at 0.
++	if (ini_version < 10)
++	{
++		for (int i = 0; i < nprofiles; i++) profiles[i].renderer = 1;
++	}
+ 
+ 	// drop entries without a game file (keep custom ones so that nothing gets lost)
+ 	for (int i = 0; i < nprofiles; i++)
+ 	{
+ 		profiles[i].present = iwad_present(profiles[i].iwad);
+ 		if (profiles[i].preset < 0 || profiles[i].preset >= PRESET_COUNT) profiles[i].preset = PRESET_BALANCED;
++		profiles[i].renderer = profiles[i].renderer ? 1 : 0;
+ 		if (profiles[i].scale < 50 || profiles[i].scale > 100) profiles[i].scale = 100;
+ 		if (profiles[i].fpslimit != 30 && profiles[i].fpslimit != 35 && profiles[i].fpslimit != 40) profiles[i].fpslimit = 0;
+ 		profiles[i].glthread = profiles[i].glthread ? 1 : 0;
+@@ -498,6 +508,8 @@ void data_launch(int index)
+ 	if (p->noloadscreen) arg("-nxnoload ");
+ 
+ 	arg("%s", engine_presets[p->preset]);
++	// 1 = Vulkan, 2 = OpenGL ES. A failed Vulkan init falls back to GLES.
++	arg("+set vid_preferbackend %d ", p->renderer ? 1 : 2);
+ 	arg("+set vid_scalefactor %d.%02d ", p->scale / 100, p->scale % 100);
+ 	// 30 = VSync on every other refresh of the 60 Hz screen: a real lock with
+ 	// even frame pacing. 35/40 are plain caps without VSync.
+@@ -515,6 +527,30 @@ void data_launch(int index)
+ 	if (p->extra[0]) arg("%s ", p->extra);
+ 
+ 	snprintf(exe, sizeof(exe), "%s/%s/gzdoom.nro", plat_cwd(), BASEDIR);
+-	snprintf(full, sizeof(full), "%s %s", exe, args);
++	// Atmosphere's hbloader keeps the next program's command line in a 2048-byte
++	// buffer, and libnx copies into it with strcpy. A long mod list used to spill
++	// past that buffer into the path of gzdoom.nro, so the engine never opened
++	// and the screen stayed black. The arguments go to a file; the line itself
++	// stays short. The path is absolute so it does not depend on the engine's
++	// working directory.
++	char argpath[768];
++	snprintf(argpath, sizeof(argpath), "%s/%s", plat_cwd(), TMPDIR);
++	mkdir(BASEDIR, 0755);
++	mkdir(argpath, 0755);
++	snprintf(argpath, sizeof(argpath), "%s/%s/nxargs.txt", plat_cwd(), TMPDIR);
++	int wrote = 0;
++	FILE *rf = fopen(argpath, "wb");
++	if (rf)
++	{
++		size_t len = strlen(args);
++		wrote = (fwrite(args, 1, len, rf) == len);
++		fputc('\n', rf);
++		fclose(rf);
++	}
++	// Never put the mod list back on the command line. hbloader only has 2048
++	// bytes and libnx copies with strcpy; the overflow corrupts the path of
++	// gzdoom.nro and the console stays black because the engine never starts.
++	if (wrote) snprintf(full, sizeof(full), "%s @%s", exe, argpath);
++	else snprintf(full, sizeof(full), "%s", exe);
+ 	plat_set_next_load(exe, full);
+ }
+diff --git a/tools/nxlauncher/src/data.h b/tools/nxlauncher/src/data.h
+index d9a85224f..3c1858e99 100644
+--- a/tools/nxlauncher/src/data.h
++++ b/tools/nxlauncher/src/data.h
+@@ -22,6 +22,7 @@ typedef struct
+ 	int nmods;
+ 	char mods[MAX_MODS][MAX_PATH_LEN];	// in load order (.deh/.bex go to -deh)
+ 	int preset;
++	int renderer;	// 1 = Vulkan, 0 = OpenGL ES
+ 	int boost;
+ 	int noloadscreen;
+ 	int scale;	// render scale in percent
+diff --git a/tools/nxlauncher/src/platform.h b/tools/nxlauncher/src/platform.h
+index 784462e7c..8b5aaf735 100644
+--- a/tools/nxlauncher/src/platform.h
++++ b/tools/nxlauncher/src/platform.h
+@@ -8,7 +8,7 @@
+ #define TMPDIR BASEDIR "/temp"
+ 
+ #undef VERSION
+-#define VERSION "uz5.0.3-nx4.1"
++#define VERSION "uz5.0.3-nx4.13"
+ 
+ enum Button
+ {
+diff --git a/tools/nxlauncher/src/ui.c b/tools/nxlauncher/src/ui.c
+index db7ea2a72..174121916 100644
+--- a/tools/nxlauncher/src/ui.c
++++ b/tools/nxlauncher/src/ui.c
+@@ -790,7 +790,7 @@ static void Mods_Update(void)
+ 
+ enum Opts
+ {
+-	OPT_PRESET, OPT_SCALE, OPT_FPSLIMIT, OPT_STABILIZER, OPT_GLTHREAD, OPT_FPS, OPT_LOADSCREEN, OPT_SKILL, OPT_MONSTERS, OPT_WARP, OPT_CLASS,
++	OPT_PRESET, OPT_RENDERER, OPT_SCALE, OPT_FPSLIMIT, OPT_STABILIZER, OPT_GLTHREAD, OPT_FPS, OPT_LOADSCREEN, OPT_SKILL, OPT_MONSTERS, OPT_WARP, OPT_CLASS,
+ 	OPT_LOADGAME, OPT_LOG, OPT_EXTRA, OPT_RENAME, OPT_IWAD, OPT_COUNT
+ };
+ 
+@@ -805,6 +805,12 @@ static void OptInfo(Profile *p, int o, const char **label, const char **desc, ch
+ 	switch (o)
+ 	{
+ 	case OPT_PRESET: *label = "Desempenho"; *desc = preset_desc[p->preset]; snprintf(value, vlen, "%s", preset_names[p->preset]); break;
++	case OPT_RENDERER:
++		*label = "Vídeo";
++		*desc = p->renderer ? "Vulkan (NVK no Tegra X1). É o renderizador desta build."
++			: "OpenGL ES. O jogo abre em Vulkan; esta opção só vale se você escolher.";
++		snprintf(value, vlen, "%s", p->renderer ? "Vulkan" : "OpenGL ES");
++		break;
+ 	case OPT_SCALE: *label = "Resolução de renderização"; *desc = "Menos resolução = mais FPS em cenas pesadas (100% = 720p)."; snprintf(value, vlen, "%d%%", p->scale); break;
+ 	case OPT_FPSLIMIT:
+ 		*label = "Limite de FPS";
+@@ -924,6 +930,7 @@ static void Options_Update(void)
+ 		switch (opt_sel)
+ 		{
+ 		case OPT_PRESET: p->preset = (p->preset + dir + PRESET_COUNT) % PRESET_COUNT; changed = 1; break;
++		case OPT_RENDERER: p->renderer = !p->renderer; changed = 1; break;
+ 		case OPT_SCALE:
+ 		{
+ 			int i = 0;
+-- 
+2.56.0
+

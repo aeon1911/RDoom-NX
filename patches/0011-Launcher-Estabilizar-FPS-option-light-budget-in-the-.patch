@@ -1,0 +1,184 @@
+From d0999f8595ee6b22dde866d6565a603e0d24fd5b Mon Sep 17 00:00:00 2001
+From: Aeon <171243930+aeon1911@users.noreply.github.com>
+Date: Wed, 30 Sep 2026 18:09:47 -0300
+Subject: [PATCH 11/46] Launcher: "Estabilizar FPS" option, light budget in the
+ presets, 30 FPS by default.
+
+Profiles saved by older launchers get the stabilizer and the steady 30 FPS
+lock once (launcher.ini Version 7); both can be changed in OPTIONS.
+Equilibrado keeps the 16 nearest dynamic lights (2500 units), Switch (leve)
+8 (1500), Qualidade has no limit.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01Fn3j1bfp175Wf4L7hzf5y6
+---
+ tools/nxlauncher/src/data.c     | 28 ++++++++++++++++++++++------
+ tools/nxlauncher/src/data.h     |  1 +
+ tools/nxlauncher/src/platform.h |  2 +-
+ tools/nxlauncher/src/ui.c       |  9 ++++++++-
+ 4 files changed, 32 insertions(+), 8 deletions(-)
+
+diff --git a/tools/nxlauncher/src/data.c b/tools/nxlauncher/src/data.c
+index c5914be4e..fd411dfe8 100644
+--- a/tools/nxlauncher/src/data.c
++++ b/tools/nxlauncher/src/data.c
+@@ -27,7 +27,7 @@ const char *const preset_names[PRESET_COUNT] = { "Qualidade", "Equilibrado", "Sw
+ const char *const preset_desc[PRESET_COUNT] =
+ {
+ 	"Tudo ligado, como no PC. Pode travar em cenas pesadas.",
+-	"Luzes leves, menos partículas e sem reverberação.",
++	"Luzes leves (as 16 mais próximas), menos partículas e sem reverberação.",
+ 	"Sem luzes dinâmicas, poucos efeitos distantes e som mais leve.",
+ };
+ const char *const monster_names[5] = { "Padrão", "Sem monstros", "Rápidos", "Renascem", "Rápidos e renascem" };
+@@ -153,8 +153,9 @@ static void profile_defaults(Profile *p)
+ 	memset(p, 0, sizeof(*p));
+ 	p->preset = PRESET_BALANCED;
+ 	p->scale = 100;
+-	p->fpslimit = 0;
++	p->fpslimit = 30;
+ 	p->glthread = 0;
++	p->stabilizer = 1;
+ }
+ 
+ static Profile *find_profile(const char *name)
+@@ -250,6 +251,7 @@ static void load_ini(void)
+ 		else if (!strcasecmp(key, "RenderScale")) p->scale = atoi(val);
+ 		else if (!strcasecmp(key, "FPSLimit")) p->fpslimit = atoi(val);
+ 		else if (!strcasecmp(key, "GLThread")) p->glthread = atoi(val);
++		else if (!strcasecmp(key, "Stabilizer")) p->stabilizer = atoi(val);
+ 		else if (!strcasecmp(key, "ShowFPS")) p->showfps = atoi(val);
+ 		else if (!strcasecmp(key, "Skill")) p->skill = atoi(val);
+ 		else if (!strcasecmp(key, "Monsters"))
+@@ -274,7 +276,7 @@ int data_save(void)
+ 	mkdir(BASEDIR, 0755);
+ 	FILE *f = fopen(BASEDIR "/launcher.ini.tmp", "w");
+ 	if (!f) return -1;
+-	fprintf(f, "; UZDoom Switch launcher profiles\n\n[@Launcher]\nVersion = 6\n");
++	fprintf(f, "; UZDoom Switch launcher profiles\n\n[@Launcher]\nVersion = 7\n");
+ 	if (cur_profile >= 0 && cur_profile < nprofiles) fprintf(f, "LastProfile = %s\n", profiles[cur_profile].name);
+ 	fprintf(f, "PlayCounter = %d\n\n", play_counter);
+ 	for (int i = 0; i < nprofiles; i++)
+@@ -289,6 +291,7 @@ int data_save(void)
+ 		fprintf(f, "RenderScale = %d\n", p->scale);
+ 		fprintf(f, "FPSLimit = %d\n", p->fpslimit);
+ 		fprintf(f, "GLThread = %d\n", p->glthread);
++		fprintf(f, "Stabilizer = %d\n", p->stabilizer);
+ 		fprintf(f, "ShowFPS = %d\n", p->showfps);
+ 		fprintf(f, "Skill = %d\n", p->skill);
+ 		fprintf(f, "MonsterMode = %d\n", p->monsters);
+@@ -346,6 +349,16 @@ int data_init(void)
+ 	{
+ 		for (int i = 0; i < nprofiles; i++) profiles[i].glthread = 0;
+ 	}
++	// uz5.0.3-nx4.1: frame rate stabilizer on and a steady 30 FPS for everybody once
++	// (the smoothest setting on the Switch; both can be changed in OPTIONS)
++	if (ini_version < 7)
++	{
++		for (int i = 0; i < nprofiles; i++)
++		{
++			profiles[i].stabilizer = 1;
++			if (profiles[i].fpslimit == 0) profiles[i].fpslimit = 30;
++		}
++	}
+ 
+ 	// drop entries without a game file (keep custom ones so that nothing gets lost)
+ 	for (int i = 0; i < nprofiles; i++)
+@@ -355,6 +368,7 @@ int data_init(void)
+ 		if (profiles[i].scale < 50 || profiles[i].scale > 100) profiles[i].scale = 100;
+ 		if (profiles[i].fpslimit != 30 && profiles[i].fpslimit != 35 && profiles[i].fpslimit != 40) profiles[i].fpslimit = 0;
+ 		profiles[i].glthread = profiles[i].glthread ? 1 : 0;
++		profiles[i].stabilizer = profiles[i].stabilizer ? 1 : 0;
+ 		if (profiles[i].monsters < 0 || profiles[i].monsters > 4) profiles[i].monsters = 0;
+ 		if (profiles[i].skill < 0 || profiles[i].skill > 5) profiles[i].skill = 0;
+ 	}
+@@ -422,15 +436,15 @@ static const char *const engine_presets[PRESET_COUNT] =
+ {
+ 	"+set r_dynlights 1 +set gles_max_lights_per_surface 16 +set r_maxparticles 4000 +set cl_maxdecals 1024 +set gl_light_particles 1 "
+ 	"+set r_actorspriteshadow 1 +set r_actorspriteshadowdist 1500 +set gl_texture_filter_anisotropic 8 +set gl_sort_textures 0 +set snd_channels 128 +set snd_efx 1 "
+-	"+set nx_effect_cull 0 +set nx_effect_minalpha 0 ",
++	"+set nx_effect_cull 0 +set nx_effect_minalpha 0 +set nx_dynlight_max 0 +set nx_dynlight_dist 0 ",
+ 
+ 	"+set r_dynlights 1 +set gles_max_lights_per_surface 6 +set r_maxparticles 600 +set cl_maxdecals 200 +set gl_light_particles 0 "
+ 	"+set r_actorspriteshadow 1 +set r_actorspriteshadowdist 800 +set gl_texture_filter_anisotropic 4 +set gl_sort_textures 1 +set snd_channels 64 +set snd_efx 0 "
+-	"+set nx_effect_cull 4000 +set nx_effect_minalpha 0.06 ",
++	"+set nx_effect_cull 4000 +set nx_effect_minalpha 0.06 +set nx_dynlight_max 16 +set nx_dynlight_dist 2500 ",
+ 
+ 	"+set r_dynlights 0 +set gles_max_lights_per_surface 2 +set r_maxparticles 150 +set cl_maxdecals 64 +set gl_light_particles 0 "
+ 	"+set r_actorspriteshadow 1 +set r_actorspriteshadowdist 600 +set gl_texture_filter_anisotropic 2 +set gl_sort_textures 1 +set snd_channels 40 +set snd_efx 0 "
+-	"+set nx_effect_cull 2500 +set nx_effect_minalpha 0.12 ",
++	"+set nx_effect_cull 2500 +set nx_effect_minalpha 0.12 +set nx_dynlight_max 8 +set nx_dynlight_dist 1500 ",
+ };
+ 
+ void data_launch(int index)
+@@ -492,6 +506,8 @@ void data_launch(int index)
+ 	else if (p->fpslimit > 0) arg("+set vid_vsync 0 +set nx_swapinterval 1 +set cl_capfps 0 +set vid_maxfps %d ", p->fpslimit);
+ 	else arg("+set vid_vsync 1 +set nx_swapinterval 1 +set cl_capfps 0 +set vid_maxfps 0 ");
+ 	arg("+set nx_glthread %d +set r_ticstability 0 ", p->glthread ? 1 : 0);
++	// frame rate stabilizer: aims at the FPS limit (30 when there is none)
++	arg("+set nx_stabilizer %d ", p->stabilizer ? (p->fpslimit > 0 ? p->fpslimit : 30) : 0);
+ 	arg("+set vid_fps %d ", p->showfps ? 1 : 0);
+ 	if (p->warp[0]) arg("+map %s ", p->warp);
+ 	if (p->pclass[0]) arg("+playerclass \"%s\" ", p->pclass);
+diff --git a/tools/nxlauncher/src/data.h b/tools/nxlauncher/src/data.h
+index 1ceae3c86..d9a85224f 100644
+--- a/tools/nxlauncher/src/data.h
++++ b/tools/nxlauncher/src/data.h
+@@ -27,6 +27,7 @@ typedef struct
+ 	int scale;	// render scale in percent
+ 	int fpslimit;	// 0 = VSync 60, 30 = VSync every other refresh (locked 30), 35/40 = frame rate cap
+ 	int glthread;	// GL driver on its own CPU core (Mesa glthread)
++	int stabilizer;	// frame rate stabilizer (trims visual detail while frames are late)
+ 	int showfps;
+ 	int skill;	// 0 = ask in game
+ 	int monsters;	// index into monster options
+diff --git a/tools/nxlauncher/src/platform.h b/tools/nxlauncher/src/platform.h
+index cf1a25edd..784462e7c 100644
+--- a/tools/nxlauncher/src/platform.h
++++ b/tools/nxlauncher/src/platform.h
+@@ -8,7 +8,7 @@
+ #define TMPDIR BASEDIR "/temp"
+ 
+ #undef VERSION
+-#define VERSION "uz5.0.3-general"
++#define VERSION "uz5.0.3-nx4.1"
+ 
+ enum Button
+ {
+diff --git a/tools/nxlauncher/src/ui.c b/tools/nxlauncher/src/ui.c
+index 61dd24a91..db7ea2a72 100644
+--- a/tools/nxlauncher/src/ui.c
++++ b/tools/nxlauncher/src/ui.c
+@@ -790,7 +790,7 @@ static void Mods_Update(void)
+ 
+ enum Opts
+ {
+-	OPT_PRESET, OPT_SCALE, OPT_FPSLIMIT, OPT_GLTHREAD, OPT_FPS, OPT_LOADSCREEN, OPT_SKILL, OPT_MONSTERS, OPT_WARP, OPT_CLASS,
++	OPT_PRESET, OPT_SCALE, OPT_FPSLIMIT, OPT_STABILIZER, OPT_GLTHREAD, OPT_FPS, OPT_LOADSCREEN, OPT_SKILL, OPT_MONSTERS, OPT_WARP, OPT_CLASS,
+ 	OPT_LOADGAME, OPT_LOG, OPT_EXTRA, OPT_RENAME, OPT_IWAD, OPT_COUNT
+ };
+ 
+@@ -816,6 +816,12 @@ static void OptInfo(Profile *p, int o, const char **label, const char **desc, ch
+ 		else if (p->fpslimit > 0) snprintf(value, vlen, "%d FPS", p->fpslimit);
+ 		else snprintf(value, vlen, "Sem limite (VSync)");
+ 		break;
++	case OPT_STABILIZER:
++		*label = "Estabilizar FPS";
++		*desc = p->stabilizer ? "Em cenas pesadas (muito fogo, tochas, efeitos) reduz luzes e efeitos distantes para não cair do limite de FPS. O jogo em si não muda."
++			: "Desligado: detalhes sempre iguais; o FPS cai nas cenas pesadas.";
++		snprintf(value, vlen, "%s", p->stabilizer ? "Automático" : "Desligado");
++		break;
+ 	case OPT_GLTHREAD:
+ 		*label = "Driver de vídeo em outro núcleo";
+ 		*desc = "EXPERIMENTAL: driver de vídeo em outro núcleo (pode dar mais FPS, mas já travou o jogo no console). Se congelar, desligue e mande o hang.log.";
+@@ -939,6 +945,7 @@ static void Options_Update(void)
+ 			changed = 1;
+ 			break;
+ 		}
++		case OPT_STABILIZER: p->stabilizer = !p->stabilizer; changed = 1; break;
+ 		case OPT_GLTHREAD: p->glthread = !p->glthread; changed = 1; break;
+ 		case OPT_FPS: p->showfps = !p->showfps; changed = 1; break;
+ 		case OPT_LOADSCREEN: p->noloadscreen = !p->noloadscreen; changed = 1; break;
+-- 
+2.56.0
+

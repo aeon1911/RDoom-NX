@@ -1,0 +1,1126 @@
+From 2d6f8e1fe4289aed58fc80f847e4664824a312cc Mon Sep 17 00:00:00 2001
+From: RDoom <171243930+aeon1911@users.noreply.github.com>
+Date: Mon, 12 Oct 2026 17:48:10 -0300
+Subject: [PATCH 33/46] Switch: two frames in flight, SD writes off the game
+ loop, persistent pipeline cache
+
+Console perf.log (build 6b42e83a0): the GPU needs 10-14 ms per frame but
+frames took 20-31 ms because the CPU waited for the previous frame before
+recording the next one; hitches of 100-350 ms came the first time something
+was drawn.
+
+- Per-frame GPU data (dynamic lights, bones, viewpoints, dynamic vertices,
+  stream and matrix UBOs) is split into two regions; the command manager
+  keeps a fence/semaphore bank per frame and BeginFrame only waits for the
+  frame two back (DFrameBuffer::PerFrameSlot/PerFrameSlots/SyncNextFrame).
+- Logs are fully buffered and a low-priority thread flushes them, rewrites
+  engine-session.txt and writes queued files every two seconds; new
+  pipelines no longer append to boot.log outside the GPU trace mode.
+  perf.log and phase.log now live in logs/.
+- The Vulkan pipeline cache is handed to that thread 3 s after the last new
+  pipeline (it was only written by a clean exit, so closing with HOME made
+  every session compile its pipelines again).
+- perf.log counts pipeline creations and texture uploads per slow frame;
+  the texture staging limit that forces a GPU idle wait is 48 MB.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ src/common/engine/nx_perf.cpp                 |  14 ++
+ src/common/engine/nx_perf.h                   |   1 +
+ src/common/platform/posix/nx/i_nxsystem.cpp   |   1 +
+ src/common/platform/posix/nx/nx_glthread.cpp  |   2 +-
+ src/common/platform/posix/nx/rdoom_nx.cpp     | 165 ++++++++++++++++--
+ src/common/platform/posix/nx/rdoom_nx.h       |   6 +
+ .../hwrenderer/data/flatvertices.cpp          |  17 +-
+ .../rendering/hwrenderer/data/flatvertices.h  |   6 +-
+ .../hwrenderer/data/hw_bonebuffer.cpp         |   7 +-
+ .../rendering/hwrenderer/data/hw_bonebuffer.h |   1 +
+ .../hwrenderer/data/hw_lightbuffer.cpp        |   8 +-
+ .../hwrenderer/data/hw_lightbuffer.h          |   1 +
+ .../hwrenderer/data/hw_viewpointbuffer.cpp    |  15 +-
+ .../hwrenderer/data/hw_viewpointbuffer.h      |   3 +-
+ src/common/rendering/v_video.h                |  12 +-
+ .../vulkan/renderer/vk_renderpass.cpp         |  40 ++++-
+ .../rendering/vulkan/renderer/vk_renderpass.h |  12 ++
+ .../vulkan/renderer/vk_renderstate.cpp        |   3 +
+ .../rendering/vulkan/system/vk_buffer.cpp     |  18 +-
+ .../rendering/vulkan/system/vk_buffer.h       |   4 +-
+ .../vulkan/system/vk_commandbuffer.cpp        |  81 ++++++---
+ .../vulkan/system/vk_commandbuffer.h          |  30 +++-
+ .../vulkan/system/vk_renderdevice.cpp         |  34 +++-
+ .../rendering/vulkan/system/vk_renderdevice.h |   5 +
+ .../vulkan/textures/vk_hwtexture.cpp          |   7 +-
+ 25 files changed, 413 insertions(+), 80 deletions(-)
+
+diff --git a/src/common/engine/nx_perf.cpp b/src/common/engine/nx_perf.cpp
+index c657d4662..835b86ee9 100644
+--- a/src/common/engine/nx_perf.cpp
++++ b/src/common/engine/nx_perf.cpp
+@@ -109,6 +109,12 @@ double NXPerf_LastTicMS()
+ 	return lastTicMS;
+ }
+ 
++void NXPerf_FlushFile()
++{
++	if (perfFile)
++		fflush(perfFile);
++}
++
+ void NXPerf_EndFrame()
+ {
+ 	double now = NXPerf_NowMS();
+@@ -189,9 +195,15 @@ void NXPerf_EndFrame()
+ 		{
+ 			if (!perfFile)
+ 			{
++#ifdef __SWITCH__
++				perfFile = fopen("logs/perf.log", "w");
++#else
+ 				perfFile = fopen("perf.log", "w");
++#endif
+ 				if (perfFile)
+ 				{
++					// written to the card by the background writer (NXPerf_FlushFile)
++					setvbuf(perfFile, nullptr, _IOFBF, 64 * 1024);
+ 					WriteSettings(perfFile);
+ 					fprintf(perfFile, "# time(s) frame(ms) | tics tic(ms) think(ms) | display(ms): scene bsp hud update gpuwait swap | items transl | shaders n/ms | textures n/ms/kpix | sounds n/ms | sndupdate(ms) sndstart n/ms | io misses/KB | async tex up/wait/budget/pre snd | draws | lights used/all up/same | stab\n");
+ 				}
+@@ -245,7 +257,9 @@ void NXPerf_EndFrame()
+ 			NXGLThreadStats(perfFile);
+ 			if (NXPerf_SummaryHook) NXPerf_SummaryHook(perfFile);
+ 			win = {};
++#ifndef __SWITCH__
+ 			fflush(perfFile);
++#endif
+ 			frames = 0;
+ 			sumFrame = maxFrame = 0;
+ 			linesWritten++;
+diff --git a/src/common/engine/nx_perf.h b/src/common/engine/nx_perf.h
+index ed9fbdd00..9f4a935e8 100644
+--- a/src/common/engine/nx_perf.h
++++ b/src/common/engine/nx_perf.h
+@@ -51,6 +51,7 @@ struct NXPerfCounters
+ extern NXPerfCounters nxperf;
+ double NXPerf_NowMS();
+ void NXPerf_EndFrame();
++void NXPerf_FlushFile();	// background writer (Switch)
+ // last completed frame, the simulation time inside it, and the average cost of one tic (0 if none ran)
+ double NXPerf_LastFrameMS();
+ double NXPerf_LastSimMS();
+diff --git a/src/common/platform/posix/nx/i_nxsystem.cpp b/src/common/platform/posix/nx/i_nxsystem.cpp
+index d20de916d..42b240119 100644
+--- a/src/common/platform/posix/nx/i_nxsystem.cpp
++++ b/src/common/platform/posix/nx/i_nxsystem.cpp
+@@ -89,6 +89,7 @@ bool I_OnScreenKeyboard(const char *hint, char *out, int outlen)
+ // so the user doesn't just get dumped back to the Homebrew Menu without a clue.
+ void I_NXShowFatalError(const char *title, const char *message)
+ {
++	RDoom_FlushLogsNow();
+ 	// the loading screen owns the framebuffer until video is up
+ 	NXLS_Stop();
+ 	NXLS_SetBoost(false);
+diff --git a/src/common/platform/posix/nx/nx_glthread.cpp b/src/common/platform/posix/nx/nx_glthread.cpp
+index 45cd7bf51..a3ba9b96a 100644
+--- a/src/common/platform/posix/nx/nx_glthread.cpp
++++ b/src/common/platform/posix/nx/nx_glthread.cpp
+@@ -250,7 +250,7 @@ void NX_Phase(const char *what)
+ 		if (seen[i] == what) return;
+ 	if (numSeen < 64) seen[numSeen++] = what;
+ 	if (lines >= 200) return;
+-	FILE *f = fopen("phase.log", lines == 0 ? "w" : "a");
++	FILE *f = fopen("logs/phase.log", lines == 0 ? "w" : "a");
+ 	if (!f) return;
+ 	lines++;
+ 	fprintf(f, "%llu %s\n", (unsigned long long)gCrumbMainTime, what ? what : "?");
+diff --git a/src/common/platform/posix/nx/rdoom_nx.cpp b/src/common/platform/posix/nx/rdoom_nx.cpp
+index 78ff17a72..19c07e6fc 100644
+--- a/src/common/platform/posix/nx/rdoom_nx.cpp
++++ b/src/common/platform/posix/nx/rdoom_nx.cpp
+@@ -10,6 +10,7 @@
+ #include <string.h>
+ #include <sys/stat.h>
+ #include <unistd.h>
++#include <mutex>
+ #include <string>
+ #include <vector>
+ #include <switch.h>
+@@ -175,6 +176,10 @@ void RDoom_Crumb(const char *what)
+ 	close(fd);
+ }
+ 
++// background writer (defined with the session report below)
++static void StartFlushThread();
++static void FlushOnce();
++
+ static bool g_prevGpuLost = false;
+ static int g_gpuStep = 0;
+ 
+@@ -184,7 +189,8 @@ static void RotateLogs()
+ {
+ 	static const char *const files[] = {
+ 		"logs/rdoom.log", "logs/engine.log", "logs/engine-stderr.log", "logs/engine-session.txt",
+-		"logs/error.log", "logs/boot.log", "logs/last-launch.txt", "perf.log", "phase.log" };
++		"logs/error.log", "logs/boot.log", "logs/last-launch.txt", "logs/perf.log", "logs/phase.log",
++		"perf.log", "phase.log" /* written next to the .nro by older builds */ };
+ 	// (gpu-lost.txt stays in place: the start-up below reads it)
+ 	// keep five sessions: anterior (newest) .. anterior-5 (oldest)
+ 	{
+@@ -228,10 +234,12 @@ void RDoom_NXEarlyInit()
+ 	p.EnsureLayout();
+ 	LogOpen(PathJoin(p.Logs(), "rdoom.log"), true);
+ 	// engine console output (Printf -> stdout) and driver messages (stderr)
++	// fully buffered: the background writer flushes them (see FlushOnce)
+ 	if (freopen(RDOOM_SD_ROOT "/logs/engine.log", "w", stdout))
+-		setvbuf(stdout, nullptr, _IOLBF, 4096);
++		setvbuf(stdout, nullptr, _IOFBF, 64 * 1024);
+ 	if (freopen(RDOOM_SD_ROOT "/logs/engine-stderr.log", "w", stderr))
+-		setvbuf(stderr, nullptr, _IONBF, 0);
++		setvbuf(stderr, nullptr, _IOFBF, 32 * 1024);
++	StartFlushThread();
+ 	unlink(RDOOM_SD_ROOT "/logs/engine-session.txt");
+ 	RLOG_I("boot", "%s (%s, %s), engine %s", RDOOM_VERSION_STRING, RDOOM_BUILD_DATE, RDOOM_GIT_DESCRIBE, RDOOM_ENGINE_VERSION);
+ 	RLOG_I("boot", "clock policy: stock (RDoom never changes CPU/GPU/memory clocks)");
+@@ -347,6 +355,7 @@ void RDoom_NXAtExit()
+ 		envSetNextLoad(g_nroPath.c_str(), args.c_str());
+ 		RLOG_I("boot", "returning to the launcher (%s)", g_nroPath.c_str());
+ 	}
++	FlushOnce();
+ 	LogClose();
+ }
+ 
+@@ -356,25 +365,139 @@ void RDoom_NXAtExit()
+ 
+ static std::vector<std::pair<std::string, std::string>> g_session;
+ 
+-void RDoom_SessionSet(const char *key, const char *value)
++// ---------------------------------------------------------------------------
++// Background writer: SD card writes take milliseconds to tens of milliseconds
++// on the Switch, and the game used to make them inside frames (every log line,
++// every new pipeline, the session report every 600 frames, sounds printing
++// decoder notes to stderr). Logs are now fully buffered and this low-priority
++// thread flushes them, rewrites engine-session.txt when it changed and writes
++// queued files (the pipeline cache) every two seconds. Quitting with HOME
++// loses at most the last two seconds of log.
++
++static std::mutex g_ioMutex;	// g_session, g_sessionDirty, g_fileQueue
++static bool g_sessionDirty = false;
++static std::vector<std::pair<std::string, std::vector<uint8_t>>> g_fileQueue;
++static Thread g_flushThread;
++static volatile bool g_flushRun = false;
++void NXPerf_FlushFile();
++
++static void WriteWhole(const std::string &path, const void *data, size_t size)
+ {
+-	for (auto &kv : g_session)
+-		if (kv.first == key)
++	const std::string tmp = path + ".tmp";
++	FILE *f = fopen(tmp.c_str(), "wb");
++	if (!f)
++		return;
++	bool ok = fwrite(data, 1, size, f) == size;
++	ok &= fclose(f) == 0;
++	if (ok)
++	{
++		remove(path.c_str());
++		rename(tmp.c_str(), path.c_str());
++	}
++	else
++		remove(tmp.c_str());
++}
++
++static void FlushOnce()
++{
++	std::string session;
++	bool writeSession = false;
++	decltype(g_fileQueue) files;
++	{
++		std::lock_guard<std::mutex> lock(g_ioMutex);
++		if (g_sessionDirty)
+ 		{
+-			kv.second = value;
+-			goto write;
++			for (auto &kv : g_session)
++				session += kv.first + ": " + kv.second + "\n";
++			g_sessionDirty = false;
++			writeSession = true;
+ 		}
+-	g_session.push_back({ key, value });
+-write:
+-	std::string out;
+-	for (auto &kv : g_session)
+-		out += kv.first + ": " + kv.second + "\n";
+-	FILE *f = fopen(RDOOM_SD_ROOT "/logs/engine-session.txt", "w");
+-	if (f)
++		files.swap(g_fileQueue);
++	}
++	if (writeSession)
+ 	{
+-		fwrite(out.data(), 1, out.size(), f);
+-		fclose(f);
++		FILE *f = fopen(RDOOM_SD_ROOT "/logs/engine-session.txt", "w");
++		if (f)
++		{
++			fwrite(session.data(), 1, session.size(), f);
++			fclose(f);
++		}
++	}
++	for (auto &file : files)
++		WriteWhole(file.first, file.second.data(), file.second.size());
++	LogFlush();
++	fflush(stdout);
++	fflush(stderr);
++	NXPerf_FlushFile();
++}
++
++static void FlushThreadMain(void *)
++{
++	while (g_flushRun)
++	{
++		svcSleepThread(2000000000ULL);
++		FlushOnce();
++	}
++}
++
++static void StartFlushThread()
++{
++	if (g_flushRun)
++		return;
++	// lowest priority on the default core: it sleeps in SD card calls
++	if (R_SUCCEEDED(threadCreate(&g_flushThread, FlushThreadMain, nullptr, nullptr, 0x10000, 0x3F, -2)))
++	{
++		g_flushRun = true;
++		if (R_FAILED(threadStart(&g_flushThread)))
++		{
++			g_flushRun = false;
++			threadClose(&g_flushThread);
++		}
+ 	}
++	LogSetFlushEachLine(!g_flushRun);
++}
++
++void RDoom_FlushLogsNow()
++{
++	FlushOnce();
++}
++
++void RDoom_WriteFileAsync(const char *path, const void *data, size_t size)
++{
++	std::vector<uint8_t> bytes((const uint8_t *)data, (const uint8_t *)data + size);
++	if (!g_flushRun)
++	{
++		WriteWhole(path, bytes.data(), bytes.size());
++		return;
++	}
++	std::lock_guard<std::mutex> lock(g_ioMutex);
++	for (auto &file : g_fileQueue)
++		if (file.first == path)
++		{
++			file.second.swap(bytes);
++			return;
++		}
++	g_fileQueue.emplace_back(path, std::move(bytes));
++}
++
++void RDoom_SessionSet(const char *key, const char *value)
++{
++	{
++		std::lock_guard<std::mutex> lock(g_ioMutex);
++		bool found = false;
++		for (auto &kv : g_session)
++			if (kv.first == key)
++			{
++				kv.second = value;
++				found = true;
++				break;
++			}
++		if (!found)
++			g_session.push_back({ key, value });
++		g_sessionDirty = true;
++	}
++	if (!g_flushRun)
++		FlushOnce();
+ 	RLOG_I("session", "%s: %s", key, value);
+ }
+ 
+@@ -384,10 +507,14 @@ write:
+ void RDoom_VulkanDeviceLost(const char *what)
+ {
+ 	RDoom_SessionSet("vulkan_device_lost", what ? what : "?");
++	FlushOnce();
+ 	std::string out = std::string("GPU lost: ") + (what ? what : "?") + "\n";
+ 	out += std::string("build: ") + RDOOM_GIT_DESCRIBE + "\n";
+-	for (auto &kv : g_session)
+-		out += kv.first + ": " + kv.second + "\n";
++	{
++		std::lock_guard<std::mutex> lock(g_ioMutex);
++		for (auto &kv : g_session)
++			out += kv.first + ": " + kv.second + "\n";
++	}
+ 	FILE *f = fopen(RDOOM_SD_ROOT "/logs/gpu-lost.txt", "w");
+ 	if (f)
+ 	{
+diff --git a/src/common/platform/posix/nx/rdoom_nx.h b/src/common/platform/posix/nx/rdoom_nx.h
+index b60fc316b..bf8d26f8a 100644
+--- a/src/common/platform/posix/nx/rdoom_nx.h
++++ b/src/common/platform/posix/nx/rdoom_nx.h
+@@ -1,4 +1,5 @@
+ #pragma once
++#include <stddef.h>
+ // RDoom start-up flow on Horizon (rdoom_nx.cpp).
+ 
+ #define RDOOM_SD_ROOT "sdmc:/switch/rdoom"
+@@ -16,6 +17,11 @@ void RDoom_NXAtExit();
+ // "key: value" lines in logs/engine-session.txt (renderer, device, errors).
+ void RDoom_SessionSet(const char *key, const char *value);
+ void RDoom_SessionLog(const char *category, const char *message);
++// Background writer (see rdoom_nx.cpp): logs and engine-session.txt reach the
++// SD card from a low-priority thread. FlushLogsNow writes everything at once
++// (exit, fatal error); WriteFileAsync queues a whole file (atomic replace).
++void RDoom_FlushLogsNow();
++void RDoom_WriteFileAsync(const char *path, const void *data, size_t size);
+ // Appends one line to logs/boot.log with an unbuffered write (start-up steps).
+ void RDoom_Crumb(const char *what);
+ 
+diff --git a/src/common/rendering/hwrenderer/data/flatvertices.cpp b/src/common/rendering/hwrenderer/data/flatvertices.cpp
+index 8a823eda2..1c09bcdf0 100644
+--- a/src/common/rendering/hwrenderer/data/flatvertices.cpp
++++ b/src/common/rendering/hwrenderer/data/flatvertices.cpp
+@@ -135,11 +135,26 @@ void FFlatVertexBuffer::OutputResized(int width, int height)
+ //
+ //==========================================================================
+ 
++void FFlatVertexBuffer::Reset()
++{
++	// the dynamic part after the level geometry is split per frame
++	mCurIndex = mIndex;
++	mSlotEnd = BUFFER_SIZE_TO_USE;
++	if (screen->PerFrameSlots() == 2 && mIndex < BUFFER_SIZE_TO_USE)
++	{
++		const unsigned half = (BUFFER_SIZE_TO_USE - mIndex) / 2;
++		if (screen->PerFrameSlot() == 0)
++			mSlotEnd = mIndex + half;
++		else
++			mCurIndex = mIndex + half;
++	}
++}
++
+ std::pair<FFlatVertex *, unsigned int> FFlatVertexBuffer::AllocVertices(unsigned int count)
+ {
+ 	FFlatVertex *p = GetBuffer();
+ 	auto index = mCurIndex.fetch_add(count);
+-	if (index + count >= BUFFER_SIZE_TO_USE)
++	if (index + count >= mSlotEnd)
+ 	{
+ 		// If a single scene needs 2'000'000 vertices there must be something very wrong.
+ 		I_FatalError("Out of vertex memory. Tried to allocate more than %u vertices for a single frame", index + count);
+diff --git a/src/common/rendering/hwrenderer/data/flatvertices.h b/src/common/rendering/hwrenderer/data/flatvertices.h
+index 90e4e9cc1..4403d6d56 100644
+--- a/src/common/rendering/hwrenderer/data/flatvertices.h
++++ b/src/common/rendering/hwrenderer/data/flatvertices.h
+@@ -94,6 +94,7 @@ public:
+ 	unsigned int mIndex;
+ 	std::atomic<unsigned int> mCurIndex;
+ 	unsigned int mNumReserved;
++	unsigned int mSlotEnd = BUFFER_SIZE_TO_USE;	// end of this frame's dynamic region (see DFrameBuffer::PerFrameSlot)
+ 
+ 	unsigned int mMapStart;
+ 
+@@ -136,10 +137,7 @@ public:
+ 
+ 	std::pair<FFlatVertex *, unsigned int> AllocVertices(unsigned int count);
+ 
+-	void Reset()
+-	{
+-		mCurIndex = mIndex;
+-	}
++	void Reset();
+ 
+ 	void NextPipelineBuffer()
+ 	{
+diff --git a/src/common/rendering/hwrenderer/data/hw_bonebuffer.cpp b/src/common/rendering/hwrenderer/data/hw_bonebuffer.cpp
+index 563731750..0af5c584a 100644
+--- a/src/common/rendering/hwrenderer/data/hw_bonebuffer.cpp
++++ b/src/common/rendering/hwrenderer/data/hw_bonebuffer.cpp
+@@ -49,6 +49,7 @@ BoneBuffer::BoneBuffer(int pipelineNbr) : mPipelineNbr(pipelineNbr)
+ 		mBufferPipeline[n]->SetData(mByteSize, nullptr, BufferUsageType::Persistent);
+ 	}
+ 
++	mSlotSize = mBufferType ? mBufferSize / screen->PerFrameSlots() : mBufferSize;
+ 	Clear();
+ }
+ 
+@@ -59,7 +60,9 @@ BoneBuffer::~BoneBuffer()
+ 
+ void BoneBuffer::Clear()
+ {
+-	mIndex = 0;
++	const unsigned base = mBufferType ? screen->PerFrameSlot() * mSlotSize : 0;
++	mIndex = base;
++	mLimit = base + mSlotSize;
+ 
+ 	mPipelinePos++;
+ 	mPipelinePos %= mPipelineNbr;
+@@ -82,7 +85,7 @@ int BoneBuffer::UploadBones(const TArray<VSMatrix>& bones)
+ 
+ 	unsigned int thisindex = mIndex.fetch_add(totalsize);
+ 
+-	if (thisindex + totalsize <= mBufferSize)
++	if (thisindex + totalsize <= mLimit)
+ 	{
+ 		memcpy(mBufferPointer + thisindex * BONE_SIZE, bones.Data(), totalsize * BONE_SIZE);
+ 		return thisindex;
+diff --git a/src/common/rendering/hwrenderer/data/hw_bonebuffer.h b/src/common/rendering/hwrenderer/data/hw_bonebuffer.h
+index 4fbdacbf9..8164e60ee 100644
+--- a/src/common/rendering/hwrenderer/data/hw_bonebuffer.h
++++ b/src/common/rendering/hwrenderer/data/hw_bonebuffer.h
+@@ -39,6 +39,7 @@ class BoneBuffer
+ 	unsigned int mBufferSize;
+ 	unsigned int mByteSize;
+ 	unsigned int mMaxUploadSize;
++	unsigned int mSlotSize = 0, mLimit = 0;	// per-frame region (see DFrameBuffer::PerFrameSlot)
+ 
+ public:
+ 	BoneBuffer(int pipelineNbr = 1);
+diff --git a/src/common/rendering/hwrenderer/data/hw_lightbuffer.cpp b/src/common/rendering/hwrenderer/data/hw_lightbuffer.cpp
+index d027d4143..658dab788 100644
+--- a/src/common/rendering/hwrenderer/data/hw_lightbuffer.cpp
++++ b/src/common/rendering/hwrenderer/data/hw_lightbuffer.cpp
+@@ -66,6 +66,7 @@ FLightBuffer::FLightBuffer(int pipelineNbr):
+ #endif
+ 	}
+ 
++	mSlotSize = mBufferType ? mBufferSize / screen->PerFrameSlots() : mBufferSize;
+ 	Clear();
+ }
+ 
+@@ -76,7 +77,10 @@ FLightBuffer::~FLightBuffer()
+ 
+ void FLightBuffer::Clear()
+ {
+-	mIndex = 0;
++	// light indices are absolute, so each frame simply uses its own region
++	const unsigned base = mBufferType ? screen->PerFrameSlot() * mSlotSize : 0;
++	mIndex = base;
++	mLimit = base + mSlotSize;
+ 
+ 	mPipelinePos++;
+ 	mPipelinePos %= mPipelineNbr;
+@@ -118,7 +122,7 @@ int FLightBuffer::UploadLights(FDynLightData &data)
+ 	unsigned thisindex = mIndex.fetch_add(totalsize);
+ 	float parmcnt[] = { 0, float(size0), float(size0 + size1), float(size0 + size1 + size2) };
+ 
+-	if (thisindex + totalsize <= mBufferSize)
++	if (thisindex + totalsize <= mLimit)
+ 	{
+ 		float *copyptr = mBufferPointer + thisindex*4;
+ 
+diff --git a/src/common/rendering/hwrenderer/data/hw_lightbuffer.h b/src/common/rendering/hwrenderer/data/hw_lightbuffer.h
+index e85506440..8a9937c83 100644
+--- a/src/common/rendering/hwrenderer/data/hw_lightbuffer.h
++++ b/src/common/rendering/hwrenderer/data/hw_lightbuffer.h
+@@ -40,6 +40,7 @@ class FLightBuffer
+ 	unsigned int mBufferSize;
+ 	unsigned int mByteSize;
+ 	unsigned int mMaxUploadSize;
++	unsigned int mSlotSize = 0, mLimit = 0;	// per-frame region (see DFrameBuffer::PerFrameSlot)
+ 
+ 	void CheckSize();
+ 
+diff --git a/src/common/rendering/hwrenderer/data/hw_viewpointbuffer.cpp b/src/common/rendering/hwrenderer/data/hw_viewpointbuffer.cpp
+index 95ae7ccc4..5edd614d3 100644
+--- a/src/common/rendering/hwrenderer/data/hw_viewpointbuffer.cpp
++++ b/src/common/rendering/hwrenderer/data/hw_viewpointbuffer.cpp
+@@ -50,7 +50,8 @@ HWViewpointBuffer::~HWViewpointBuffer()
+ 
+ void HWViewpointBuffer::CheckSize()
+ {
+-	if (mUploadIndex >= mBufferSize)
++	const unsigned slots = screen->PerFrameSlots();
++	if (mUploadIndex >= mSlotBase + mBufferSize / slots)
+ 	{
+ 		mBufferSize *= 2;
+ 		mByteSize *= 2;
+@@ -58,6 +59,11 @@ void HWViewpointBuffer::CheckSize()
+ 		{
+ 			mBufferPipeline[n]->Resize(mByteSize);
+ 		}
++		// The per-frame regions grew: this frame keeps its base (and its clip
++		// plane indices) and may now reach into the next frame's new region,
++		// so the next frame waits for all GPU work before writing.
++		if (slots > 1)
++			screen->SyncNextFrame();
+ 	}
+ }
+ 
+@@ -67,7 +73,7 @@ int HWViewpointBuffer::Bind(FRenderState &di, unsigned int index)
+ 	{
+ 		mLastMappedIndex = index;
+ 		mBuffer->BindRange(&di, index * mBlockAlign, mBlockAlign);
+-		di.EnableClipDistance(0, mClipPlaneInfo[index]);
++		di.EnableClipDistance(0, mClipPlaneInfo[index - mSlotBase]);
+ 	}
+ 	return index;
+ }
+@@ -111,9 +117,10 @@ int HWViewpointBuffer::SetViewpoint(FRenderState &di, HWViewpointUniforms *vp)
+ 
+ void HWViewpointBuffer::Clear()
+ {
+-	bool needNewPipeline = mUploadIndex > 0; // Clear might be called multiple times before any actual rendering
++	bool needNewPipeline = mUploadIndex > mSlotBase; // Clear might be called multiple times before any actual rendering
+ 
+-	mUploadIndex = 0;
++	mSlotBase = mBufferSize / screen->PerFrameSlots() * screen->PerFrameSlot();
++	mUploadIndex = mSlotBase;
+ 	mClipPlaneInfo.Clear();
+ 
+ 	if (needNewPipeline)
+diff --git a/src/common/rendering/hwrenderer/data/hw_viewpointbuffer.h b/src/common/rendering/hwrenderer/data/hw_viewpointbuffer.h
+index 7818dabfe..7aec07326 100644
+--- a/src/common/rendering/hwrenderer/data/hw_viewpointbuffer.h
++++ b/src/common/rendering/hwrenderer/data/hw_viewpointbuffer.h
+@@ -34,7 +34,8 @@ class HWViewpointBuffer
+ 	unsigned int mUploadIndex;
+ 	unsigned int mLastMappedIndex;
+ 	unsigned int mByteSize;
+-	TArray<bool> mClipPlaneInfo;
++	TArray<bool> mClipPlaneInfo;	// indexed from mSlotBase
++	unsigned int mSlotBase = 0;	// first viewpoint of this frame's region (see DFrameBuffer::PerFrameSlot)
+ 
+ 	unsigned int mBlockSize;
+ 
+diff --git a/src/common/rendering/v_video.h b/src/common/rendering/v_video.h
+index e37f585c6..9e310379d 100644
+--- a/src/common/rendering/v_video.h
++++ b/src/common/rendering/v_video.h
+@@ -271,8 +271,16 @@ public:
+ 	virtual void SetSceneRenderTarget(bool useSSAO) {}
+ 	virtual void UpdateShadowMap() {}
+ 	virtual void WaitForCommands(bool finish) {}
+-	virtual void WaitForPendingFrame() {}
+-	virtual bool AllowSSAO() { return true; }	// false when the depth buffer cannot be sampled (Switch Vulkan without ZCULL)	// Vulkan frame overlap: the GPU is done with the last presented frame
++	virtual void WaitForPendingFrame() {}	// Vulkan frame overlap: the GPU is done with every presented frame
++	virtual bool AllowSSAO() { return true; }	// false when the depth buffer cannot be sampled (Switch Vulkan without ZCULL)
++	// Per-frame GPU data (dynamic lights, bones, viewpoints, dynamic vertices)
++	// is split into PerFrameSlots() regions and the frame being recorded writes
++	// region PerFrameSlot(), so the CPU can fill frame N+1 while the GPU still
++	// reads frame N. SyncNextFrame: a region moved (buffer growth), the next
++	// frame must wait for all GPU work before reusing any of it.
++	virtual int PerFrameSlots() const { return 1; }
++	virtual int PerFrameSlot() const { return 0; }
++	virtual void SyncNextFrame() {}
+ 	virtual void SetSaveBuffers(bool yes) {}
+ 	virtual void ImageTransitionScene(bool unknown) {}
+ 	virtual void CopyScreenToBuffer(int width, int height, uint8_t* buffer)	{ memset(buffer, 0, width* height); }
+diff --git a/src/common/rendering/vulkan/renderer/vk_renderpass.cpp b/src/common/rendering/vulkan/renderer/vk_renderpass.cpp
+index ecf75f9f6..a5618e015 100644
+--- a/src/common/rendering/vulkan/renderer/vk_renderpass.cpp
++++ b/src/common/rendering/vulkan/renderer/vk_renderpass.cpp
+@@ -39,6 +39,8 @@
+ #include "v_2ddrawer.h"
+ #include "i_specialpaths.h"
+ #include "cmdlib.h"
++#include "nx_perf.h"
++#include "c_cvars.h"
+ 
+ VkRenderPassManager::VkRenderPassManager(VulkanRenderDevice* fb) : fb(fb)
+ {
+@@ -59,6 +61,11 @@ VkRenderPassManager::VkRenderPassManager(VulkanRenderDevice* fb) : fb(fb)
+ 			if (fr.Read(data.data(), data.size()) == (FileReader::Size)data.size())
+ 			{
+ 				builder.InitialData(data.data(), data.size());
++#ifdef __SWITCH__
++				FString n;
++				n.Format("%u KB", (unsigned)(data.size() / 1024));
++				RDoom_SessionSet("vulkan_pipeline_cache_loaded", n.GetChars());
++#endif
+ 			}
+ 		}
+ 	}
+@@ -87,6 +94,26 @@ VkRenderPassManager::~VkRenderPassManager()
+ 	}
+ }
+ 
++void VkRenderPassManager::SaveCacheWhenIdle()
++{
++#ifdef __SWITCH__
++	if (mUnsavedPipelines == 0 || VulkanDeviceWasLost || I_msTime() - mLastPipelineMs < 3000)
++		return;
++	mUnsavedPipelines = 0;
++	try
++	{
++		auto data = PipelineCache->GetCacheData();
++		RDoom_WriteFileAsync(CacheFilename.GetChars(), data.data(), data.size());
++		FString n;
++		n.Format("%u KB", (unsigned)(data.size() / 1024));
++		RDoom_SessionSet("vulkan_pipeline_cache_saved", n.GetChars());
++	}
++	catch (...)
++	{
++	}
++#endif
++}
++
+ void VkRenderPassManager::RenderBuffersReset()
+ {
+ 	RenderPassSetup.clear();
+@@ -243,7 +270,11 @@ VulkanPipeline *VkRenderPassSetup::GetPipeline(const VkPipelineKey &key)
+ {
+ 	auto &item = Pipelines[key];
+ 	if (!item)
++	{
++		NXPERF_SCOPE(shader_ms, &nxperf.shaders);	// perf.log "shaders n/ms": pipelines created in that frame
+ 		item = CreatePipeline(key);
++		fb->GetRenderPassManager()->PipelineCreated();
++	}
+ 	return item.get();
+ }
+ 
+@@ -368,8 +399,13 @@ std::unique_ptr<VulkanPipeline> VkRenderPassSetup::CreatePipeline(const VkPipeli
+ 			key.RenderStyle.BlendOp, key.RenderStyle.SrcAlpha, key.RenderStyle.DestAlpha, key.RenderStyle.Flags,
+ 			key.DepthTest, key.DepthWrite, key.DepthFunc, key.DepthClamp, key.DepthBias, key.StencilTest, key.StencilPassOp, key.ColorMask, key.CullMode);
+ 		RDoom_SessionSet("vulkan_last_new_pipeline", d.GetChars());
+-		FString c = "new pipeline " + d;
+-		RDoom_Crumb(c.GetChars());
++		// boot.log is written synchronously: only in the GPU trace mode
++		EXTERN_CVAR(Int, rd_vk_drawlog)
++		if (rd_vk_drawlog > 0)
++		{
++			FString c = "new pipeline " + d;
++			RDoom_Crumb(c.GetChars());
++		}
+ 		extern int rd_vk_drawlog_burst;
+ 		rd_vk_drawlog_burst = 50;
+ 	}
+diff --git a/src/common/rendering/vulkan/renderer/vk_renderpass.h b/src/common/rendering/vulkan/renderer/vk_renderpass.h
+index be0fad7da..788802666 100644
+--- a/src/common/rendering/vulkan/renderer/vk_renderpass.h
++++ b/src/common/rendering/vulkan/renderer/vk_renderpass.h
+@@ -22,6 +22,8 @@
+ 
+ #pragma once
+ 
++#include "i_time.h"
++
+ #include "zvulkan/vulkanobjects.h"
+ #include "renderstyle.h"
+ #include "hwrenderer/data/buffers.h"
+@@ -159,7 +161,17 @@ public:
+ 
+ 	VulkanPipelineCache* GetCache() { return PipelineCache.get(); }
+ 
++	// Switch: the cache used to be written only by a clean exit, and closing
++	// with HOME skipped it, so every session compiled its pipelines again
++	// (40-90 ms each on the console). It is now handed to the background writer
++	// a few seconds after the last new pipeline.
++	void PipelineCreated() { mUnsavedPipelines++; mLastPipelineMs = I_msTime(); }
++	void SaveCacheWhenIdle();
++
+ private:
++	int mUnsavedPipelines = 0;
++	uint64_t mLastPipelineMs = 0;
++
+ 	VulkanRenderDevice* fb = nullptr;
+ 
+ 	std::map<VkRenderPassKey, std::unique_ptr<VkRenderPassSetup>> RenderPassSetup;
+diff --git a/src/common/rendering/vulkan/renderer/vk_renderstate.cpp b/src/common/rendering/vulkan/renderer/vk_renderstate.cpp
+index 7db6bea61..af617460c 100644
+--- a/src/common/rendering/vulkan/renderer/vk_renderstate.cpp
++++ b/src/common/rendering/vulkan/renderer/vk_renderstate.cpp
+@@ -591,6 +591,9 @@ void VkRenderState::BeginFrame()
+ {
+ 	mMaterial.Reset();
+ 	mApplyCount = 0;
++	// the frame writes its own region of the stream buffers (DFrameBuffer::PerFrameSlot)
++	mStreamBufferWriter.Reset();
++	mMatrixBufferWriter.Reset();
+ }
+ 
+ void VkRenderState::EndRenderPass()
+diff --git a/src/common/rendering/vulkan/system/vk_buffer.cpp b/src/common/rendering/vulkan/system/vk_buffer.cpp
+index ca01d9028..9c230f532 100644
+--- a/src/common/rendering/vulkan/system/vk_buffer.cpp
++++ b/src/common/rendering/vulkan/system/vk_buffer.cpp
+@@ -21,6 +21,7 @@
+ */
+ 
+ #include "vk_buffer.h"
++#include "v_video.h"
+ #include "vk_hwbuffer.h"
+ #include "vulkan/renderer/vk_streambuffer.h"
+ #include "hwrenderer/data/shaderuniforms.h"
+@@ -38,8 +39,9 @@ VkBufferManager::~VkBufferManager()
+ 
+ void VkBufferManager::Init()
+ {
+-	MatrixBuffer.reset(new VkStreamBuffer(this, sizeof(MatricesUBO), 50000));
+-	StreamBuffer.reset(new VkStreamBuffer(this, sizeof(StreamUBO), 300));
++	// one region per frame in flight (DFrameBuffer::PerFrameSlots)
++	MatrixBuffer.reset(new VkStreamBuffer(this, sizeof(MatricesUBO), 50000 * screen->PerFrameSlots()));
++	StreamBuffer.reset(new VkStreamBuffer(this, sizeof(StreamUBO), 300 * screen->PerFrameSlots()));
+ 
+ 	CreateFanToTrisIndexBuffer();
+ }
+@@ -129,6 +131,14 @@ VkStreamBuffer::VkStreamBuffer(VkBufferManager* buffers, size_t structSize, size
+ 
+ 	UniformBuffer = (VkHardwareDataBuffer*)buffers->CreateDataBuffer(-1, false, false);
+ 	UniformBuffer->SetData(mBlockSize * count, nullptr, BufferUsageType::Persistent);
++	mRegionSize = mBlockSize * (uint32_t)(count / screen->PerFrameSlots());
++	Reset();
++}
++
++void VkStreamBuffer::Reset()
++{
++	mStreamDataOffset = mRegionSize * screen->PerFrameSlot();
++	mRegionEnd = mStreamDataOffset + mRegionSize;
+ }
+ 
+ VkStreamBuffer::~VkStreamBuffer()
+@@ -139,9 +149,9 @@ VkStreamBuffer::~VkStreamBuffer()
+ uint32_t VkStreamBuffer::NextStreamDataBlock()
+ {
+ 	mStreamDataOffset += mBlockSize;
+-	if (mStreamDataOffset + (size_t)mBlockSize >= UniformBuffer->Size())
++	if (mStreamDataOffset + (size_t)mBlockSize >= mRegionEnd)
+ 	{
+-		mStreamDataOffset = 0;
++		Reset();
+ 		return 0xffffffff;
+ 	}
+ 	return mStreamDataOffset;
+diff --git a/src/common/rendering/vulkan/system/vk_buffer.h b/src/common/rendering/vulkan/system/vk_buffer.h
+index c8537553a..54f218593 100644
+--- a/src/common/rendering/vulkan/system/vk_buffer.h
++++ b/src/common/rendering/vulkan/system/vk_buffer.h
+@@ -77,11 +77,13 @@ public:
+ 	~VkStreamBuffer();
+ 
+ 	uint32_t NextStreamDataBlock();
+-	void Reset() { mStreamDataOffset = 0; }
++	// starts the frame's region (see DFrameBuffer::PerFrameSlot)
++	void Reset();
+ 
+ 	VkHardwareDataBuffer* UniformBuffer = nullptr;
+ 
+ private:
+ 	uint32_t mBlockSize = 0;
+ 	uint32_t mStreamDataOffset = 0;
++	uint32_t mRegionSize = 0, mRegionEnd = 0;
+ };
+diff --git a/src/common/rendering/vulkan/system/vk_commandbuffer.cpp b/src/common/rendering/vulkan/system/vk_commandbuffer.cpp
+index 761e7c14c..4442d3baa 100644
+--- a/src/common/rendering/vulkan/system/vk_commandbuffer.cpp
++++ b/src/common/rendering/vulkan/system/vk_commandbuffer.cpp
+@@ -57,7 +57,7 @@ VkCommandBufferManager::VkCommandBufferManager(VulkanRenderDevice* fb) : fb(fb)
+ 	for (auto& fence : mSubmitFence)
+ 		fence.reset(new VulkanFence(fb->device.get()));
+ 
+-	for (int i = 0; i < maxConcurrentSubmitCount; i++)
++	for (int i = 0; i < Banks * maxConcurrentSubmitCount; i++)
+ 		mSubmitWaitFences[i] = mSubmitFence[i]->fence;
+ 
+ #ifndef __SWITCH__
+@@ -164,15 +164,20 @@ void VkCommandBufferManager::ReadGpuMarks()
+ 	{
+ 		if (!mGpuMarkSubmitted[set])
+ 			continue;
+-		mGpuMarkSubmitted[set] = false;
+ 		uint64_t r[GpuMarkCount * 2] = {};	// value, availability
+ 		VkResult res = vkGetQueryPoolResults(fb->device->device, mGpuMarkPool->pool, set * GpuMarkCount, GpuMarkCount, sizeof(r), r,
+ 			2 * sizeof(uint64_t), VK_QUERY_RESULT_64_BIT | VK_QUERY_RESULT_WITH_AVAILABILITY_BIT);
+ 		if (res != VK_SUCCESS && res != VK_NOT_READY)
++		{
++			mGpuMarkSubmitted[set] = false;
+ 			continue;
++		}
+ 		auto avail = [&](int m) { return (mGpuMarksWritten[set] & (1u << m)) && r[m * 2 + 1] != 0; };
+ 		auto ms = [&](int a, int b) { return r[b * 2] > r[a * 2] ? (double)(r[b * 2] - r[a * 2]) * period / 1e6 : 0.0; };
+-		if (!avail(GpuFrameStart) || !avail(GpuFrameEnd))
++		if (!avail(GpuFrameEnd))
++			continue;	// that frame is still on the GPU (two frames in flight): read it later
++		mGpuMarkSubmitted[set] = false;
++		if (!avail(GpuFrameStart))
+ 			continue;
+ 		nxperf.gpuframes++;
+ 		nxperf.gpu_frame_ms += ms(GpuFrameStart, GpuFrameEnd);
+@@ -192,25 +197,44 @@ void VkCommandBufferManager::ReadGpuMarks()
+ #endif
+ }
+ 
+-void VkCommandBufferManager::WaitForPendingFrame()
++void VkCommandBufferManager::WaitForBank(int bank)
+ {
+-	if (!mFramePending)
++	PendingFrame &p = mPending[bank];
++	if (!p.pending)
+ 		return;
+ 	NXPERF_SCOPE(vkpending_ms, nullptr);
+-	vkWaitForFences(fb->device->device, mPendingFences, mSubmitWaitFences, VK_TRUE, std::numeric_limits<uint64_t>::max());
+-	vkResetFences(fb->device->device, mPendingFences, mSubmitWaitFences);
+-	mPendingTransferDelete.reset();
+-	mPendingDrawDelete.reset();
+-	mFramePending = false;
+-	mPendingFences = 0;
++	VkFence *fences = mSubmitWaitFences + bank * maxConcurrentSubmitCount;
++	vkWaitForFences(fb->device->device, p.fences, fences, VK_TRUE, std::numeric_limits<uint64_t>::max());
++	vkResetFences(fb->device->device, p.fences, fences);
++	p.transferDelete.reset();
++	p.drawDelete.reset();
++	p.pending = false;
++	p.fences = 0;
++}
++
++void VkCommandBufferManager::WaitForPendingFrame()
++{
++	// the older frame first (it uses the current bank)
++	WaitForBank(mBank);
++	WaitForBank(mBank ^ 1);
++	mSyncNext = false;
++}
++
++void VkCommandBufferManager::WaitForFrameSlot()
++{
++	if (mSyncNext || !rd_vk_frameoverlap)
++		WaitForPendingFrame();
++	else
++		WaitForBank(mBank);
+ }
+ 
+ void VkCommandBufferManager::FlushCommands(VulkanCommandBuffer** commands, size_t count, bool finish, bool lastsubmit)
+ {
+-	// the fences and command buffers of the previous frame are reused from index 0
+-	WaitForPendingFrame();
++	// this bank's fences and semaphores are reused from index 0
++	WaitForBank(mBank);
+ 
+-	int currentIndex = mNextSubmit % maxConcurrentSubmitCount;
++	const int bankBase = mBank * maxConcurrentSubmitCount;
++	int currentIndex = bankBase + mNextSubmit % maxConcurrentSubmitCount;
+ 
+ 	if (mNextSubmit >= maxConcurrentSubmitCount)
+ 	{
+@@ -225,7 +249,7 @@ void VkCommandBufferManager::FlushCommands(VulkanCommandBuffer** commands, size_
+ 		submit.AddCommandBuffer(commands[i]);
+ 
+ 	if (mNextSubmit > 0)
+-		submit.AddWait(VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, mSubmitSemaphore[(mNextSubmit - 1) % maxConcurrentSubmitCount].get());
++		submit.AddWait(VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, mSubmitSemaphore[bankBase + (mNextSubmit - 1) % maxConcurrentSubmitCount].get());
+ 
+ 	auto framebuffers = fb->GetFramebufferManager();
+ 	if (finish && framebuffers->PresentImageIndex != -1)
+@@ -301,7 +325,15 @@ void VkCommandBufferManager::FlushCommands(bool finish, bool lastsubmit, bool up
+ 
+ void VkCommandBufferManager::WaitForCommands(bool finish, bool uploadOnly)
+ {
+-	WaitForPendingFrame();
++#if defined(__SWITCH__)
++	const bool overlap = finish && !uploadOnly && rd_vk_frameoverlap && !gpuStatActive;
++#else
++	const bool overlap = false;
++#endif
++	// the end of a frame in overlap mode leaves the other frame in flight;
++	// everything else (uploads, resizes, full buffers) needs an idle GPU
++	if (!overlap)
++		WaitForPendingFrame();
+ 
+ 	if (finish)
+ 	{
+@@ -326,14 +358,16 @@ void VkCommandBufferManager::WaitForCommands(bool finish, bool uploadOnly)
+ 	// End of a presented frame: leave the GPU work in flight. Everything the
+ 	// frame used (command buffers, staging memory, deleted objects) stays
+ 	// alive until WaitForPendingFrame. GPU timestamp queries need the wait.
+-	if (finish && !uploadOnly && rd_vk_frameoverlap && !gpuStatActive && numWaitFences > 0)
++	if (overlap && numWaitFences > 0)
+ 	{
+-		mFramePending = true;
+-		mPendingFences = numWaitFences;
+-		mPendingTransferDelete = std::move(TransferDeleteList);
+-		mPendingDrawDelete = std::move(DrawDeleteList);
++		PendingFrame &p = mPending[mBank];
++		p.pending = true;
++		p.fences = numWaitFences;
++		p.transferDelete = std::move(TransferDeleteList);
++		p.drawDelete = std::move(DrawDeleteList);
+ 		DeleteFrameObjects(false);
+ 		mNextSubmit = 0;
++		mBank ^= 1;	// the next frame records into the other bank and buffer region
+ 		Finish.Unclock();
+ 		rendered_commandbuffers = current_rendered_commandbuffers;
+ 		current_rendered_commandbuffers = 0;
+@@ -344,8 +378,9 @@ void VkCommandBufferManager::WaitForCommands(bool finish, bool uploadOnly)
+ 	if (numWaitFences > 0)
+ 	{
+ 		NXPERF_SCOPE(gpuwait_ms, nullptr);
+-		vkWaitForFences(fb->device->device, numWaitFences, mSubmitWaitFences, VK_TRUE, std::numeric_limits<uint64_t>::max());
+-		vkResetFences(fb->device->device, numWaitFences, mSubmitWaitFences);
++		VkFence *fences = mSubmitWaitFences + mBank * maxConcurrentSubmitCount;
++		vkWaitForFences(fb->device->device, numWaitFences, fences, VK_TRUE, std::numeric_limits<uint64_t>::max());
++		vkResetFences(fb->device->device, numWaitFences, fences);
+ 	}
+ 
+ 	DeleteFrameObjects(uploadOnly);
+diff --git a/src/common/rendering/vulkan/system/vk_commandbuffer.h b/src/common/rendering/vulkan/system/vk_commandbuffer.h
+index 4089fcd57..7e5480bd5 100644
+--- a/src/common/rendering/vulkan/system/vk_commandbuffer.h
++++ b/src/common/rendering/vulkan/system/vk_commandbuffer.h
+@@ -49,6 +49,13 @@ public:
+ 	// frame (or before any other submit), so the GPU draws frame N while the
+ 	// CPU runs the game tics and input of frame N+1.
+ 	void WaitForPendingFrame();
++	// Two frames in flight (Switch): frame N records while the GPU draws N-1.
++	// Each frame uses one bank of fences/semaphores and one region of the
++	// per-frame buffers (DFrameBuffer::PerFrameSlot); BeginFrame only waits
++	// for the frame that used the same bank (N-2).
++	void WaitForFrameSlot();
++	int FrameSlot() const { return mBank; }
++	void SyncNextFrame() { mSyncNext = true; }
+ 
+ 	void PushGroup(const FString& name);
+ 	void PopGroup();
+@@ -103,16 +110,21 @@ private:
+ 	std::unique_ptr<VulkanCommandBuffer> mTransferCommands;
+ 	std::unique_ptr<VulkanCommandBuffer> mDrawCommands;
+ 
+-	enum { maxConcurrentSubmitCount = 8 };
+-	std::unique_ptr<VulkanSemaphore> mSubmitSemaphore[maxConcurrentSubmitCount];
+-	std::unique_ptr<VulkanFence> mSubmitFence[maxConcurrentSubmitCount];
+-	VkFence mSubmitWaitFences[maxConcurrentSubmitCount];
+-	int mNextSubmit = 0;
++	enum { maxConcurrentSubmitCount = 8, Banks = 2 };
++	std::unique_ptr<VulkanSemaphore> mSubmitSemaphore[Banks * maxConcurrentSubmitCount];
++	std::unique_ptr<VulkanFence> mSubmitFence[Banks * maxConcurrentSubmitCount];
++	VkFence mSubmitWaitFences[Banks * maxConcurrentSubmitCount];
++	int mNextSubmit = 0;	// submits of the current frame (in bank mBank)
++	int mBank = 0;
++	bool mSyncNext = false;
+ 
+-	bool mFramePending = false;
+-	int mPendingFences = 0;
+-	std::unique_ptr<DeleteList> mPendingTransferDelete;
+-	std::unique_ptr<DeleteList> mPendingDrawDelete;
++	struct PendingFrame
++	{
++		bool pending = false;
++		int fences = 0;
++		std::unique_ptr<DeleteList> transferDelete, drawDelete;
++	} mPending[Banks];
++	void WaitForBank(int bank);
+ 
+ 	struct TimestampQuery
+ 	{
+diff --git a/src/common/rendering/vulkan/system/vk_renderdevice.cpp b/src/common/rendering/vulkan/system/vk_renderdevice.cpp
+index 355dfe381..9a55e5726 100644
+--- a/src/common/rendering/vulkan/system/vk_renderdevice.cpp
++++ b/src/common/rendering/vulkan/system/vk_renderdevice.cpp
+@@ -210,8 +210,11 @@ void VulkanRenderDevice::InitializeState()
+ 
+ void VulkanRenderDevice::Update()
+ {
+-	// wipes and the start screen present frames without BeginFrame
+-	mCommands->WaitForPendingFrame();
++	// wipes and the start screen present frames without BeginFrame: they
++	// write the per-frame buffers without a region of their own
++	if (!mFrameBegun)
++		mCommands->WaitForPendingFrame();
++	mFrameBegun = false;
+ 	twoD.Reset();
+ 	Flush3D.Reset();
+ 
+@@ -480,8 +483,11 @@ TArray<uint8_t> VulkanRenderDevice::GetScreenshotBuffer(int &pitch, ESSType &col
+ 
+ void VulkanRenderDevice::BeginFrame()
+ {
+-	// the frame's persistent buffers are rewritten from the start below
+-	mCommands->WaitForPendingFrame();
++	// the frame's region of the per-frame buffers is rewritten from the start
++	// below; only the frame that used the same region (two frames ago) must be done
++	mCommands->WaitForFrameSlot();
++	mFrameBegun = true;
++	mRenderPassManager->SaveCacheWhenIdle();
+ 	SetViewportRects(nullptr);
+ 	mViewpoints->Clear();
+ 	mCommands->BeginFrame();
+@@ -511,6 +517,26 @@ void VulkanRenderDevice::WaitForCommands(bool finish)
+ 	mCommands->WaitForCommands(finish);
+ }
+ 
++int VulkanRenderDevice::PerFrameSlots() const
++{
++#ifdef __SWITCH__
++	return 2;
++#else
++	return 1;
++#endif
++}
++
++int VulkanRenderDevice::PerFrameSlot() const
++{
++	return mCommands ? mCommands->FrameSlot() : 0;
++}
++
++void VulkanRenderDevice::SyncNextFrame()
++{
++	if (mCommands)
++		mCommands->SyncNextFrame();
++}
++
+ void VulkanRenderDevice::WaitForPendingFrame()
+ {
+ 	mCommands->WaitForPendingFrame();
+diff --git a/src/common/rendering/vulkan/system/vk_renderdevice.h b/src/common/rendering/vulkan/system/vk_renderdevice.h
+index 0ee50454e..8136d99b3 100644
+--- a/src/common/rendering/vulkan/system/vk_renderdevice.h
++++ b/src/common/rendering/vulkan/system/vk_renderdevice.h
+@@ -113,6 +113,9 @@ public:
+ 
+ 	void WaitForCommands(bool finish) override;
+ 	void WaitForPendingFrame() override;
++	int PerFrameSlots() const override;
++	int PerFrameSlot() const override;
++	void SyncNextFrame() override;
+ #ifdef __SWITCH__
+ 	bool AllowSSAO() override;
+ #endif
+@@ -125,6 +128,8 @@ private:
+ 	void CopyScreenToBuffer(int w, int h, uint8_t *data) override;
+ 
+ 	std::unique_ptr<VkCommandBufferManager> mCommands;
++
++	bool mFrameBegun = false;	// BeginFrame ran for the frame being recorded
+ 	std::unique_ptr<VkBufferManager> mBufferManager;
+ 	std::unique_ptr<VkSamplerManager> mSamplerManager;
+ 	std::unique_ptr<VkTextureManager> mTextureManager;
+diff --git a/src/common/rendering/vulkan/textures/vk_hwtexture.cpp b/src/common/rendering/vulkan/textures/vk_hwtexture.cpp
+index 76d50953d..f442b7630 100644
+--- a/src/common/rendering/vulkan/textures/vk_hwtexture.cpp
++++ b/src/common/rendering/vulkan/textures/vk_hwtexture.cpp
+@@ -40,6 +40,7 @@
+ VkImageUsageFlags RDoom_DepthUsage(VkImageUsageFlags usage);
+ #endif
+ #include "vk_nxupload.h"
++#include "nx_perf.h"
+ 
+ VkHardwareTexture::VkHardwareTexture(VulkanRenderDevice* fb, int numchannels) : fb(fb)
+ {
+@@ -149,6 +150,8 @@ void VkHardwareTexture::CreateTexture(int w, int h, int pixelsize, VkFormat form
+ 		throw CVulkanError("Trying to create zero size texture");
+ 
+ 	int totalSize = w * h * pixelsize;
++	NXPERF_SCOPE(tex_ms, &nxperf.textures);	// perf.log "textures n/ms/kpix"
++	nxperf.texpixels += (int64_t)w * h;
+ 
+ 	mImage.Image = ImageBuilder()
+ 		.Format(format)
+@@ -195,7 +198,9 @@ void VkHardwareTexture::CreateTexture(int w, int h, int pixelsize, VkFormat form
+ 	// If we queued more than 64 MB of data already: wait until the uploads finish before continuing
+ 	fb->GetCommands()->TransferDeleteList->Add(std::move(stagingBuffer));
+ #if defined(__SWITCH__)
+-	if (fb->GetCommands()->TransferDeleteList->TotalSize > 16 * 1024 * 1024)
++	// every overflow waits for the GPU to go idle (a visible hitch when a
++	// door opens on a new area or an explosion shows its frames the first time)
++	if (fb->GetCommands()->TransferDeleteList->TotalSize > 48 * 1024 * 1024)
+ #else
+ 	if (fb->GetCommands()->TransferDeleteList->TotalSize > 64 * 1024 * 1024)
+ #endif
+-- 
+2.56.0
+

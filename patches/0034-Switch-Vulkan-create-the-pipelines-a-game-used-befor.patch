@@ -1,0 +1,230 @@
+From c811fac9d9151a156915b2f248e29bf14b89c076 Mon Sep 17 00:00:00 2001
+From: RDoom <171243930+aeon1911@users.noreply.github.com>
+Date: Mon, 12 Oct 2026 18:06:26 -0300
+Subject: [PATCH 34/46] Switch Vulkan: create the pipelines a game used before
+ while a level loads
+
+Console logs (273d38b21): with the pipeline cache loaded, creating a
+pipeline still costs ~20 ms on hardware (1.6 ms in Ryujinx): the driver
+uploads the shader to GPU memory and waits for it. Every pipeline a game
+(IWAD + mods, hashed) used is now listed in
+cache/uzdoom/rdoom-pipelines-<hash>.bin with its vertex format and created
+again at level load (WaitForPendingFrame), behind the loading screen.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ .../vulkan/renderer/vk_renderpass.cpp         | 109 +++++++++++++++++-
+ .../rendering/vulkan/renderer/vk_renderpass.h |  22 +++-
+ .../rendering/vulkan/shaders/vk_shader.h      |   1 +
+ .../vulkan/system/vk_renderdevice.cpp         |   3 +
+ 4 files changed, 133 insertions(+), 2 deletions(-)
+
+diff --git a/src/common/rendering/vulkan/renderer/vk_renderpass.cpp b/src/common/rendering/vulkan/renderer/vk_renderpass.cpp
+index a5618e015..df40c9bbd 100644
+--- a/src/common/rendering/vulkan/renderer/vk_renderpass.cpp
++++ b/src/common/rendering/vulkan/renderer/vk_renderpass.cpp
+@@ -39,6 +39,7 @@
+ #include "v_2ddrawer.h"
+ #include "i_specialpaths.h"
+ #include "cmdlib.h"
++#include "filesystem.h"
+ #include "nx_perf.h"
+ #include "c_cvars.h"
+ 
+@@ -94,6 +95,103 @@ VkRenderPassManager::~VkRenderPassManager()
+ 	}
+ }
+ 
++void VkRenderPassManager::PipelineCreated(const VkRenderPassKey &passKey, const VkPipelineKey &key)
++{
++	mUnsavedPipelines++;
++	mLastPipelineMs = I_msTime();
++#ifdef __SWITCH__
++	LoadWarmList();
++	const VkVertexFormat *vf = GetVertexFormat(key.VertexFormat);
++	if (!vf || vf->Attrs.size() > 12)
++		return;
++	WarmEntry e;
++	memset(&e, 0, sizeof(e));
++	e.Pass = passKey;
++	e.Key = key;
++	e.Key.VertexFormat = 0;
++	e.NumBindingPoints = vf->NumBindingPoints;
++	e.Stride = (int)vf->Stride;
++	e.UseVertexData = vf->UseVertexData;
++	e.NumAttrs = (int)vf->Attrs.size();
++	for (int i = 0; i < e.NumAttrs; i++)
++		e.Attrs[i] = vf->Attrs[i];
++	for (auto &w : mWarm)
++		if (!memcmp(&w, &e, sizeof(e)))
++			return;
++	if (mWarm.size() < 400)
++	{
++		mWarm.push_back(e);
++		mWarmDirty = true;
++	}
++#endif
++}
++
++FString VkRenderPassManager::WarmFilename()
++{
++	// one list per game: hash of the loaded resource files
++	uint32_t h = 2166136261u;
++	for (int i = 0; i < fileSystem.GetNumWads(); i++)
++	{
++		const char *name = fileSystem.GetResourceFileName(i);
++		for (const char *p = name ? name : ""; *p; p++)
++			h = (h ^ (uint8_t)*p) * 16777619u;
++	}
++	FString path = M_GetCachePath(true);
++	path.AppendFormat("/rdoom-pipelines-%08x.bin", h);
++	return path;
++}
++
++void VkRenderPassManager::LoadWarmList()
++{
++	if (mWarmLoaded)
++		return;
++	mWarmLoaded = true;
++	FileReader fr;
++	if (!fr.OpenFile(WarmFilename().GetChars()))
++		return;
++	uint32_t header[3] = {};	// magic, entry size, count
++	if (fr.Read(header, sizeof(header)) != (FileReader::Size)sizeof(header) || header[0] != 0x4c504452 || header[1] != sizeof(WarmEntry) || header[2] > 400)
++		return;
++	mWarm.resize(header[2]);
++	if (fr.Read(mWarm.data(), mWarm.size() * sizeof(WarmEntry)) != (FileReader::Size)(mWarm.size() * sizeof(WarmEntry)))
++		mWarm.clear();
++}
++
++void VkRenderPassManager::WarmupPipelines()
++{
++#ifdef __SWITCH__
++	if (mWarming || !fb->GetShaderManager() || !fb->GetShaderManager()->AllCompiled())
++		return;
++	LoadWarmList();
++	mWarming = true;
++	const uint64_t start = I_msTime();
++	int created = 0;
++	const auto list = mWarm;	// GetPipeline may append
++	for (const auto &w : list)
++	{
++		if (w.NumAttrs <= 0 || w.NumAttrs > 12)
++			continue;
++		VkPipelineKey key = w.Key;
++		if (key.SpecialEffect != EFF_NONE ? !fb->GetShaderManager()->GetEffect(key.SpecialEffect, w.Pass.DrawBuffers > 1 ? GBUFFER_PASS : NORMAL_PASS)
++			: !fb->GetShaderManager()->Get(key.EffectState, key.AlphaTest, w.Pass.DrawBuffers > 1 ? GBUFFER_PASS : NORMAL_PASS))
++			continue;	// a shader this game does not have
++		key.VertexFormat = GetVertexFormat(w.NumBindingPoints, w.NumAttrs, w.Stride, w.Attrs);
++		VkRenderPassSetup *pass = GetRenderPass(w.Pass);
++		if (pass->Pipelines.find(key) != pass->Pipelines.end())
++			continue;
++		pass->GetPipeline(key);
++		created++;
++	}
++	mWarming = false;
++	if (created)
++	{
++		FString n;
++		n.Format("%d of %d pipelines in %d ms", created, (int)list.size(), (int)(I_msTime() - start));
++		RDoom_SessionSet("vulkan_pipeline_warmup", n.GetChars());
++	}
++#endif
++}
++
+ void VkRenderPassManager::SaveCacheWhenIdle()
+ {
+ #ifdef __SWITCH__
+@@ -111,6 +209,15 @@ void VkRenderPassManager::SaveCacheWhenIdle()
+ 	catch (...)
+ 	{
+ 	}
++	if (mWarmDirty)
++	{
++		mWarmDirty = false;
++		std::vector<uint8_t> out(12 + mWarm.size() * sizeof(WarmEntry));
++		uint32_t header[3] = { 0x4c504452, (uint32_t)sizeof(WarmEntry), (uint32_t)mWarm.size() };
++		memcpy(out.data(), header, sizeof(header));
++		memcpy(out.data() + 12, mWarm.data(), mWarm.size() * sizeof(WarmEntry));
++		RDoom_WriteFileAsync(WarmFilename().GetChars(), out.data(), out.size());
++	}
+ #endif
+ }
+ 
+@@ -273,7 +380,7 @@ VulkanPipeline *VkRenderPassSetup::GetPipeline(const VkPipelineKey &key)
+ 	{
+ 		NXPERF_SCOPE(shader_ms, &nxperf.shaders);	// perf.log "shaders n/ms": pipelines created in that frame
+ 		item = CreatePipeline(key);
+-		fb->GetRenderPassManager()->PipelineCreated();
++		fb->GetRenderPassManager()->PipelineCreated(PassKey, key);
+ 	}
+ 	return item.get();
+ }
+diff --git a/src/common/rendering/vulkan/renderer/vk_renderpass.h b/src/common/rendering/vulkan/renderer/vk_renderpass.h
+index 788802666..b99827791 100644
+--- a/src/common/rendering/vulkan/renderer/vk_renderpass.h
++++ b/src/common/rendering/vulkan/renderer/vk_renderpass.h
+@@ -165,13 +165,33 @@ public:
+ 	// with HOME skipped it, so every session compiled its pipelines again
+ 	// (40-90 ms each on the console). It is now handed to the background writer
+ 	// a few seconds after the last new pipeline.
+-	void PipelineCreated() { mUnsavedPipelines++; mLastPipelineMs = I_msTime(); }
++	void PipelineCreated(const VkRenderPassKey &passKey, const VkPipelineKey &key);
+ 	void SaveCacheWhenIdle();
+ 
++	// Pipeline warm-up (Switch): even with the cache, creating a pipeline costs
++	// ~20 ms on the console (the driver uploads the shader to GPU memory and
++	// waits), which showed up as hitches the first time a door, shot or
++	// explosion appeared. Every pipeline a game (IWAD + mods) used is listed in
++	// cache/uzdoom/rdoom-pipelines-<hash>.bin and created again while a level
++	// loads, behind the loading screen.
++	void WarmupPipelines();
++
+ private:
+ 	int mUnsavedPipelines = 0;
+ 	uint64_t mLastPipelineMs = 0;
+ 
++	struct WarmEntry
++	{
++		VkRenderPassKey Pass;
++		VkPipelineKey Key;	// VertexFormat zeroed: the format is stored below
++		int NumBindingPoints, Stride, UseVertexData, NumAttrs;
++		FVertexBufferAttribute Attrs[12];
++	};
++	std::vector<WarmEntry> mWarm;
++	bool mWarmLoaded = false, mWarmDirty = false, mWarming = false;
++	FString WarmFilename();
++	void LoadWarmList();
++
+ 	VulkanRenderDevice* fb = nullptr;
+ 
+ 	std::map<VkRenderPassKey, std::unique_ptr<VkRenderPassSetup>> RenderPassSetup;
+diff --git a/src/common/rendering/vulkan/shaders/vk_shader.h b/src/common/rendering/vulkan/shaders/vk_shader.h
+index dd11c2080..cfdbfe06a 100644
+--- a/src/common/rendering/vulkan/shaders/vk_shader.h
++++ b/src/common/rendering/vulkan/shaders/vk_shader.h
+@@ -97,6 +97,7 @@ public:
+ 	VkShaderProgram *GetEffect(int effect, EPassType passType);
+ 	VkShaderProgram *Get(unsigned int eff, bool alphateston, EPassType passType);
+ 	bool CompileNextShader();
++	bool AllCompiled() const { return compileIndex == -1; }
+ 
+ 	VkPPShader* GetVkShader(PPShader* shader);
+ 
+diff --git a/src/common/rendering/vulkan/system/vk_renderdevice.cpp b/src/common/rendering/vulkan/system/vk_renderdevice.cpp
+index 9a55e5726..1b425fc37 100644
+--- a/src/common/rendering/vulkan/system/vk_renderdevice.cpp
++++ b/src/common/rendering/vulkan/system/vk_renderdevice.cpp
+@@ -540,6 +540,9 @@ void VulkanRenderDevice::SyncNextFrame()
+ void VulkanRenderDevice::WaitForPendingFrame()
+ {
+ 	mCommands->WaitForPendingFrame();
++	// called while a level loads: create the pipelines this game used before
++	if (mRenderPassManager)
++		mRenderPassManager->WarmupPipelines();
+ }
+ 
+ #ifdef __SWITCH__
+-- 
+2.56.0
+

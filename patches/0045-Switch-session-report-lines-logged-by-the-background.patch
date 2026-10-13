@@ -1,0 +1,96 @@
+From 68a666a923943acc8115d77492d232ef84ffc3f9 Mon Sep 17 00:00:00 2001
+From: RDoom <171243930+aeon1911@users.noreply.github.com>
+Date: Tue, 13 Oct 2026 15:14:21 -0300
+Subject: [PATCH 45/46] Switch: session report lines logged by the background
+ writer; stabilizer recovers with 80% work
+
+HW test of e01b911d4 (2.5 min, MAP01-MAP02): the list-save stall is gone and
+the area budget leaves out up to 84 effects per frame in explosions (no more
+runs of 40-70 ms frames). The remaining 41-56 ms frames came exactly every
+10 s: the session report line for every 600 presented frames cost the game
+thread 37-39 ms (timestamp, formatting) inside the present. And the
+stabilizer never left level 6 - lights at 6-7 of up to 32 - because Brutal
+Doom's CPU work never dropped under 2/3 of a frame although frames were on time.
+
+- RDoom_SessionSet only records the value; the writer thread logs the line.
+- Detail comes back when frames are on time and work is under 80% of a frame.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ src/common/engine/nx_governor.cpp         |  8 ++++++--
+ src/common/platform/posix/nx/rdoom_nx.cpp | 14 +++++++++++++-
+ 2 files changed, 19 insertions(+), 3 deletions(-)
+
+diff --git a/src/common/engine/nx_governor.cpp b/src/common/engine/nx_governor.cpp
+index 3b121f81c..153b676eb 100644
+--- a/src/common/engine/nx_governor.cpp
++++ b/src/common/engine/nx_governor.cpp
+@@ -136,9 +136,13 @@ void NXGovernor_Frame(double frame_ms, double waits_ms, bool inlevel)
+ 		}
+ 	}
+ 
+-	// plenty of time to spare (the frame was on time and less than ~2/3 of it was actual work)
++	// time to spare: the frame was on time and less than 80% of it was actual
++	// work (2/3 kept Brutal Doom - ~500 actors, 10-12 ms of CPU per frame - at
++	// the top level for whole sessions although its frames were on time; the
++	// limit is the GPU there, and going back up a level too early just costs
++	// one late frame and a longer wait next time)
+ 	double work = frame_ms - waits_ms;
+-	if (frame_ms <= target * 1.03 && work <= target * 0.62) good++;
++	if (frame_ms <= target * 1.03 && work <= target * 0.80) good++;
+ 	else good = 0;
+ 
+ 	if (good >= lowerDelay && nxGovLevel > 0 && hold == 0)
+diff --git a/src/common/platform/posix/nx/rdoom_nx.cpp b/src/common/platform/posix/nx/rdoom_nx.cpp
+index 318e387a2..ca451c3da 100644
+--- a/src/common/platform/posix/nx/rdoom_nx.cpp
++++ b/src/common/platform/posix/nx/rdoom_nx.cpp
+@@ -377,6 +377,10 @@ static std::vector<std::pair<std::string, std::string>> g_session;
+ static std::mutex g_ioMutex;	// g_session, g_sessionDirty, g_fileQueue
+ static bool g_sessionDirty = false;
+ static std::vector<std::pair<std::string, std::vector<uint8_t>>> g_fileQueue;
++// session report lines for rdoom.log, written by the background writer: the
++// log line (timestamp from the time service, formatting) cost the game thread
++// 30-40 ms every time, e.g. every 600 frames (Switch Lite, 2026-10-13)
++static std::vector<std::string> g_sessionLog;
+ static Thread g_flushThread;
+ static volatile bool g_flushRun = false;
+ void NXPerf_FlushFile();
+@@ -504,6 +508,7 @@ static void FlushOnce()
+ 	std::string session;
+ 	bool writeSession = false;
+ 	decltype(g_fileQueue) files;
++	std::vector<std::string> logLines;
+ 	{
+ 		std::lock_guard<std::mutex> lock(g_ioMutex);
+ 		if (g_sessionDirty)
+@@ -514,7 +519,10 @@ static void FlushOnce()
+ 			writeSession = true;
+ 		}
+ 		files.swap(g_fileQueue);
++		logLines.swap(g_sessionLog);
+ 	}
++	for (auto &line : logLines)
++		RLOG_I("session", "%s", line.c_str());
+ 	if (writeSession)
+ 	{
+ 		FILE *f = fopen(RDOOM_SD_ROOT "/logs/engine-session.txt", "w");
+@@ -613,10 +621,14 @@ void RDoom_SessionSet(const char *key, const char *value)
+ 		if (!found)
+ 			g_session.push_back({ key, value });
+ 		g_sessionDirty = true;
++		if (g_flushRun && g_sessionLog.size() < 256)
++			g_sessionLog.push_back(std::string(key) + ": " + value);
+ 	}
+ 	if (!g_flushRun)
++	{
+ 		FlushOnce();
+-	RLOG_I("session", "%s: %s", key, value);
++		RLOG_I("session", "%s: %s", key, value);
++	}
+ }
+ 
+ // Called by ZVulkan the first time the GPU is reported lost: leaves a marker
+-- 
+2.56.0
+

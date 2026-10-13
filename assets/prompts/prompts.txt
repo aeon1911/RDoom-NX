@@ -1,0 +1,30 @@
+# Each prompt: target file, size, then the text. Negative prompt applies to all.
+
+NEGATIVE: text, letters, words, watermark, signature, logo, Doomguy, Doom marine, cacodemon, id Software, official Doom artwork, game cover, UI elements, people, blurry, low contrast
+
+[bg_main.jpg 1280x720]
+Wide cinematic view of an abandoned hellish industrial complex at night, silhouetted refinery towers, chimneys and catwalks, a furnace-orange glow on the horizon right of center, drifting embers, thick red smoke, dark left third for interface panels, sci-fi horror, painterly, high contrast, deep shadows, red orange amber palette
+
+[bg_inner.jpg 1280x720]
+Close view of a dark riveted steel bulkhead wall in a derelict research base, faint red emergency lighting from above, worn hazard stripes at top and bottom, pipes along the right edge, subtle sparks, mostly flat and dark so text stays readable
+
+[card_freedoom2.jpg 480x270]
+Abstract sci-fi tech panel, teal and green glow on black metal, hexagonal schematic shapes, clean and calm, darker bottom half
+
+[card_brutaldoom.jpg 480x270]
+Abstract aggressive composition, diagonal blood-red light slashes over black steel, splatter texture, darker bottom half
+
+[card_wadfusion.jpg 480x270]
+Abstract glowing amber energy rings over dark bronze metal, fusion core feel, darker bottom half
+
+[card_lexicon.jpg 480x270]
+Abstract arcane purple glyphs etched into dark stone and metal, faint violet light, darker bottom half
+
+[card_compendium.jpg 480x270]
+Abstract stacked steel plates lit by cold blue light, archive or collection feel, darker bottom half
+
+[card_custom.jpg 480x270]
+Abstract dark gunmetal surface with bolts and tool marks, neutral warm-grey light, darker bottom half
+
+[logo / icon]
+Do not generate the lettering with AI. Keep the vector "RDoom" lettering from generate_art.py and, at most, generate a background plate behind it.

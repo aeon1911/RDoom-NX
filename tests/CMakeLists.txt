@@ -1,0 +1,15 @@
+# Host tests for the RDoom launcher core.
+#   cmake -S tests -B build/host-tests -G Ninja && ninja -C build/host-tests && ctest --test-dir build/host-tests
+cmake_minimum_required(VERSION 3.16)
+project(rdoom_tests CXX C)
+add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/../launcher ${CMAKE_BINARY_DIR}/launcher)
+add_executable(launcher_tests launcher_tests.cpp)
+target_link_libraries(launcher_tests PRIVATE rdoom_launcher_core)
+enable_testing()
+set(RDOOM_IWADINFO ${CMAKE_CURRENT_SOURCE_DIR}/../engine/wadsrc_extra/static/iwadinfo.txt)
+set(RDOOM_FREEDOOM ${CMAKE_CURRENT_SOURCE_DIR}/../third_party/freedoom/freedoom-0.13.0)
+add_test(NAME launcher_core COMMAND launcher_tests ${CMAKE_BINARY_DIR}/scratch ${RDOOM_IWADINFO} ${RDOOM_FREEDOOM})
+add_executable(rdoom_inspect rdoom_inspect.cpp)
+target_link_libraries(rdoom_inspect PRIVATE rdoom_launcher_core)
+add_executable(ui_preview ui_preview.cpp)
+target_link_libraries(ui_preview PRIVATE rdoom_launcher_ui)

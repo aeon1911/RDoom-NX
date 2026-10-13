@@ -1,0 +1,174 @@
+From 05bdf5853fc31b30f43131e3b2a317d470986c45 Mon Sep 17 00:00:00 2001
+From: RDoom <171243930+aeon1911@users.noreply.github.com>
+Date: Sun, 11 Oct 2026 19:07:50 -0300
+Subject: [PATCH 24/46] Switch Vulkan: no ZCULL on depth buffers (fixes the GPU
+ hang on the first 3D draw)
+
+Hardware trace (push_sync dump, 2026-10-11): the submission that hangs the
+GM20B (channel lost: fifo idle timeout) is a single 4-vertex draw wrapped in
+LOAD_ZCULL ... STORE_ZCULL, the first draw that uses the scene depth buffer;
+2D-only frames (no depth) always worked. NVK enables persistent ZCULL only for
+depth images whose usage is within {transfer src, sampled, depth attachment,
+input attachment} and transient ZCULL within that set plus transfer dst. On
+Switch the depth buffers (scene, pipeline, camera textures) are now created
+as attachment-only TRANSIENT_ATTACHMENT images, so neither path is used.
+SSAO, the only reader of these buffers, is disabled while ZCULL is off.
+rd_vk_zcull 1 restores the previous behaviour for testing.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ src/common/rendering/v_video.h                |  3 ++-
+ .../vulkan/system/vk_renderdevice.cpp         |  8 +++++++
+ .../rendering/vulkan/system/vk_renderdevice.h |  3 +++
+ .../vulkan/textures/vk_hwtexture.cpp          |  7 ++++++
+ .../vulkan/textures/vk_renderbuffers.cpp      | 24 ++++++++++++++++++-
+ src/rendering/hwrenderer/hw_entrypoint.cpp    |  2 +-
+ 6 files changed, 44 insertions(+), 3 deletions(-)
+
+diff --git a/src/common/rendering/v_video.h b/src/common/rendering/v_video.h
+index c66cb64d0..e37f585c6 100644
+--- a/src/common/rendering/v_video.h
++++ b/src/common/rendering/v_video.h
+@@ -271,7 +271,8 @@ public:
+ 	virtual void SetSceneRenderTarget(bool useSSAO) {}
+ 	virtual void UpdateShadowMap() {}
+ 	virtual void WaitForCommands(bool finish) {}
+-	virtual void WaitForPendingFrame() {}	// Vulkan frame overlap: the GPU is done with the last presented frame
++	virtual void WaitForPendingFrame() {}
++	virtual bool AllowSSAO() { return true; }	// false when the depth buffer cannot be sampled (Switch Vulkan without ZCULL)	// Vulkan frame overlap: the GPU is done with the last presented frame
+ 	virtual void SetSaveBuffers(bool yes) {}
+ 	virtual void ImageTransitionScene(bool unknown) {}
+ 	virtual void CopyScreenToBuffer(int width, int height, uint8_t* buffer)	{ memset(buffer, 0, width* height); }
+diff --git a/src/common/rendering/vulkan/system/vk_renderdevice.cpp b/src/common/rendering/vulkan/system/vk_renderdevice.cpp
+index d4c0da21b..2b248d4b7 100644
+--- a/src/common/rendering/vulkan/system/vk_renderdevice.cpp
++++ b/src/common/rendering/vulkan/system/vk_renderdevice.cpp
+@@ -501,6 +501,14 @@ void VulkanRenderDevice::WaitForPendingFrame()
+ 	mCommands->WaitForPendingFrame();
+ }
+ 
++#ifdef __SWITCH__
++EXTERN_CVAR(Bool, rd_vk_zcull)
++bool VulkanRenderDevice::AllowSSAO()
++{
++	return rd_vk_zcull;  // depth buffers are attachment-only (no ZCULL) otherwise
++}
++#endif
++
+ unsigned int VulkanRenderDevice::GetLightBufferBlockSize() const
+ {
+ 	return mLights->GetBlockSize();
+diff --git a/src/common/rendering/vulkan/system/vk_renderdevice.h b/src/common/rendering/vulkan/system/vk_renderdevice.h
+index f9a105eaa..0ee50454e 100644
+--- a/src/common/rendering/vulkan/system/vk_renderdevice.h
++++ b/src/common/rendering/vulkan/system/vk_renderdevice.h
+@@ -113,6 +113,9 @@ public:
+ 
+ 	void WaitForCommands(bool finish) override;
+ 	void WaitForPendingFrame() override;
++#ifdef __SWITCH__
++	bool AllowSSAO() override;
++#endif
+ 
+ 	bool RaytracingEnabled();
+ 
+diff --git a/src/common/rendering/vulkan/textures/vk_hwtexture.cpp b/src/common/rendering/vulkan/textures/vk_hwtexture.cpp
+index 7e4ef5596..76d50953d 100644
+--- a/src/common/rendering/vulkan/textures/vk_hwtexture.cpp
++++ b/src/common/rendering/vulkan/textures/vk_hwtexture.cpp
+@@ -36,6 +36,9 @@
+ #include "vulkan/renderer/vk_postprocess.h"
+ #include "vulkan/shaders/vk_shader.h"
+ #include "vk_hwtexture.h"
++#ifdef __SWITCH__
++VkImageUsageFlags RDoom_DepthUsage(VkImageUsageFlags usage);
++#endif
+ #include "vk_nxupload.h"
+ 
+ VkHardwareTexture::VkHardwareTexture(VulkanRenderDevice* fb, int numchannels) : fb(fb)
+@@ -86,7 +89,11 @@ VkTextureImage *VkHardwareTexture::GetDepthStencil(FTexture *tex)
+ 			.Size(w, h)
+ 			.Samples(VK_SAMPLE_COUNT_1_BIT)
+ 			.Format(format)
++#ifdef __SWITCH__
++			.Usage(RDoom_DepthUsage(VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT))  // no ZCULL, see vk_renderbuffers.cpp
++#else
+ 			.Usage(VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT)
++#endif
+ 			.DebugName("VkHardwareTexture.DepthStencil")
+ 			.Create(fb->device.get());
+ 
+diff --git a/src/common/rendering/vulkan/textures/vk_renderbuffers.cpp b/src/common/rendering/vulkan/textures/vk_renderbuffers.cpp
+index 3f84b3350..57e4d34d2 100644
+--- a/src/common/rendering/vulkan/textures/vk_renderbuffers.cpp
++++ b/src/common/rendering/vulkan/textures/vk_renderbuffers.cpp
+@@ -29,6 +29,19 @@
+ #ifdef __SWITCH__
+ // GPU-fault workaround switch: use D32_SFLOAT_S8_UINT for every depth buffer
+ CVAR(Bool, rd_vk_depth32, false, 0)
++// ZCULL on the Switch's GM20B hangs the GPU (fifo idle timeout) on the first
++// draw that uses a ZCULL-enabled depth buffer (LOAD_ZCULL ... STORE_ZCULL,
++// hardware test 2026-10-11). NVK enables ZCULL only for depth images whose
++// usage is within {transfer, sampled, depth attachment, input attachment}, so
++// declaring them TRANSIENT_ATTACHMENT (attachment-only) turns it off. Nothing
++// samples these depth buffers except SSAO, which is disabled while this is off.
++CVAR(Bool, rd_vk_zcull, false, 0)
++VkImageUsageFlags RDoom_DepthUsage(VkImageUsageFlags usage)
++{
++	if (rd_vk_zcull)
++		return usage;
++	return (usage & ~(VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT)) | VK_IMAGE_USAGE_TRANSIENT_ATTACHMENT_BIT;
++}
+ #endif
+ 
+ #include "vulkan/renderer/vk_postprocess.h"
+@@ -103,7 +116,11 @@ void VkRenderBuffers::CreatePipelineDepthStencil(int width, int height)
+ 	ImageBuilder builder;
+ 	builder.Size(width, height);
+ 	builder.Format(PipelineDepthStencilFormat);
++	#ifdef __SWITCH__
++	builder.Usage(RDoom_DepthUsage(VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT));
++#else
+ 	builder.Usage(VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT);
++#endif
+ 	if (!builder.IsFormatSupported(fb->device.get()))
+ 	{
+ 		PipelineDepthStencilFormat = VK_FORMAT_D32_SFLOAT_S8_UINT;
+@@ -203,7 +220,8 @@ void VkRenderBuffers::CreateSceneDepthStencil(int width, int height, VkSampleCou
+ 		SceneDepthStencilFormat = VK_FORMAT_D32_SFLOAT_S8_UINT;
+ 	{
+ 		FString d;
+-		d.Format("%s, %dx%d, %d sample(s)", SceneDepthStencilFormat == VK_FORMAT_D32_SFLOAT_S8_UINT ? "D32_SFLOAT_S8" : "D24_UNORM_S8", width, height, (int)samples);
++		d.Format("%s, %dx%d, %d sample(s), ZCULL %s", SceneDepthStencilFormat == VK_FORMAT_D32_SFLOAT_S8_UINT ? "D32_SFLOAT_S8" : "D24_UNORM_S8", width, height, (int)samples,
++			rd_vk_zcull ? "allowed (rd_vk_zcull 1)" : "off (transient depth attachments)");
+ 		RDoom_SessionSet("vulkan_scene_depth", d.GetChars());
+ 	}
+ #endif
+@@ -211,7 +229,11 @@ void VkRenderBuffers::CreateSceneDepthStencil(int width, int height, VkSampleCou
+ 	builder.Size(width, height);
+ 	builder.Samples(samples);
+ 	builder.Format(SceneDepthStencilFormat);
++	#ifdef __SWITCH__
++	builder.Usage(RDoom_DepthUsage(VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT));
++#else
+ 	builder.Usage(VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT);
++#endif
+ 	if (!builder.IsFormatSupported(fb->device.get()))
+ 	{
+ 		SceneDepthStencilFormat = VK_FORMAT_D32_SFLOAT_S8_UINT;
+diff --git a/src/rendering/hwrenderer/hw_entrypoint.cpp b/src/rendering/hwrenderer/hw_entrypoint.cpp
+index 08ef23f43..86989aaa4 100644
+--- a/src/rendering/hwrenderer/hw_entrypoint.cpp
++++ b/src/rendering/hwrenderer/hw_entrypoint.cpp
+@@ -137,7 +137,7 @@ sector_t* RenderViewpoint(FRenderViewpoint& mainvp, AActor* camera, IntRect* bou
+ 
+ 		if (mainview) // Bind the scene frame buffer and turn on draw buffers used by ssao
+ 		{
+-			bool useSSAO = (gl_ssao != 0);
++			bool useSSAO = (gl_ssao != 0) && screen->AllowSSAO();
+ 			screen->SetSceneRenderTarget(useSSAO);
+ 			RenderState.SetPassType(useSSAO ? GBUFFER_PASS : NORMAL_PASS);
+ 			RenderState.EnableDrawBuffers(RenderState.GetPassDrawBufferCount(), true);
+-- 
+2.56.0
+

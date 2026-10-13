@@ -1,0 +1,439 @@
+From e9397456f6fffe1b765d38b22ac9033c0ab18d84 Mon Sep 17 00:00:00 2001
+From: RDoom <171243930+aeon1911@users.noreply.github.com>
+Date: Sun, 11 Oct 2026 10:03:19 -0300
+Subject: [PATCH 16/46] Vulkan on Switch: step-by-step session log,
+ unified-memory buffers, safe shader polling.
+
+- Instance, VI surface, device, swapchain and presented-frame count are written
+  to the session report; a Vulkan failure is a clear fatal error that tells the
+  user to pick OpenGL/OpenGL ES explicitly (no silent fallback).
+- Static/stream buffers are written in place on the Tegra X1's unified memory
+  instead of staging + vkCmdCopyBuffer (which NVK runs as a compute shader).
+- Timestamp query pool is created on the first 'stat gpu' only.
+- VkShaderManager/FShaderManager::CompileNextShader return 'done' when polled
+  again after finishing (the Switch start-up precompile loop did that and read
+  defaultshaders[-1]).
+- Mesa 26 glthread is chosen with MESA_SWITCH_GLTHREAD; the Mesa 20.1
+  structure-offset patching is no longer used.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ src/common/platform/posix/nx/nx_glthread.cpp  | 66 +++----------------
+ src/common/platform/posix/sdl/sdlglvideo.cpp  | 32 ++++++++-
+ src/common/rendering/gl/gl_shader.cpp         |  3 +
+ .../rendering/vulkan/shaders/vk_shader.cpp    |  3 +
+ .../vulkan/system/vk_commandbuffer.cpp        | 29 +++++---
+ .../vulkan/system/vk_commandbuffer.h          |  1 +
+ .../rendering/vulkan/system/vk_hwbuffer.cpp   | 23 +++++++
+ .../vulkan/system/vk_renderdevice.cpp         | 11 ++++
+ .../vulkan/textures/vk_framebuffer.cpp        | 25 +++++++
+ 9 files changed, 123 insertions(+), 70 deletions(-)
+
+diff --git a/src/common/platform/posix/nx/nx_glthread.cpp b/src/common/platform/posix/nx/nx_glthread.cpp
+index d131747db..4800a6097 100644
+--- a/src/common/platform/posix/nx/nx_glthread.cpp
++++ b/src/common/platform/posix/nx/nx_glthread.cpp
+@@ -6,6 +6,9 @@
+ // executed by a separate driver thread, so the game thread only records
+ // commands while the driver work runs on another core.
+ //
++// RDoom: with the Mesa 26.2.4 SDK this file no longer starts glthread itself
++// (see NX_GLThreadStart); it keeps the audio thread placement, the sync
++// statistics and the hang reporter. Original notes for Mesa 20.1:
+ // The Switch build of Mesa (egl_switch, Mesa 20.1) ships the glthread code but
+ // never switches it on, so it is started here by hand once the GL context
+ // exists. The structure offsets below come from the disassembly of that exact
+@@ -30,11 +33,6 @@ CVAR(Int, nx_glthread_core, 1, CVAR_ARCHIVE | CVAR_GLOBALCONFIG)
+ 
+ extern "C"
+ {
+-	void *_glapi_get_context(void);
+-	void *_glapi_get_dispatch(void);
+-	void _glapi_set_dispatch(void *table);
+-	void _mesa_glthread_init(void *ctx);
+-	void _mesa_glthread_finish(void *ctx);
+ 	void __real__mesa_glthread_finish_before(void *ctx, const char *func);
+ 	int __real_pthread_create(pthread_t *thread, const pthread_attr_t *attr, void *(*fn)(void *), void *arg);
+ 	Result __real_nwindowDequeueBuffer(NWindow *nw, s32 *out_slot, NvMultiFence *out_fence);
+@@ -208,7 +206,7 @@ void NX_GLThreadFinish()
+ 	if (!gEnabled) return;
+ 	double start = NXPerf_NowMS();
+ 	NX_GLCrumb("glthread finish (end of frame)");
+-	_mesa_glthread_finish(gCtx);
++	(void)gCtx;
+ 	NX_GLCrumb("glthread finish done");
+ 	nxperf.glfinish_ms += NXPerf_NowMS() - start;
+ }
+@@ -432,55 +430,9 @@ const char *NX_GLThreadStatus()
+ 
+ void NX_GLThreadStart()
+ {
+-	if (gEnabled) return;
+-	if (!nx_glthread) { snprintf(gStatus, sizeof(gStatus), "off (launcher option)"); return; }
+-	if (gAttempts >= 2) return;	// once at startup, once more at the first frame
+-	gAttempts++;
+-
+-	void *ctx = _glapi_get_context();
+-	if (!ctx) { snprintf(gStatus, sizeof(gStatus), "failed (try %d): no current GL context", gAttempts); Printf("glthread: %s\n", gStatus); return; }
+-
+-	// sanity checks: the dispatch table the game uses right now must be the one
+-	// stored at the expected offset, glthread must be off and the state
+-	// tracker's manager must not have a background hook yet.
+-	void *dispatch = _glapi_get_dispatch();
+-	void *client = At<void *>(ctx, CTX_CLIENT_DISPATCH);
+-	void *server = At<void *>(ctx, CTX_CLIENT_DISPATCH + 8);
+-	void *marshal = At<void *>(ctx, CTX_MARSHAL_EXEC);
+-	int enabled = At<uint8_t>(ctx, CTX_GLTHREAD_ENABLED);
+-	void *st = At<void *>(ctx, CTX_ST);
+-	void *smapi = st ? At<void *>(st, 0) : nullptr;
+-	void *screen = smapi ? At<void *>(smapi, 0) : nullptr;
+-	void *bg = smapi ? At<void *>(smapi, SMAPI_SET_BACKGROUND_CONTEXT) : nullptr;
+-	bool dispatchOk = dispatch != nullptr && (dispatch == client || dispatch == server);
+-	if (!dispatchOk || enabled != 0 || marshal != nullptr || smapi == nullptr || screen == nullptr || bg != nullptr)
+-	{
+-		snprintf(gStatus, sizeof(gStatus), "failed (try %d): Mesa layout (dispatch %p client %p server %p marshal %p enabled %d st %p smapi %p screen %p bg %p)",
+-			gAttempts, dispatch, client, server, marshal, enabled, st, smapi, screen, bg);
+-		Printf("glthread: %s\n", gStatus);
+-		return;
+-	}
+-
+-	At<void *>(smapi, SMAPI_SET_BACKGROUND_CONTEXT) = (void *)NXGLThreadStarted;
+-	gCreatingThread = 1;
+-	gThreadCreateResult = -1;
+-	_mesa_glthread_init(ctx);
+-	gCreatingThread = 0;
+-
+-	if (At<uint8_t>(ctx, CTX_GLTHREAD_ENABLED) == 0 || At<void *>(ctx, CTX_CLIENT_DISPATCH) == nullptr)
+-	{
+-		At<void *>(smapi, SMAPI_SET_BACKGROUND_CONTEXT) = nullptr;
+-		snprintf(gStatus, sizeof(gStatus), "failed (try %d): Mesa could not start the driver thread (pthread_create %d, driver thread ran %d)",
+-			gAttempts, gThreadCreateResult, (int)gThreadRan);
+-		Printf("glthread: %s\n", gStatus);
+-		return;
+-	}
+-	// from now on this thread only records commands
+-	_glapi_set_dispatch(At<void *>(ctx, CTX_CLIENT_DISPATCH));
+-	gCtx = ctx;
+-	gMainHandle = threadGetCurHandle();
+-	gEnabled = true;
+-	StartWatchdog();
+-	snprintf(gStatus, sizeof(gStatus), "on (try %d, driver thread on core %d)", gAttempts, (int)nx_glthread_core);
+-	Printf("glthread: %s\n", gStatus);
++	// RDoom links the Mesa 26.2.4 Horizon SDK, whose glthread is switched with
++	// MESA_SWITCH_GLTHREAD before the EGL context exists (see sdlglvideo.cpp).
++	// The Mesa 20.1 structure-offset method used by the earlier port must not
++	// touch Mesa 26 internals, so nothing is patched here any more.
++	snprintf(gStatus, sizeof(gStatus), "Mesa 26 glthread %s (MESA_SWITCH_GLTHREAD)", nx_glthread ? "requested" : "off");
+ }
+diff --git a/src/common/platform/posix/sdl/sdlglvideo.cpp b/src/common/platform/posix/sdl/sdlglvideo.cpp
+index 8b9333b24..39cce649a 100644
+--- a/src/common/platform/posix/sdl/sdlglvideo.cpp
++++ b/src/common/platform/posix/sdl/sdlglvideo.cpp
+@@ -29,6 +29,8 @@
+ #ifdef __SWITCH__
+ #include "common/platform/posix/nx/nx_glthread.h"
+ #include "common/platform/posix/nx/nx_loadscreen.h"
++#include "common/platform/posix/nx/rdoom_nx.h"
++#include "common/platform/posix/nx/nx_nvcompat.h"
+ #include "gamestate.h"
+ #include <switch.h>
+ #endif
+@@ -369,7 +371,7 @@ bool I_CreateVulkanSurface(VkInstance instance, VkSurfaceKHR *surface)
+ 	// sentinel. With format 0 the compositor never shows the Vulkan image.
+ 	// Do this only when that screen owned the window. Releasing buffers on
+ 	// a window we never claimed drops the layer and the present never shows.
+-	if (NXLS_ClaimedDisplay())
++	if (NXLS_ClaimedDisplay() || RDoom_NXLauncherUsedDisplay())
+ 	{
+ 		nwindowReleaseBuffers(win);
+ 		win->format = ~0u;
+@@ -379,7 +381,9 @@ bool I_CreateVulkanSurface(VkInstance instance, VkSurfaceKHR *surface)
+ 	VkViSurfaceCreateInfoNN createInfo = {};
+ 	createInfo.sType = VK_STRUCTURE_TYPE_VI_SURFACE_CREATE_INFO_NN;
+ 	createInfo.window = (void*)win;
+-	return vkCreateViSurfaceNN(instance, &createInfo, nullptr, surface) == VK_SUCCESS;
++	VkResult res = vkCreateViSurfaceNN(instance, &createInfo, nullptr, surface);
++	RDoom_SessionSet("vulkan_surface", res == VK_SUCCESS ? "VK_NN_vi_surface on the default NWindow: ok" : "vkCreateViSurfaceNN FAILED");
++	return res == VK_SUCCESS;
+ #else
+ 	assert(Priv::window != nullptr);
+ 	return SDL_Vulkan_CreateSurface(Priv::window, instance, surface) == SDL_TRUE;
+@@ -452,6 +456,10 @@ DFrameBuffer *SDLVideo::CreateFrameBuffer ()
+ 
+ 	// first try Vulkan, if that fails OpenGL
+ #ifdef HAVE_VULKAN
++#ifdef __SWITCH__
++	RDoom_SessionSet("renderer_requested", vid_preferbackend == BACKEND_VULKAN ? "vulkan" : vid_preferbackend == BACKEND_OPENGL ? "opengl" : "gles");
++	RDoom_SessionSet("nv_compat", NX_NvCompatStatus());
++#endif
+ 	if (Priv::vulkanEnabled)
+ 	{
+ 		try
+@@ -466,6 +474,13 @@ DFrameBuffer *SDLVideo::CreateFrameBuffer ()
+ 			for (unsigned int i = 0; i < count; i++)
+ 				builder.RequireExtension(names[i]);
+ 			auto instance = builder.Create();
++#ifdef __SWITCH__
++			{
++				FString iv;
++				iv.Format("ok (api %d.%d, loaderless Mesa NVK)", VK_VERSION_MAJOR(instance->ApiVersion), VK_VERSION_MINOR(instance->ApiVersion));
++				RDoom_SessionSet("vulkan_instance", iv.GetChars());
++			}
++#endif
+ 
+ 			VkSurfaceKHR surfacehandle = nullptr;
+ 			if (!I_CreateVulkanSurface(instance->Instance, &surfacehandle))
+@@ -478,7 +493,12 @@ DFrameBuffer *SDLVideo::CreateFrameBuffer ()
+ 		catch (CVulkanError const &error)
+ 		{
+ #ifdef __SWITCH__
+-			I_FatalError("Vulkan:\n%s\n", error.what());
++			// No silent switch to OpenGL: the profile asked for Vulkan.
++			RDoom_SessionSet("renderer_active", "none");
++			RDoom_SessionSet("vulkan_error", error.what());
++			I_FatalError("O Vulkan n\xc3\xa3o p\xc3\xb4" "de ser iniciado / Vulkan could not be started:\n%s\n\n"
++				"Detalhes em switch/rdoom/logs/engine-session.txt.\n"
++				"Para usar outro renderizador, escolha OpenGL ou OpenGL ES no perfil (launcher > Editar perfil > Renderizador).", error.what());
+ #else
+ 			if (Priv::window != nullptr)
+ 			{
+@@ -641,6 +661,12 @@ SystemGLFrameBuffer::SystemGLFrameBuffer(void *hMonitor, bool fullscreen)
+ 		}
+ 	}
+ 
++#ifdef __SWITCH__
++	// Mesa 26 Horizon SDK: glthread is chosen before the EGL context exists
++	EXTERN_CVAR(Bool, nx_glthread)
++	setenv("MESA_SWITCH_GLTHREAD", nx_glthread ? "1" : "0", 1);
++	RDoom_SessionSet("renderer_active", vid_preferbackend == BACKEND_OPENGL ? "opengl (Mesa NVC0)" : "gles (Mesa NVC0)");
++#endif
+ 	for ( ; glvers[glveridx][0] > 0; ++glveridx)
+ 	{
+ 		Priv::SetupPixelFormat(0, glvers[glveridx]);
+diff --git a/src/common/rendering/gl/gl_shader.cpp b/src/common/rendering/gl/gl_shader.cpp
+index fc99b7ed0..697c26272 100644
+--- a/src/common/rendering/gl/gl_shader.cpp
++++ b/src/common/rendering/gl/gl_shader.cpp
+@@ -864,6 +864,9 @@ FShaderManager::FShaderManager()
+ 
+ bool FShaderManager::CompileNextShader()
+ {
++	// already finished: callers may poll again after the last shader
++	if (mCompilePass < 0)
++		return true;
+ 	if (mPassShaders[mCompilePass]->CompileNextShader())
+ 	{
+ 		mCompilePass++;
+diff --git a/src/common/rendering/vulkan/shaders/vk_shader.cpp b/src/common/rendering/vulkan/shaders/vk_shader.cpp
+index dd87d3122..9d5abcb5f 100644
+--- a/src/common/rendering/vulkan/shaders/vk_shader.cpp
++++ b/src/common/rendering/vulkan/shaders/vk_shader.cpp
+@@ -61,6 +61,9 @@ bool VkShaderManager::CompileNextShader()
+ 	const char *mainvp = "shaders/glsl/main.vp";
+ 	const char *mainfp = "shaders/glsl/main.fp";
+ 	int i = compileIndex;
++	// already finished: callers may poll again after the last shader
++	if (i < 0)
++		return true;
+ 
+ 	if (compileState == 0)
+ 	{
+diff --git a/src/common/rendering/vulkan/system/vk_commandbuffer.cpp b/src/common/rendering/vulkan/system/vk_commandbuffer.cpp
+index 6cd173f2d..31f4e44ab 100644
+--- a/src/common/rendering/vulkan/system/vk_commandbuffer.cpp
++++ b/src/common/rendering/vulkan/system/vk_commandbuffer.cpp
+@@ -58,14 +58,22 @@ VkCommandBufferManager::VkCommandBufferManager(VulkanRenderDevice* fb) : fb(fb)
+ 	for (int i = 0; i < maxConcurrentSubmitCount; i++)
+ 		mSubmitWaitFences[i] = mSubmitFence[i]->fence;
+ 
+-	if (fb->device->GraphicsTimeQueries)
+-	{
+-		mTimestampQueryPool = QueryPoolBuilder()
+-			.QueryType(VK_QUERY_TYPE_TIMESTAMP, MaxTimestampQueries)
+-			.Create(fb->device.get());
++#ifndef __SWITCH__
++	CreateTimestampQueries();
++#endif
++	// Switch: created the first time "stat gpu" asks for GPU timings. NVK
++	// resets query pools with an internal compute dispatch, which costs a
++	// submit at start-up for a profiling feature most sessions never use.
++}
+ 
+-		GetDrawCommands()->resetQueryPool(mTimestampQueryPool.get(), 0, MaxTimestampQueries);
+-	}
++void VkCommandBufferManager::CreateTimestampQueries()
++{
++	if (mTimestampQueryPool || !fb->device->GraphicsTimeQueries)
++		return;
++	mTimestampQueryPool = QueryPoolBuilder()
++		.QueryType(VK_QUERY_TYPE_TIMESTAMP, MaxTimestampQueries)
++		.Create(fb->device.get());
++	GetDrawCommands()->resetQueryPool(mTimestampQueryPool.get(), 0, MaxTimestampQueries);
+ }
+ 
+ VkCommandBufferManager::~VkCommandBufferManager()
+@@ -220,7 +228,8 @@ void VkCommandBufferManager::PushGroup(const FString& name)
+ 	if (!gpuStatActive)
+ 		return;
+ 
+-	if (mNextTimestampQuery < MaxTimestampQueries && fb->device->GraphicsTimeQueries)
++	CreateTimestampQueries();
++	if (mTimestampQueryPool && mNextTimestampQuery < MaxTimestampQueries && fb->device->GraphicsTimeQueries)
+ 	{
+ 		TimestampQuery q;
+ 		q.name = name;
+@@ -240,7 +249,7 @@ void VkCommandBufferManager::PopGroup()
+ 	TimestampQuery& q = timeElapsedQueries[mGroupStack.back()];
+ 	mGroupStack.pop_back();
+ 
+-	if (mNextTimestampQuery < MaxTimestampQueries && fb->device->GraphicsTimeQueries)
++	if (mTimestampQueryPool && mNextTimestampQuery < MaxTimestampQueries && fb->device->GraphicsTimeQueries)
+ 	{
+ 		q.endIndex = mNextTimestampQuery++;
+ 		GetDrawCommands()->writeTimestamp(VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, mTimestampQueryPool.get(), q.endIndex);
+@@ -250,7 +259,7 @@ void VkCommandBufferManager::PopGroup()
+ void VkCommandBufferManager::UpdateGpuStats()
+ {
+ 	uint64_t timestamps[MaxTimestampQueries];
+-	if (mNextTimestampQuery > 0)
++	if (mNextTimestampQuery > 0 && mTimestampQueryPool)
+ 		mTimestampQueryPool->getResults(0, mNextTimestampQuery, sizeof(uint64_t) * mNextTimestampQuery, timestamps, sizeof(uint64_t), VK_QUERY_RESULT_64_BIT | VK_QUERY_RESULT_WAIT_BIT);
+ 
+ 	double timestampPeriod = fb->device->PhysicalDevice.Properties.Properties.limits.timestampPeriod;
+diff --git a/src/common/rendering/vulkan/system/vk_commandbuffer.h b/src/common/rendering/vulkan/system/vk_commandbuffer.h
+index 7f0ae4936..2c5502532 100644
+--- a/src/common/rendering/vulkan/system/vk_commandbuffer.h
++++ b/src/common/rendering/vulkan/system/vk_commandbuffer.h
+@@ -105,6 +105,7 @@ private:
+ 
+ 	enum { MaxTimestampQueries = 100 };
+ 	std::unique_ptr<VulkanQueryPool> mTimestampQueryPool;
++	void CreateTimestampQueries();
+ 	int mNextTimestampQuery = 0;
+ 	std::vector<size_t> mGroupStack;
+ 	std::vector<TimestampQuery> timeElapsedQueries;
+diff --git a/src/common/rendering/vulkan/system/vk_hwbuffer.cpp b/src/common/rendering/vulkan/system/vk_hwbuffer.cpp
+index 59e3d8649..95c1afe12 100644
+--- a/src/common/rendering/vulkan/system/vk_hwbuffer.cpp
++++ b/src/common/rendering/vulkan/system/vk_hwbuffer.cpp
+@@ -70,6 +70,15 @@ void VkHardwareBuffer::SetData(size_t size, const void *data, BufferUsageType us
+ 		fb->GetCommands()->TransferDeleteList->Add(std::move(mStaging));
+ 	}
+ 
++#ifdef __SWITCH__
++	// The Tegra X1 has one memory for CPU and GPU, so a staging buffer plus a
++	// GPU copy only adds work. It also matters for NVK: its only queue family
++	// has the compute bit, and NVK then runs vkCmdCopyBuffer as an internal
++	// compute shader. Static and stream buffers are written in place instead.
++	// SetData always creates a new buffer, so nothing in flight reads it.
++	if (usage == BufferUsageType::Static || usage == BufferUsageType::Stream)
++		usage = BufferUsageType::Mappable;
++#endif
+ 	if (usage == BufferUsageType::Static || usage == BufferUsageType::Stream)
+ 	{
+ 		// Note: we could recycle buffers here for the stream usage type to improve performance
+@@ -180,9 +189,23 @@ void VkHardwareBuffer::Resize(size_t newsize)
+ 	buffersize = newsize;
+ 
+ 	// Transfer data from old to new
++#ifdef __SWITCH__
++	// both buffers are host-visible (unified memory): copy on the CPU
++	{
++		fb->GetCommands()->WaitForCommands(false);
++		void *src = oldBuffer->Map(0, oldsize);
++		void *dst = mBuffer->Map(0, newsize);
++		if (src && dst)
++			memcpy(dst, src, min(oldsize, newsize));
++		mBuffer->Unmap();
++		oldBuffer->Unmap();
++		fb->GetCommands()->TransferDeleteList->Add(std::move(oldBuffer));
++	}
++#else
+ 	fb->GetCommands()->GetTransferCommands()->copyBuffer(oldBuffer.get(), mBuffer.get(), 0, 0, oldsize);
+ 	fb->GetCommands()->TransferDeleteList->Add(std::move(oldBuffer));
+ 	fb->GetCommands()->WaitForCommands(false);
++#endif
+ 	fb->GetDescriptorSetManager()->UpdateHWBufferSet(); // Old buffer may be part of the bound descriptor set
+ 
+ 	// Fetch pointer to new buffer
+diff --git a/src/common/rendering/vulkan/system/vk_renderdevice.cpp b/src/common/rendering/vulkan/system/vk_renderdevice.cpp
+index 1557d8111..6586e3e21 100644
+--- a/src/common/rendering/vulkan/system/vk_renderdevice.cpp
++++ b/src/common/rendering/vulkan/system/vk_renderdevice.cpp
+@@ -40,6 +40,9 @@
+ #include "v_video.h"
+ #include "version.h"
+ #include "vk_renderdevice.h"
++#ifdef __SWITCH__
++#include "common/platform/posix/nx/rdoom_nx.h"
++#endif
+ #include "vulkan/renderer/vk_descriptorset.h"
+ #include "vulkan/renderer/vk_postprocess.h"
+ #include "vulkan/renderer/vk_raytrace.h"
+@@ -505,6 +508,14 @@ void VulkanRenderDevice::PrintStartupLog()
+ 	vkversion = VK_API_VERSION_MAJOR(props.apiVersion) * 100 + VK_API_VERSION_MINOR(props.apiVersion);
+ 
+ 	Printf("Vulkan device: " TEXTCOLOR_ORANGE "%s\n", props.deviceName);
++#ifdef __SWITCH__
++	{
++		FString d;
++		d.Format("%s (api %s, driver %s)", props.deviceName, apiVersion.GetChars(), driverVersion.GetChars());
++		RDoom_SessionSet("vulkan_device", d.GetChars());
++		RDoom_SessionSet("renderer_active", "vulkan");
++	}
++#endif
+ 	Printf("Vulkan device type: %s\n", deviceType.GetChars());
+ 	Printf("Vulkan version: %s (api) %s (driver)\n", apiVersion.GetChars(), driverVersion.GetChars());
+ 
+diff --git a/src/common/rendering/vulkan/textures/vk_framebuffer.cpp b/src/common/rendering/vulkan/textures/vk_framebuffer.cpp
+index b2cf048bb..ca16411e5 100644
+--- a/src/common/rendering/vulkan/textures/vk_framebuffer.cpp
++++ b/src/common/rendering/vulkan/textures/vk_framebuffer.cpp
+@@ -45,6 +45,11 @@ VkFramebufferManager::~VkFramebufferManager()
+ {
+ }
+ 
++#ifdef __SWITCH__
++#include "common/platform/posix/nx/rdoom_nx.h"
++static unsigned rdoomPresented;
++#endif
++
+ void VkFramebufferManager::AcquireImage()
+ {
+ 	bool exclusiveFullscreen = fb->IsFullscreen() && vk_exclusivefullscreen;
+@@ -59,6 +64,14 @@ void VkFramebufferManager::AcquireImage()
+ 		CurrentExclusiveFullscreen = exclusiveFullscreen;
+ 
+ 		SwapChain->Create(CurrentWidth, CurrentHeight, CurrentVSync ? 2 : 3, CurrentVSync, CurrentHdr, CurrentExclusiveFullscreen);
++#ifdef __SWITCH__
++		{
++			FString sc;
++			sc.Format("%dx%d, %d images, format %d, vsync %s", CurrentWidth, CurrentHeight, SwapChain->ImageCount(),
++				(int)SwapChain->Format().format, CurrentVSync ? "on (FIFO)" : "off");
++			RDoom_SessionSet("vulkan_swapchain", sc.GetChars());
++		}
++#endif
+ 
+ 		RenderFinishedSemaphores.clear();
+ 		for (int i = 0; i < SwapChain->ImageCount(); i++)
+@@ -79,5 +92,17 @@ void VkFramebufferManager::AcquireImage()
+ void VkFramebufferManager::QueuePresent()
+ {
+ 	if (PresentImageIndex != -1)
++	{
+ 		SwapChain->QueuePresent(PresentImageIndex, RenderFinishedSemaphores[PresentImageIndex].get());
++#ifdef __SWITCH__
++		// proof in the session report that frames really reach the display
++		rdoomPresented++;
++		if (rdoomPresented == 1 || rdoomPresented % 600 == 0)
++		{
++			FString n;
++			n.Format("%u", rdoomPresented);
++			RDoom_SessionSet("vulkan_frames_presented", n.GetChars());
++		}
++#endif
++	}
+ }
+-- 
+2.56.0
+

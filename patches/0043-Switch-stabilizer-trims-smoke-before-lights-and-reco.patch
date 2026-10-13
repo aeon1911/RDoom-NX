@@ -1,0 +1,194 @@
+From 00b682788c2c1628c501dcd5d09d3059a445be3d Mon Sep 17 00:00:00 2001
+From: RDoom <171243930+aeon1911@users.noreply.github.com>
+Date: Tue, 13 Oct 2026 14:30:36 -0300
+Subject: [PATCH 43/46] Switch: stabilizer trims smoke before lights and
+ recovers faster; perf.log for short tests
+
+HW test of a7f213106 (~50 s): late frames in fights down from 58% to ~25%,
+frames over 35 ms from 42-60 to 1-21 per 10 s, translucent sprites from 188
+to 62-122. But the stabilizer sat at level 5-6 even in calm stretches (an
+occasional late frame every ~85 frames never let 105 good ones pass), with
+the dynamic lights cut to 2-3.
+
+- Trim order: effect area budget from level 1 (10 screens down to 2),
+  lights only from level 3, shadows from level 3.
+- Detail comes back after 60 good frames (doubling up to 300 when it had
+  to go down again right away).
+- perf.log: summaries every 5 s, effects left out per frame, frames over
+  40 ms logged (saved configs get it once, rd_defaults_rev 2).
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ src/common/engine/nx_governor.cpp             | 22 +++++++++++++------
+ src/common/engine/nx_perf.cpp                 | 12 +++++-----
+ src/common/engine/nx_perf.h                   |  1 +
+ src/d_main.cpp                                |  5 ++++-
+ src/rendering/hwrenderer/scene/hw_sprites.cpp |  4 ++++
+ 5 files changed, 31 insertions(+), 13 deletions(-)
+
+diff --git a/src/common/engine/nx_governor.cpp b/src/common/engine/nx_governor.cpp
+index 3709f8318..3b121f81c 100644
+--- a/src/common/engine/nx_governor.cpp
++++ b/src/common/engine/nx_governor.cpp
+@@ -43,18 +43,26 @@ static double hist[8];
+ static int nhist = 0, histpos = 0;
+ static int hold = 0;			// frames before the next change
+ static int good = 0;			// frames in a row with plenty of time to spare
+-static int lowerDelay = 105;	// good frames needed before detail comes back (grows when it had to go down again right away)
++// good frames needed before detail comes back (grows when it had to go down
++// again right away). 1 s: a fight with an occasional late frame every ~85
++// frames never reached 105 and kept the top level for minutes.
++static const int baseLowerDelay = 60;
++static int lowerDelay = baseLowerDelay;
+ static int sinceRaise = 0;
+ static int sinceLower = 1000;
+ 
+-static const int	lightMaxT[NXGOV_MAXLEVEL + 1] = { 0, 24, 16, 10, 6, 4, 2 };
+-static const double	lightDistT[NXGOV_MAXLEVEL + 1] = { 0, 3000, 2400, 1800, 1400, 1000, 700 };
++// Order of the trims: what costs the GPU most for the least visible change
++// first (faint/hidden smoke), the lights only at the top levels (on the
++// Switch Lite the stabilizer sat at level 5-6 for whole fights, lights cut
++// to 2-3, while the bottleneck was the smoke's blending).
++static const int	lightMaxT[NXGOV_MAXLEVEL + 1] = { 0, 0, 0, 24, 16, 10, 6 };
++static const double	lightDistT[NXGOV_MAXLEVEL + 1] = { 0, 0, 0, 2400, 1800, 1400, 1000 };
+ static const double	cullT[NXGOV_MAXLEVEL + 1] = { 0, 4000, 3000, 2200, 1600, 1200, 900 };
+ static const double	minAlphaT[NXGOV_MAXLEVEL + 1] = { 0, 0.03, 0.05, 0.07, 0.09, 0.12, 0.15 };
+-static const double	shadowT[NXGOV_MAXLEVEL + 1] = { 1, 1, 0.75, 0.5, 0.35, 0.2, 0 };
++static const double	shadowT[NXGOV_MAXLEVEL + 1] = { 1, 1, 1, 0.75, 0.5, 0.35, 0.2 };
+ // translucent effects (smoke) on screen, in screen areas: the GPU blends every
+ // layer, and a fight in Brutal Doom stacks dozens of them
+-static const double	effectAreaT[NXGOV_MAXLEVEL + 1] = { 0, 20, 14, 10, 7, 5, 3 };
++static const double	effectAreaT[NXGOV_MAXLEVEL + 1] = { 0, 10, 7, 5, 4, 3, 2 };
+ 
+ // "0 = no limit" values: the stricter of both
+ template<class T> static T Tighter(T preset, T table)
+@@ -103,7 +111,7 @@ void NXGovernor_Frame(double frame_ms, double waits_ms, bool inlevel)
+ 	if (hold > 0) hold--;
+ 	sinceRaise++;
+ 	sinceLower++;
+-	if (sinceRaise > 900) lowerDelay = 105;	// calm for ~30 s: back to the normal pace
++	if (sinceRaise > 900) lowerDelay = baseLowerDelay;	// calm for ~15 s: back to the normal pace
+ 
+ 	if (nhist >= 6 && hold == 0 && nxGovLevel < NXGOV_MAXLEVEL)
+ 	{
+@@ -119,7 +127,7 @@ void NXGovernor_Frame(double frame_ms, double waits_ms, bool inlevel)
+ 		if (median > target * 1.10 || late >= 2)
+ 		{
+ 			// detail came back only a moment ago and it's too much again: wait longer next time
+-			if (sinceLower < 60) lowerDelay = std::min(lowerDelay * 2, 600);
++			if (sinceLower < 60) lowerDelay = std::min(lowerDelay * 2, 300);
+ 			SetLevel(nxGovLevel + 1, late >= 2 ? "late frames" : "median", median);
+ 			hold = 6;	// give the change a few frames to show
+ 			good = 0;
+diff --git a/src/common/engine/nx_perf.cpp b/src/common/engine/nx_perf.cpp
+index 9bc51a13c..5a62d3b8b 100644
+--- a/src/common/engine/nx_perf.cpp
++++ b/src/common/engine/nx_perf.cpp
+@@ -29,7 +29,7 @@ CVAR(Int, nx_perflog, 1, CVAR_ARCHIVE | CVAR_GLOBALCONFIG)
+ #else
+ CVAR(Int, nx_perflog, 0, CVAR_ARCHIVE | CVAR_GLOBALCONFIG)
+ #endif
+-CVAR(Int, nx_perfthreshold, 90, CVAR_ARCHIVE | CVAR_GLOBALCONFIG)
++CVAR(Int, nx_perfthreshold, 40, CVAR_ARCHIVE | CVAR_GLOBALCONFIG)
+ 
+ NXPerfCounters nxperf;
+ 
+@@ -54,7 +54,7 @@ static struct
+ 	double tic, think, display, swap, sndupd, sndstart, tex, scene, bsp, hud, update, gpuwait, frame, gc, wait, net, input, music, client, glsync, glfinish, draw2d, frameend, present, vksubmit, vkclean, vkacquire, vkpresent, vkpending, gpuframe, gpuscene, gpupost, gpuend;
+ 	int gpuframes;
+ 	double scalesum; float scalemin;
+-	int tics, thinkers, sndstarts, drawitems, transitems, glsyncs, spriteskips, draws, lightuploads, lightskips, dynlights, dynlightsall, govlevel, vksubmits;
++	int tics, thinkers, sndstarts, drawitems, transitems, glsyncs, spriteskips, draws, lightuploads, lightskips, dynlights, dynlightsall, govlevel, vksubmits, effectsculled;
+ } win;
+ 
+ #ifdef __SWITCH__
+@@ -194,6 +194,7 @@ void NXPerf_EndFrame()
+ 		win.glfinish += nxperf.glfinish_ms;
+ 		win.glsyncs += nxperf.glsyncs;
+ 		win.spriteskips += nxperf.spriteskips;
++		win.effectsculled += nxperf.effectsculled;
+ 		win.draw2d += nxperf.draw2d_ms;
+ 		win.present += nxperf.present_ms;
+ 		win.frameend += nxperf.frameend_ms;
+@@ -257,7 +258,8 @@ void NXPerf_EndFrame()
+ 				linesWritten++;
+ 			}
+ 		}
+-		if (perfFile && now - lastSummary > 10000)
++		// every 5 s: tests on the console are often short sessions
++		if (perfFile && now - lastSummary > 5000)
+ 		{
+ 			lastSummary = now;
+ 			fprintf(perfFile, "# summary: %d frames, avg %.1f ms (%.1f fps), worst %.1f ms | late frames: %d over 18 ms, %d over 35 ms\n", frames, frames ? sumFrame / frames : 0, frames && sumFrame > 0 ? 1000.0 * frames / sumFrame : 0, maxFrame, missed1, missed2);
+@@ -275,8 +277,8 @@ void NXPerf_EndFrame()
+ 				fprintf(perfFile, "#   per tic: %.1f ms, %d thinkers | draw items per frame %d (%d translucent) | sound starts/s %.0f | sprites waiting for their picture per frame %.1f\n",
+ 					win.tics ? win.tic / win.tics : 0.0, win.tics ? win.thinkers / win.tics : 0, win.drawitems / frames, win.transitems / frames,
+ 					win.sndstarts * 1000.0 / (sumFrame > 0 ? sumFrame : 1), win.spriteskips / n);
+-				fprintf(perfFile, "#   GL draw calls per frame %.0f | dynamic lights per frame: %.1f used of %.1f | light uploads %.0f, identical skipped %.0f | stabilizer level avg %.2f (now %d)\n",
+-					win.draws / n, win.dynlights / n, win.dynlightsall / n, win.lightuploads / n, win.lightskips / n, win.govlevel / n, nxGovLevel);
++				fprintf(perfFile, "#   GL draw calls per frame %.0f | dynamic lights per frame: %.1f used of %.1f | light uploads %.0f, identical skipped %.0f | stabilizer level avg %.2f (now %d), effects left out per frame %.1f\n",
++					win.draws / n, win.dynlights / n, win.dynlightsall / n, win.lightuploads / n, win.lightskips / n, win.govlevel / n, nxGovLevel, win.effectsculled / n);
+ 			}
+ 			if (frames > 0 && win.vksubmits > 0)
+ 			{
+diff --git a/src/common/engine/nx_perf.h b/src/common/engine/nx_perf.h
+index 8c6110bc0..fd00af7f9 100644
+--- a/src/common/engine/nx_perf.h
++++ b/src/common/engine/nx_perf.h
+@@ -34,6 +34,7 @@ struct NXPerfCounters
+ 	double glfinish_ms = 0;	// game thread waiting for the GL driver thread before the buffer swap
+ 	int glsyncs = 0;
+ 	int spriteskips = 0;	// sprite draws skipped because the picture wasn't on the GPU yet
++	int effectsculled = 0;	// translucent effects left out by the stabilizer's screen area budget
+ 	double present_ms = 0;	// copy of the finished frame to the window (waits for a free window buffer)
+ 	double draw2d_ms = 0;	// 2D drawing (HUD, menus, messages) - part of update_ms
+ 	double frameend_ms = 0;	// end of the previous frame done at the start of this one (GL driver thread: fence, swap, waits)
+diff --git a/src/d_main.cpp b/src/d_main.cpp
+index 8f8b33a08..f4eb22752 100644
+--- a/src/d_main.cpp
++++ b/src/d_main.cpp
+@@ -2422,6 +2422,7 @@ CVAR(Int, rd_defaults_rev, 0, CVAR_ARCHIVE | CVAR_GLOBALCONFIG)
+ EXTERN_CVAR(Int, nx_workers)
+ EXTERN_CVAR(Bool, gl_precache)
+ EXTERN_CVAR(Float, rd_vk_async_upload_ms)
++EXTERN_CVAR(Int, nx_perfthreshold)
+ #endif
+ 
+ static void RDoom_UpdateDefaults(bool gameSection)
+@@ -2443,7 +2444,9 @@ static void RDoom_UpdateDefaults(bool gameSection)
+ 		else
+ 			gl_precache = true;	// per game section
+ 	}
+-	rd_defaults_rev = 1;
++	if (rev < 2 && !gameSection)
++		nx_perfthreshold = 40;	// 2: perf.log also shows frames of 40-90 ms (two vsyncs or more)
++	rd_defaults_rev = 2;
+ #endif
+ }
+ 
+diff --git a/src/rendering/hwrenderer/scene/hw_sprites.cpp b/src/rendering/hwrenderer/scene/hw_sprites.cpp
+index 7b0894981..0f918a4e1 100644
+--- a/src/rendering/hwrenderer/scene/hw_sprites.cpp
++++ b/src/rendering/hwrenderer/scene/hw_sprites.cpp
+@@ -53,6 +53,7 @@
+ #include "quaternion.h"
+ 
+ #include "p_visualthinker.h"
++#include "nx_perf.h"
+ 
+ extern TArray<spritedef_t> sprites;
+ extern TArray<spriteframe_t> SpriteFrames;
+@@ -1718,7 +1719,10 @@ bool HWSprite::NXEffectOverBudget(HWDrawInfo *di, AActor *thing)
+ 	const double viewArea = 4.0 * d * d * t * t / aspect;
+ 	const double area = min(1.0, w * h / viewArea);
+ 	if (di->nxEffectArea + area > budget)
++	{
++		nxperf.effectsculled++;
+ 		return true;
++	}
+ 	di->nxEffectArea += area;
+ 	return false;
+ }
+-- 
+2.56.0
+

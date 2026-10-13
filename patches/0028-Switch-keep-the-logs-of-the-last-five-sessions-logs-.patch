@@ -1,0 +1,42 @@
+From 69942aee5b9a9783a66a7956bcab062374fee538 Mon Sep 17 00:00:00 2001
+From: RDoom <171243930+aeon1911@users.noreply.github.com>
+Date: Sun, 11 Oct 2026 21:02:35 -0300
+Subject: [PATCH 28/46] Switch: keep the logs of the last five sessions
+ (logs/anterior .. anterior-5)
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ src/common/platform/posix/nx/rdoom_nx.cpp | 17 +++++++++++++++++
+ 1 file changed, 17 insertions(+)
+
+diff --git a/src/common/platform/posix/nx/rdoom_nx.cpp b/src/common/platform/posix/nx/rdoom_nx.cpp
+index be9037df4..53ac853f8 100644
+--- a/src/common/platform/posix/nx/rdoom_nx.cpp
++++ b/src/common/platform/posix/nx/rdoom_nx.cpp
+@@ -185,6 +185,23 @@ static void RotateLogs()
+ 	static const char *const files[] = {
+ 		"logs/rdoom.log", "logs/engine.log", "logs/engine-stderr.log", "logs/engine-session.txt",
+ 		"logs/error.log", "logs/boot.log", "logs/last-launch.txt", "perf.log", "phase.log" };
++	// (gpu-lost.txt stays in place: the start-up below reads it)
++	// keep five sessions: anterior (newest) .. anterior-5 (oldest)
++	{
++		char from[96], to[96];
++		snprintf(to, sizeof(to), RDOOM_SD_ROOT "/logs/anterior-5");
++		RemoveTree(to);
++		for (int i = 4; i >= 1; i--)
++		{
++			if (i == 1)
++				snprintf(from, sizeof(from), RDOOM_SD_ROOT "/logs/anterior");
++			else
++				snprintf(from, sizeof(from), RDOOM_SD_ROOT "/logs/anterior-%d", i);
++			snprintf(to, sizeof(to), RDOOM_SD_ROOT "/logs/anterior-%d", i + 1);
++			if (DirExists(from))
++				rename(from, to);
++		}
++	}
+ 	MakeDirs(RDOOM_SD_ROOT "/logs/anterior");
+ 	for (const char *f : files)
+ 	{
+-- 
+2.56.0
+

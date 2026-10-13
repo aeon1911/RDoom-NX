@@ -1,0 +1,49 @@
+From 3b3200ffbea5ede99275c2db446a19fd73ac29a0 Mon Sep 17 00:00:00 2001
+From: RDoom <171243930+aeon1911@users.noreply.github.com>
+Date: Sun, 11 Oct 2026 10:03:19 -0300
+Subject: [PATCH 17/46] Switch: treat device-prefixed paths (sdmc:/...) as
+ absolute.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ src/common/utility/cmdlib.cpp | 5 +++++
+ src/d_iwad.cpp                | 7 +++++++
+ 2 files changed, 12 insertions(+)
+
+diff --git a/src/common/utility/cmdlib.cpp b/src/common/utility/cmdlib.cpp
+index 3474ec596..fa1b13f89 100644
+--- a/src/common/utility/cmdlib.cpp
++++ b/src/common/utility/cmdlib.cpp
+@@ -967,6 +967,11 @@ bool IsAbsPath(const char *name)
+ 	/* [A-Za-z]: (for Windows) */
+ 	if (isalpha((uint8_t)name[0]) && name[1] == ':')    return true;
+ #endif /* _WIN32 */
++#ifdef __SWITCH__
++	/* Horizon device prefix, e.g. "sdmc:/" or "romfs:/" */
++	for (const char *p = name; *p && *p != '/'; p++)
++		if (p[0] == ':' && p[1] == '/' && p != name) return true;
++#endif
+ 	return 0;
+ }
+ 
+diff --git a/src/d_iwad.cpp b/src/d_iwad.cpp
+index a55de997f..a156eb1f3 100644
+--- a/src/d_iwad.cpp
++++ b/src/d_iwad.cpp
+@@ -672,6 +672,13 @@ int FIWadManager::IdentifyVersion (std::vector<FileSys::ResourceName>&wadfiles,
+ 			bool isAbsolute = (custwad[0] == '/');
+ #ifdef _WIN32
+ 			isAbsolute |= (custwad.Len() >= 2 && custwad[1] == ':');
++#endif
++#ifdef __SWITCH__
++			// Horizon devices: "sdmc:/switch/rdoom/iwads/doom2.wad"
++			{
++				long colon = custwad.IndexOf(":/");
++				isAbsolute |= (colon > 0 && custwad.IndexOf("/") == colon + 1);
++			}
+ #endif
+ 			if (isAbsolute)
+ 			{
+-- 
+2.56.0
+

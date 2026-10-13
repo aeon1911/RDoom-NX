@@ -1,0 +1,725 @@
+From aa6c95fedb2cfecfb157df75c19ab4f53ea7d370 Mon Sep 17 00:00:00 2001
+From: RDoom <171243930+aeon1911@users.noreply.github.com>
+Date: Mon, 12 Oct 2026 16:50:42 -0300
+Subject: [PATCH 31/46] Switch Vulkan: GPU frame timeline, on-console GPU
+ benchmark, no scene copy
+
+- Timestamps at frame start, scene end, post-processing end and frame end,
+  read back without waiting once the frame's fence passed; perf.log
+  summaries show GPU ms per frame split into 3D scene, post-processing and
+  2D/present, plus handheld/docked mode. The first console logs showed the
+  game is GPU bound (CPU 2-4 ms, waiting ~20 ms for the GPU per frame).
+- rd_gpubench 1: freezes the level once a map is on screen and measures
+  each option (dynamic lights, resolution scale, scene format, ZCULL,
+  scene copy) in four directions; results in logs/gpu-bench.txt.
+- rd_vk_scenefmt (RGBA16F / RGB10A2 / RGBA8) and rd_vk_zcull now rebuild
+  the render buffers on the next frame.
+- rd_vk_sceneswap (default on): without MSAA the scene image and
+  post-processing image 0 are exchanged instead of blitting the whole
+  frame (a full-screen draw on NVK) every frame.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ src/CMakeLists.txt                            |   1 +
+ src/common/engine/nx_perf.cpp                 |  18 +-
+ src/common/engine/nx_perf.h                   |   3 +
+ .../vulkan/renderer/vk_postprocess.cpp        |  21 +-
+ .../vulkan/renderer/vk_pprenderstate.cpp      |   2 +-
+ .../vulkan/renderer/vk_renderpass.cpp         |   2 +-
+ .../vulkan/system/vk_commandbuffer.cpp        |  77 +++++++
+ .../vulkan/system/vk_commandbuffer.h          |  14 ++
+ .../vulkan/system/vk_renderdevice.cpp         |   6 +-
+ .../vulkan/textures/vk_renderbuffers.cpp      |  43 +++-
+ .../vulkan/textures/vk_renderbuffers.h        |   5 +
+ src/d_main.cpp                                |   4 +
+ src/rendering/rdoom_gpubench.cpp              | 201 ++++++++++++++++++
+ src/rendering/rdoom_gpubench.h                |   3 +
+ 14 files changed, 386 insertions(+), 14 deletions(-)
+ create mode 100644 src/rendering/rdoom_gpubench.cpp
+ create mode 100644 src/rendering/rdoom_gpubench.h
+
+diff --git a/src/CMakeLists.txt b/src/CMakeLists.txt
+index 0530f2f4f..8435609be 100644
+--- a/src/CMakeLists.txt
++++ b/src/CMakeLists.txt
+@@ -950,6 +950,7 @@ set (PCH_SOURCES
+ 	g_statusbar/shared_sbar.cpp
+ 	rendering/2d/v_blend.cpp
+ 	rendering/hwrenderer/hw_entrypoint.cpp
++	rendering/rdoom_gpubench.cpp
+ 	rendering/hwrenderer/hw_vertexbuilder.cpp
+ 	rendering/hwrenderer/doom_aabbtree.cpp
+ 	rendering/hwrenderer/doom_levelmesh.cpp
+diff --git a/src/common/engine/nx_perf.cpp b/src/common/engine/nx_perf.cpp
+index 0eab1dde7..c657d4662 100644
+--- a/src/common/engine/nx_perf.cpp
++++ b/src/common/engine/nx_perf.cpp
+@@ -45,16 +45,21 @@ void (*NXPerf_SummaryHook)(FILE *f) = nullptr;
+ // totals over the current summary window (all frames, not only the slow ones)
+ static struct
+ {
+-	double tic, think, display, swap, sndupd, sndstart, tex, scene, bsp, hud, update, gpuwait, frame, gc, wait, net, input, music, client, glsync, glfinish, draw2d, frameend, present, vksubmit, vkclean, vkacquire, vkpresent, vkpending;
++	double tic, think, display, swap, sndupd, sndstart, tex, scene, bsp, hud, update, gpuwait, frame, gc, wait, net, input, music, client, glsync, glfinish, draw2d, frameend, present, vksubmit, vkclean, vkacquire, vkpresent, vkpending, gpuframe, gpuscene, gpupost, gpuend;
++	int gpuframes;
+ 	int tics, thinkers, sndstarts, drawitems, transitems, glsyncs, spriteskips, draws, lightuploads, lightskips, dynlights, dynlightsall, govlevel, vksubmits;
+ } win;
+ 
+ #ifdef __SWITCH__
++#include <switch.h>
++// handheld and docked run the GPU at different (stock) clocks
++static const char *NXOperationMode() { return appletGetOperationMode() == AppletOperationMode_Console ? "docked" : "handheld"; }
+ #include "common/platform/posix/nx/nx_glthread.h"
+ static bool NXGLThreadOn() { return NX_GLThreadEnabled(); }
+ static const char *NXGLThreadStatus() { return NX_GLThreadStatus(); }
+ static void NXGLThreadStats(FILE *f) { NX_GLThreadWriteStats(f); }
+ #else
++static const char *NXOperationMode() { return "pc"; }
+ static bool NXGLThreadOn() { return false; }
+ static const char *NXGLThreadStatus() { return "not available"; }
+ static void NXGLThreadStats(FILE *) {}
+@@ -165,6 +170,11 @@ void NXPerf_EndFrame()
+ 		win.vkacquire += nxperf.vkacquire_ms;
+ 		win.vkpresent += nxperf.vkpresent_ms;
+ 		win.vkpending += nxperf.vkpending_ms;
++		win.gpuframes += nxperf.gpuframes;
++		win.gpuframe += nxperf.gpu_frame_ms;
++		win.gpuscene += nxperf.gpu_scene_ms;
++		win.gpupost += nxperf.gpu_post_ms;
++		win.gpuend += nxperf.gpu_end_ms;
+ 		win.draws += nxperf.draws;
+ 		win.lightuploads += nxperf.lightuploads;
+ 		win.lightskips += nxperf.lightskips;
+@@ -226,6 +236,12 @@ void NXPerf_EndFrame()
+ 				fprintf(perfFile, "#   vulkan: submits %.1f (%.2f ms in vkQueueSubmit) | cache clean %.2f | acquire %.2f | present %.2f | fence wait at frame end %.2f | wait for previous frame at frame start %.2f (ms per frame)\n",
+ 					win.vksubmits / n, win.vksubmit / n, win.vkclean / n, win.vkacquire / n, win.vkpresent / n, win.gpuwait / n, win.vkpending / n);
+ 			}
++			if (win.gpuframes > 0)
++			{
++				double g = win.gpuframes;
++				fprintf(perfFile, "#   gpu (%s): frame %.2f ms = 3D scene %.2f + post-processing %.2f + 2D/present %.2f (avg of %d frames)\n",
++					NXOperationMode(), win.gpuframe / g, win.gpuscene / g, win.gpupost / g, win.gpuend / g, win.gpuframes);
++			}
+ 			NXGLThreadStats(perfFile);
+ 			if (NXPerf_SummaryHook) NXPerf_SummaryHook(perfFile);
+ 			win = {};
+diff --git a/src/common/engine/nx_perf.h b/src/common/engine/nx_perf.h
+index b9b0062a1..ed9fbdd00 100644
+--- a/src/common/engine/nx_perf.h
++++ b/src/common/engine/nx_perf.h
+@@ -36,6 +36,9 @@ struct NXPerfCounters
+ 	double vkacquire_ms = 0;	// vkAcquireNextImageKHR
+ 	double vkpresent_ms = 0;	// vkQueuePresentKHR
+ 	double vkpending_ms = 0;	// waiting at the start of a frame for the previous frame's GPU work (frame overlap)
++	// GPU time of completed frames (timestamps, read back a frame later)
++	int gpuframes = 0;
++	double gpu_frame_ms = 0, gpu_scene_ms = 0, gpu_post_ms = 0, gpu_end_ms = 0;	// whole frame = scene + post-processing + 2D/present
+ 	int tics = 0, shaders = 0, textures = 0, sounds = 0, sndstarts = 0;
+ 	int thinkers = 0;		// thinkers ticked (summed over the frame's tics)
+ 	int tex_async = 0, tex_wait = 0, tex_budget = 0, snd_async = 0, tex_preupload = 0;
+diff --git a/src/common/rendering/vulkan/renderer/vk_postprocess.cpp b/src/common/rendering/vulkan/renderer/vk_postprocess.cpp
+index ba10bab7e..f95a272ab 100644
+--- a/src/common/rendering/vulkan/renderer/vk_postprocess.cpp
++++ b/src/common/rendering/vulkan/renderer/vk_postprocess.cpp
+@@ -21,6 +21,7 @@
+ */
+ 
+ #include "vk_postprocess.h"
++#include "c_cvars.h"
+ #include "vulkan/shaders/vk_shader.h"
+ #include <zvulkan/vulkanswapchain.h>
+ #include <zvulkan/vulkanbuilders.h>
+@@ -70,7 +71,7 @@ void VkPostprocess::SetActiveRenderTarget()
+ 		.AddImage(&buffers->PipelineDepthStencil, VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL, false)
+ 		.Execute(fb->GetCommands()->GetDrawCommands());
+ 
+-	fb->GetRenderState()->SetRenderTarget(&buffers->PipelineImage[mCurrentPipelineImage], buffers->PipelineDepthStencil.View.get(), buffers->GetWidth(), buffers->GetHeight(), VK_FORMAT_R16G16B16A16_SFLOAT, VK_SAMPLE_COUNT_1_BIT);
++	fb->GetRenderState()->SetRenderTarget(&buffers->PipelineImage[mCurrentPipelineImage], buffers->PipelineDepthStencil.View.get(), buffers->GetWidth(), buffers->GetHeight(), buffers->SceneColorFormat, VK_SAMPLE_COUNT_1_BIT);
+ }
+ 
+ void VkPostprocess::PostProcessScene(int fixedcm, float flash, const std::function<void()> &afterBloomDrawEndScene2D)
+@@ -107,6 +108,10 @@ void VkPostprocess::PostProcessScene(int fixedcm, float flash, const std::functi
+ 	hw_postprocess.Pass2(&renderstate, fixedcm, flash, sceneWidth, sceneHeight);
+ }
+ 
++#ifdef __SWITCH__
++CVAR(Bool, rd_vk_sceneswap, true, 0)
++#endif
++
+ void VkPostprocess::BlitSceneToPostprocess()
+ {
+ 	fb->GetRenderState()->EndRenderPass();
+@@ -116,6 +121,20 @@ void VkPostprocess::BlitSceneToPostprocess()
+ 
+ 	mCurrentPipelineImage = 0;
+ 
++#ifdef __SWITCH__
++	// Without multisampling the scene image and post-processing image 0 have
++	// the same size, format and usage: exchange them instead of copying the
++	// whole frame (NVK's blit is a full-screen draw on the 3D engine). The
++	// next frame renders its scene into the image that was image 0.
++	if (rd_vk_sceneswap && buffers->GetSceneSamples() == VK_SAMPLE_COUNT_1_BIT &&
++		buffers->SceneColor.Image->width == buffers->PipelineImage[0].Image->width &&
++		buffers->SceneColor.Image->height == buffers->PipelineImage[0].Image->height)
++	{
++		std::swap(buffers->SceneColor, buffers->PipelineImage[0]);
++		return;
++	}
++#endif
++
+ 	VkImageTransition()
+ 		.AddImage(&buffers->SceneColor, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, false)
+ 		.AddImage(&buffers->PipelineImage[mCurrentPipelineImage], VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, true)
+diff --git a/src/common/rendering/vulkan/renderer/vk_pprenderstate.cpp b/src/common/rendering/vulkan/renderer/vk_pprenderstate.cpp
+index 0d5465715..642a26767 100644
+--- a/src/common/rendering/vulkan/renderer/vk_pprenderstate.cpp
++++ b/src/common/rendering/vulkan/renderer/vk_pprenderstate.cpp
+@@ -68,7 +68,7 @@ void VkPPRenderState::Draw()
+ 	else if (Output.Type == PPTextureType::ShadowMap)
+ 		key.OutputFormat = VK_FORMAT_R32_SFLOAT;
+ 	else
+-		key.OutputFormat = VK_FORMAT_R16G16B16A16_SFLOAT;
++		key.OutputFormat = fb->GetBuffers()->SceneColorFormat;
+ 
+ 	if (Output.Type == PPTextureType::SceneColor)
+ 	{
+diff --git a/src/common/rendering/vulkan/renderer/vk_renderpass.cpp b/src/common/rendering/vulkan/renderer/vk_renderpass.cpp
+index 0bbe64e35..ecf75f9f6 100644
+--- a/src/common/rendering/vulkan/renderer/vk_renderpass.cpp
++++ b/src/common/rendering/vulkan/renderer/vk_renderpass.cpp
+@@ -184,7 +184,7 @@ std::unique_ptr<VulkanRenderPass> VkRenderPassSetup::CreateRenderPass(int clearT
+ {
+ 	auto buffers = fb->GetBuffers();
+ 
+-	VkFormat drawBufferFormats[] = { VK_FORMAT_R16G16B16A16_SFLOAT, VK_FORMAT_R8G8B8A8_UNORM, buffers->SceneNormalFormat };
++	VkFormat drawBufferFormats[] = { buffers->SceneColorFormat, VK_FORMAT_R8G8B8A8_UNORM, buffers->SceneNormalFormat };
+ 
+ 	RenderPassBuilder builder;
+ 
+diff --git a/src/common/rendering/vulkan/system/vk_commandbuffer.cpp b/src/common/rendering/vulkan/system/vk_commandbuffer.cpp
+index 6c67c0175..761e7c14c 100644
+--- a/src/common/rendering/vulkan/system/vk_commandbuffer.cpp
++++ b/src/common/rendering/vulkan/system/vk_commandbuffer.cpp
+@@ -106,6 +106,7 @@ VulkanCommandBuffer* VkCommandBufferManager::GetDrawCommands()
+ 
+ void VkCommandBufferManager::BeginFrame()
+ {
++	MarkGpu(GpuFrameStart);
+ 	if (mNextTimestampQuery > 0)
+ 	{
+ 		GetDrawCommands()->resetQueryPool(mTimestampQueryPool.get(), 0, mNextTimestampQuery);
+@@ -115,8 +116,82 @@ void VkCommandBufferManager::BeginFrame()
+ 
+ #if defined(__SWITCH__)
+ CVAR(Bool, rd_vk_frameoverlap, true, CVAR_ARCHIVE | CVAR_GLOBALCONFIG)
++CVAR(Bool, rd_vk_gputime, true, 0)
+ #endif
+ 
++void VkCommandBufferManager::MarkGpu(GpuMark mark)
++{
++#if defined(__SWITCH__)
++	if (mark == GpuFrameStart)
++	{
++		// every earlier frame has finished here (BeginFrame waited for it)
++		ReadGpuMarks();
++		if (!rd_vk_gputime || !fb->device->GraphicsTimeQueries || gpuStatActive)
++			return;
++		if (!mGpuMarkPool)
++		{
++			mGpuMarkPool = QueryPoolBuilder()
++				.QueryType(VK_QUERY_TYPE_TIMESTAMP, GpuMarkSets * GpuMarkCount)
++				.Create(fb->device.get());
++		}
++		mGpuMarkSet = (mGpuMarkSet + 1) % GpuMarkSets;
++		mGpuMarksWritten[mGpuMarkSet] = 0;
++		mGpuMarkSubmitted[mGpuMarkSet] = false;
++		GetDrawCommands()->resetQueryPool(mGpuMarkPool.get(), mGpuMarkSet * GpuMarkCount, GpuMarkCount);
++	}
++	else if (!mGpuMarkPool || !(mGpuMarksWritten[mGpuMarkSet] & 1) || mGpuMarkSubmitted[mGpuMarkSet])
++	{
++		return;
++	}
++	unsigned bit = 1u << mark;
++	if (mGpuMarksWritten[mGpuMarkSet] & bit)
++		return;
++	mGpuMarksWritten[mGpuMarkSet] |= bit;
++	GetDrawCommands()->writeTimestamp(mark == GpuFrameStart ? VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT : VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT,
++		mGpuMarkPool.get(), mGpuMarkSet * GpuMarkCount + mark);
++	if (mark == GpuFrameEnd)
++		mGpuMarkSubmitted[mGpuMarkSet] = true;
++#endif
++}
++
++void VkCommandBufferManager::ReadGpuMarks()
++{
++#if defined(__SWITCH__)
++	if (!mGpuMarkPool)
++		return;
++	const double period = fb->device->PhysicalDevice.Properties.Properties.limits.timestampPeriod; // ns per tick
++	for (int set = 0; set < GpuMarkSets; set++)
++	{
++		if (!mGpuMarkSubmitted[set])
++			continue;
++		mGpuMarkSubmitted[set] = false;
++		uint64_t r[GpuMarkCount * 2] = {};	// value, availability
++		VkResult res = vkGetQueryPoolResults(fb->device->device, mGpuMarkPool->pool, set * GpuMarkCount, GpuMarkCount, sizeof(r), r,
++			2 * sizeof(uint64_t), VK_QUERY_RESULT_64_BIT | VK_QUERY_RESULT_WITH_AVAILABILITY_BIT);
++		if (res != VK_SUCCESS && res != VK_NOT_READY)
++			continue;
++		auto avail = [&](int m) { return (mGpuMarksWritten[set] & (1u << m)) && r[m * 2 + 1] != 0; };
++		auto ms = [&](int a, int b) { return r[b * 2] > r[a * 2] ? (double)(r[b * 2] - r[a * 2]) * period / 1e6 : 0.0; };
++		if (!avail(GpuFrameStart) || !avail(GpuFrameEnd))
++			continue;
++		nxperf.gpuframes++;
++		nxperf.gpu_frame_ms += ms(GpuFrameStart, GpuFrameEnd);
++		int last = GpuFrameStart;
++		if (avail(GpuSceneEnd))
++		{
++			nxperf.gpu_scene_ms += ms(last, GpuSceneEnd);
++			last = GpuSceneEnd;
++		}
++		if (avail(GpuPostEnd))
++		{
++			nxperf.gpu_post_ms += ms(last, GpuPostEnd);
++			last = GpuPostEnd;
++		}
++		nxperf.gpu_end_ms += ms(last, GpuFrameEnd);
++	}
++#endif
++}
++
+ void VkCommandBufferManager::WaitForPendingFrame()
+ {
+ 	if (!mFramePending)
+@@ -211,6 +286,8 @@ void VkCommandBufferManager::FlushCommands(bool finish, bool lastsubmit, bool up
+ 
+ 		if (!uploadOnly && mDrawCommands)
+ 		{
++			if (finish)
++				MarkGpu(GpuFrameEnd);
+ 			mDrawCommands->end();
+ 			commands[count++] = mDrawCommands.get();
+ 			DrawDeleteList->Add(std::move(mDrawCommands));
+diff --git a/src/common/rendering/vulkan/system/vk_commandbuffer.h b/src/common/rendering/vulkan/system/vk_commandbuffer.h
+index db6f5a7fd..4089fcd57 100644
+--- a/src/common/rendering/vulkan/system/vk_commandbuffer.h
++++ b/src/common/rendering/vulkan/system/vk_commandbuffer.h
+@@ -54,6 +54,13 @@ public:
+ 	void PopGroup();
+ 	void UpdateGpuStats();
+ 
++	// GPU timeline of each frame for perf.log (Switch): timestamps at the frame
++	// start, the end of the 3D scene, the end of post-processing and the frame
++	// end (after the present copy). They are read back without waiting once the
++	// frame's fence has passed, so measuring adds no CPU/GPU synchronisation.
++	enum GpuMark { GpuFrameStart, GpuSceneEnd, GpuPostEnd, GpuFrameEnd, GpuMarkCount };
++	void MarkGpu(GpuMark mark);
++
+ 	class DeleteList
+ 	{
+ 	public:
+@@ -114,6 +121,13 @@ private:
+ 		uint32_t endIndex;
+ 	};
+ 
++	enum { GpuMarkSets = 3 };
++	std::unique_ptr<VulkanQueryPool> mGpuMarkPool;
++	int mGpuMarkSet = 0;
++	unsigned mGpuMarksWritten[GpuMarkSets] = {};
++	bool mGpuMarkSubmitted[GpuMarkSets] = {};
++	void ReadGpuMarks();
++
+ 	enum { MaxTimestampQueries = 100 };
+ 	std::unique_ptr<VulkanQueryPool> mTimestampQueryPool;
+ 	void CreateTimestampQueries();
+diff --git a/src/common/rendering/vulkan/system/vk_renderdevice.cpp b/src/common/rendering/vulkan/system/vk_renderdevice.cpp
+index 2b248d4b7..7289a832c 100644
+--- a/src/common/rendering/vulkan/system/vk_renderdevice.cpp
++++ b/src/common/rendering/vulkan/system/vk_renderdevice.cpp
+@@ -219,6 +219,7 @@ void VulkanRenderDevice::Update()
+ 
+ 	GetPostprocess()->SetActiveRenderTarget();
+ 
++	mCommands->MarkGpu(VkCommandBufferManager::GpuPostEnd);
+ 	{
+ 		NXPERF_SCOPE(draw2d_ms, nullptr);
+ 		Draw2D();
+@@ -269,13 +270,14 @@ void VulkanRenderDevice::RenderTextureView(FCanvasTexture* tex, std::function<vo
+ 		.AddImage(image, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, false)
+ 		.Execute(mCommands->GetDrawCommands());
+ 
+-	mRenderState->SetRenderTarget(&GetBuffers()->SceneColor, GetBuffers()->SceneDepthStencil.View.get(), GetBuffers()->GetWidth(), GetBuffers()->GetHeight(), VK_FORMAT_R16G16B16A16_SFLOAT, GetBuffers()->GetSceneSamples());
++	mRenderState->SetRenderTarget(&GetBuffers()->SceneColor, GetBuffers()->SceneDepthStencil.View.get(), GetBuffers()->GetWidth(), GetBuffers()->GetHeight(), GetBuffers()->SceneColorFormat, GetBuffers()->GetSceneSamples());
+ 
+ 	tex->SetUpdated(true);
+ }
+ 
+ void VulkanRenderDevice::PostProcessScene(bool swscene, int fixedcm, float flash, const std::function<void()> &afterBloomDrawEndScene2D)
+ {
++	mCommands->MarkGpu(VkCommandBufferManager::GpuSceneEnd);
+ 	if (!swscene) mPostprocess->BlitSceneToPostprocess(); // Copy the resulting scene to the current post process texture
+ 	mPostprocess->PostProcessScene(fixedcm, flash, afterBloomDrawEndScene2D);
+ }
+@@ -624,7 +626,7 @@ void VulkanRenderDevice::AmbientOccludeScene(float m5)
+ 
+ void VulkanRenderDevice::SetSceneRenderTarget(bool useSSAO)
+ {
+-	mRenderState->SetRenderTarget(&GetBuffers()->SceneColor, GetBuffers()->SceneDepthStencil.View.get(), GetBuffers()->GetWidth(), GetBuffers()->GetHeight(), VK_FORMAT_R16G16B16A16_SFLOAT, GetBuffers()->GetSceneSamples());
++	mRenderState->SetRenderTarget(&GetBuffers()->SceneColor, GetBuffers()->SceneDepthStencil.View.get(), GetBuffers()->GetWidth(), GetBuffers()->GetHeight(), GetBuffers()->SceneColorFormat, GetBuffers()->GetSceneSamples());
+ }
+ 
+ bool VulkanRenderDevice::RaytracingEnabled()
+diff --git a/src/common/rendering/vulkan/textures/vk_renderbuffers.cpp b/src/common/rendering/vulkan/textures/vk_renderbuffers.cpp
+index 57e4d34d2..cd73cb6e8 100644
+--- a/src/common/rendering/vulkan/textures/vk_renderbuffers.cpp
++++ b/src/common/rendering/vulkan/textures/vk_renderbuffers.cpp
+@@ -36,6 +36,12 @@ CVAR(Bool, rd_vk_depth32, false, 0)
+ // declaring them TRANSIENT_ATTACHMENT (attachment-only) turns it off. Nothing
+ // samples these depth buffers except SSAO, which is disabled while this is off.
+ CVAR(Bool, rd_vk_zcull, false, 0)
++// Scene colour format: 0 = RGBA16F (UZDoom default), 1 = RGB10A2, 2 = RGBA8.
++// The 32-bit formats halve the bytes every scene pixel, blend, copy and
++// post-processing pass moves through the Tegra X1's shared memory bus; HDR
++// effects (bloom, tonemap) then work in the 0..1 range. Both settings take
++// effect on the next frame (the buffers are rebuilt).
++CVAR(Int, rd_vk_scenefmt, 0, CVAR_ARCHIVE | CVAR_GLOBALCONFIG)
+ VkImageUsageFlags RDoom_DepthUsage(VkImageUsageFlags usage)
+ {
+ 	if (rd_vk_zcull)
+@@ -88,16 +94,36 @@ void VkRenderBuffers::BeginFrame(int width, int height, int sceneWidth, int scen
+ {
+ 	VkSampleCountFlagBits samples = GetBestSampleCount();
+ 
+-	if (width != mWidth || height != mHeight || mSamples != samples)
++	bool formatChanged = false;
++#ifdef __SWITCH__
++	if (mSceneFmt != rd_vk_scenefmt || mZcull != rd_vk_zcull)
++	{
++		formatChanged = mSceneFmt != -1;
++		mSceneFmt = rd_vk_scenefmt;
++		mZcull = rd_vk_zcull;
++		SceneColorFormat = VK_FORMAT_R16G16B16A16_SFLOAT;
++		VkFormat wanted = mSceneFmt == 1 ? VK_FORMAT_A2B10G10R10_UNORM_PACK32 : mSceneFmt == 2 ? VK_FORMAT_R8G8B8A8_UNORM : VK_FORMAT_R16G16B16A16_SFLOAT;
++		VkFormatProperties props = {};
++		vkGetPhysicalDeviceFormatProperties(fb->device->PhysicalDevice.Device, wanted, &props);
++		const VkFormatFeatureFlags need = VK_FORMAT_FEATURE_COLOR_ATTACHMENT_BLEND_BIT | VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT |
++			VK_FORMAT_FEATURE_BLIT_SRC_BIT | VK_FORMAT_FEATURE_BLIT_DST_BIT;
++		if ((props.optimalTilingFeatures & need) == need)
++			SceneColorFormat = wanted;
++		RDoom_SessionSet("vulkan_scene_color", SceneColorFormat == VK_FORMAT_R16G16B16A16_SFLOAT ? "RGBA16F" :
++			SceneColorFormat == VK_FORMAT_A2B10G10R10_UNORM_PACK32 ? "RGB10A2" : "RGBA8");
++	}
++#endif
++
++	if (width != mWidth || height != mHeight || mSamples != samples || formatChanged)
+ 	{
+ 		fb->GetCommands()->WaitForCommands(false);
+ 		fb->GetRenderPassManager()->RenderBuffersReset();
+ 	}
+ 
+-	if (width != mWidth || height != mHeight)
++	if (width != mWidth || height != mHeight || formatChanged)
+ 		CreatePipeline(width, height);
+ 
+-	if (width != mWidth || height != mHeight || mSamples != samples)
++	if (width != mWidth || height != mHeight || mSamples != samples || formatChanged)
+ 		CreateScene(width, height, samples);
+ 
+ 	mWidth = width;
+@@ -162,13 +188,13 @@ void VkRenderBuffers::CreatePipeline(int width, int height)
+ 	{
+ 		PipelineImage[i].Image = ImageBuilder()
+ 			.Size(width, height)
+-			.Format(VK_FORMAT_R16G16B16A16_SFLOAT)
++			.Format(SceneColorFormat)
+ 			.Usage(VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT)
+ 			.DebugName("VkRenderBuffers.PipelineImage")
+ 			.Create(fb->device.get());
+ 
+ 		PipelineImage[i].View = ImageViewBuilder()
+-			.Image(PipelineImage[i].Image.get(), VK_FORMAT_R16G16B16A16_SFLOAT)
++			.Image(PipelineImage[i].Image.get(), SceneColorFormat)
+ 			.DebugName("VkRenderBuffers.PipelineView")
+ 			.Create(fb->device.get());
+ 
+@@ -202,13 +228,14 @@ void VkRenderBuffers::CreateSceneColor(int width, int height, VkSampleCountFlagB
+ 	SceneColor.Image = ImageBuilder()
+ 		.Size(width, height)
+ 		.Samples(samples)
+-		.Format(VK_FORMAT_R16G16B16A16_SFLOAT)
+-		.Usage(VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT)
++		.Format(SceneColorFormat)
++		// same usage as the post-processing images: they get exchanged (rd_vk_sceneswap)
++		.Usage(VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT)
+ 		.DebugName("VkRenderBuffers.SceneColor")
+ 		.Create(fb->device.get());
+ 
+ 	SceneColor.View = ImageViewBuilder()
+-		.Image(SceneColor.Image.get(), VK_FORMAT_R16G16B16A16_SFLOAT)
++		.Image(SceneColor.Image.get(), SceneColorFormat)
+ 		.DebugName("VkRenderBuffers.SceneColorView")
+ 		.Create(fb->device.get());
+ }
+diff --git a/src/common/rendering/vulkan/textures/vk_renderbuffers.h b/src/common/rendering/vulkan/textures/vk_renderbuffers.h
+index d79177590..f9f44544f 100644
+--- a/src/common/rendering/vulkan/textures/vk_renderbuffers.h
++++ b/src/common/rendering/vulkan/textures/vk_renderbuffers.h
+@@ -57,6 +57,9 @@ public:
+ 	VkFormat PipelineDepthStencilFormat = VK_FORMAT_D24_UNORM_S8_UINT;
+ 	VkFormat SceneDepthStencilFormat = VK_FORMAT_D24_UNORM_S8_UINT;
+ 	VkFormat SceneNormalFormat = VK_FORMAT_A2R10G10B10_UNORM_PACK32;
++	// colour format of the scene and of the post-processing images
++	// (Switch: rd_vk_scenefmt, half the memory traffic with 32-bit pixels)
++	VkFormat SceneColorFormat = VK_FORMAT_R16G16B16A16_SFLOAT;
+ 
+ 	static const int NumPipelineImages = 2;
+ 	VkTextureImage PipelineDepthStencil;
+@@ -78,6 +81,8 @@ private:
+ 
+ 	int mWidth = 0;
+ 	int mHeight = 0;
++	int mSceneFmt = -1;		// Switch: rd_vk_scenefmt / rd_vk_zcull the buffers were made with
++	bool mZcull = false;
+ 	int mSceneWidth = 0;
+ 	int mSceneHeight = 0;
+ 	VkSampleCountFlagBits mSamples = VK_SAMPLE_COUNT_1_BIT;
+diff --git a/src/d_main.cpp b/src/d_main.cpp
+index d185d3777..2d1d8bb4e 100644
+--- a/src/d_main.cpp
++++ b/src/d_main.cpp
+@@ -106,6 +106,7 @@
+ #include "st_stuff.h"
+ #include "startscreen.h"
+ #include "nx_perf.h"
++#include "rendering/rdoom_gpubench.h"
+ #ifdef __SWITCH__
+ #include "common/platform/posix/nx/nx_loadscreen.h"
+ #include "common/platform/posix/nx/nx_glthread.h"
+@@ -1638,6 +1639,9 @@ void D_DoomLoop ()
+ #endif
+ 				S_UpdateMusic();
+ 			}
++#ifdef __SWITCH__
++			RDoom_GpuBenchFrame();
++#endif
+ 			NXPerf_EndFrame();
+ #ifdef __SWITCH__
+ 			NX_Phase("frame done");
+diff --git a/src/rendering/rdoom_gpubench.cpp b/src/rendering/rdoom_gpubench.cpp
+new file mode 100644
+index 000000000..3304667f7
+--- /dev/null
++++ b/src/rendering/rdoom_gpubench.cpp
+@@ -0,0 +1,201 @@
++/*
++** rdoom_gpubench.cpp
++** On-console GPU benchmark (Switch).
++**
++** rd_gpubench 1 (e.g. "rd_gpubench=1" in rdoom_debug.txt) waits until a map
++** has been on screen for a few seconds, freezes the level and renders the
++** same spot with one setting changed at a time, looking in four directions.
++** The GPU time of every frame comes from timestamps (nx_perf), so the table
++** in logs/gpu-bench.txt shows what each option really costs on the Tegra X1,
++** in handheld or docked mode, independent of vsync.
++**
++** Copyright 2026 RDoom contributors. GPLv3 (same as UZDoom).
++*/
++
++#include "rdoom_gpubench.h"
++
++#ifdef __SWITCH__
++
++#include <stdio.h>
++#include <string>
++#include <vector>
++#include <switch.h>
++#include "c_cvars.h"
++#include "d_player.h"
++#include "g_levellocals.h"
++#include "gamestate.h"
++#include "nx_perf.h"
++#include "printf.h"
++#include "v_video.h"
++#include "common/platform/posix/nx/rdoom_nx.h"
++#include "rdoom_version.h"
++
++CVAR(Int, rd_gpubench, 0, 0)
++
++extern int nx_levelframes;
++
++namespace
++{
++	struct Setting { const char *name; const char *value; };
++	struct Config { const char *label; std::vector<Setting> settings; };
++
++	const std::vector<Config> configs = {
++		{ "base (perfil atual)", {} },
++		{ "sem luzes dinamicas", { { "r_dynlights", "0" } } },
++		{ "escala 0.75", { { "vid_scalefactor", "0.75" } } },
++		{ "escala 0.5", { { "vid_scalefactor", "0.5" } } },
++		{ "cena RGB10A2", { { "rd_vk_scenefmt", "1" } } },
++		{ "cena RGBA8", { { "rd_vk_scenefmt", "2" } } },
++		{ "ZCULL ligado", { { "rd_vk_zcull", "1" } } },
++		{ "copia da cena (sem troca)", { { "rd_vk_sceneswap", "0" } } },
++		{ "RGBA8 + ZCULL", { { "rd_vk_scenefmt", "2" }, { "rd_vk_zcull", "1" } } },
++		{ "base de novo", {} },
++	};
++	const int Angles = 4, SettleFrames = 30, MeasureFrames = 60;
++
++	struct BenchResult { double frame = 0, scene = 0, post = 0, end = 0, cpu = 0; int gpu = 0, cpuframes = 0; };
++
++	bool running = false;
++	int config = 0, angle = 0, frameInStep = 0;
++	DAngle baseYaw;
++	std::vector<std::pair<std::string, std::string>> saved;	// cvar, original value
++	std::vector<BenchResult> results;
++
++	FBaseCVar *Find(const char *name) { return FindCVar(name, nullptr); }
++
++	void Set(const char *name, const char *value)
++	{
++		if (FBaseCVar *cv = Find(name))
++		{
++			UCVarValue v;
++			v.String = value;
++			cv->SetGenericRep(v, CVAR_String);
++		}
++	}
++
++	void ApplyConfig(int c)
++	{
++		for (auto &s : saved)
++			Set(s.first.c_str(), s.second.c_str());
++		for (auto &s : configs[c].settings)
++			Set(s.name, s.value);
++	}
++
++	void Look(player_t *p)
++	{
++		p->mo->Angles.Yaw = baseYaw + DAngle::fromDeg(90. * angle);
++		p->mo->PrevAngles = p->mo->Angles;
++		p->mo->Vel.Zero();
++	}
++
++	void Finish(bool complete)
++	{
++		for (auto &s : saved)
++			Set(s.first.c_str(), s.second.c_str());
++		if (primaryLevel)
++			primaryLevel->frozenstate &= ~1;
++		running = false;
++		rd_gpubench = 0;
++
++		FILE *f = fopen(RDOOM_SD_ROOT "/logs/gpu-bench.txt", "w");
++		if (f)
++		{
++			fprintf(f, "RDoom GPU benchmark (%s, build %s)\n", complete ? "completo" : "interrompido", RDOOM_GIT_DESCRIBE);
++			fprintf(f, "modo: %s | mapa: %s | tela %dx%d | %d direcoes x %d frames por configuracao\n",
++				appletGetOperationMode() == AppletOperationMode_Console ? "dock" : "portatil",
++				primaryLevel ? primaryLevel->MapName.GetChars() : "?", screen->GetWidth(), screen->GetHeight(), Angles, MeasureFrames);
++			fprintf(f, "tempos de GPU em ms por frame (16.7 ms = 60 fps); cpu = frame inteiro visto pela CPU\n\n");
++			fprintf(f, "%-28s %8s %8s %8s %8s %8s %8s\n", "configuracao", "gpu", "cena3D", "posproc", "2D", "vs base", "cpu");
++			double base = 0;
++			for (size_t c = 0; c < results.size(); c++)
++			{
++				const BenchResult &r = results[c];
++				if (r.gpu == 0)
++				{
++					fprintf(f, "%-28s %8s\n", configs[c].label, "sem dados");
++					continue;
++				}
++				double g = r.gpu;
++				if (c == 0)
++					base = r.frame / g;
++				fprintf(f, "%-28s %8.2f %8.2f %8.2f %8.2f %+7.0f%% %8.2f\n", configs[c].label, r.frame / g, r.scene / g, r.post / g, r.end / g,
++					base > 0 ? (r.frame / g / base - 1) * 100 : 0.0, r.cpuframes ? r.cpu / r.cpuframes : 0.0);
++			}
++			fclose(f);
++		}
++		Printf("Benchmark de GPU %s: logs/gpu-bench.txt\n", complete ? "concluido" : "interrompido");
++		RDoom_SessionSet("gpu_bench", complete ? "complete (logs/gpu-bench.txt)" : "interrupted");
++	}
++}
++
++void RDoom_GpuBenchFrame()
++{
++	player_t *p = primaryLevel ? primaryLevel->GetConsolePlayer() : nullptr;
++	const bool inLevel = gamestate == GS_LEVEL && p && p->mo;
++
++	if (!running)
++	{
++		// start once the map has been on screen for a while (textures and
++		// pipelines of the first view are loaded by then)
++		if (rd_gpubench <= 0 || !inLevel || nx_levelframes < 150)
++			return;
++		running = true;
++		config = angle = frameInStep = 0;
++		results.assign(configs.size(), BenchResult());
++		saved.clear();
++		for (auto &c : configs)
++			for (auto &s : c.settings)
++			{
++				bool known = false;
++				for (auto &k : saved)
++					known |= k.first == s.name;
++				FBaseCVar *cv = Find(s.name);
++				if (!known && cv)
++					saved.emplace_back(s.name, cv->GetHumanString());
++			}
++		baseYaw = p->mo->Angles.Yaw;
++		primaryLevel->frozenstate |= 1;	// monsters, projectiles and the player stand still
++		Printf("Benchmark de GPU: nao mexa no controle (cerca de 2 minutos)\n");
++		ApplyConfig(0);
++	}
++
++	if (!inLevel || rd_gpubench <= 0)
++	{
++		Finish(false);
++		return;
++	}
++
++	Look(p);
++	if (frameInStep >= SettleFrames)
++	{
++		BenchResult &r = results[config];
++		r.gpu += nxperf.gpuframes;
++		r.frame += nxperf.gpu_frame_ms;
++		r.scene += nxperf.gpu_scene_ms;
++		r.post += nxperf.gpu_post_ms;
++		r.end += nxperf.gpu_end_ms;
++		r.cpu += NXPerf_LastFrameMS();
++		r.cpuframes++;
++	}
++	if (++frameInStep < SettleFrames + MeasureFrames)
++		return;
++
++	frameInStep = 0;
++	if (++angle < Angles)
++		return;
++	angle = 0;
++	if (++config < (int)configs.size())
++	{
++		ApplyConfig(config);
++		return;
++	}
++	Finish(true);
++}
++
++#else
++
++void RDoom_GpuBenchFrame()
++{
++}
++
++#endif
+diff --git a/src/rendering/rdoom_gpubench.h b/src/rendering/rdoom_gpubench.h
+new file mode 100644
+index 000000000..bc0e6fd5c
+--- /dev/null
++++ b/src/rendering/rdoom_gpubench.h
+@@ -0,0 +1,3 @@
++#pragma once
++// On-console GPU benchmark (rd_gpubench), called once per frame before NXPerf_EndFrame.
++void RDoom_GpuBenchFrame();
+-- 
+2.56.0
+

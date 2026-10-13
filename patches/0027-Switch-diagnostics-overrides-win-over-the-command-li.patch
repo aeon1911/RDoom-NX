@@ -1,0 +1,178 @@
+From f05236310b0515a1ff66655949f1a40e272272a2 Mon Sep 17 00:00:00 2001
+From: RDoom <171243930+aeon1911@users.noreply.github.com>
+Date: Sun, 11 Oct 2026 20:45:54 -0300
+Subject: [PATCH 27/46] Switch: diagnostics overrides win over the command
+ line, lights-off ladder step
+
+- CVAR overrides from rdoom_debug.txt and the automatic GPU ladder are applied
+  again after C_RunDelayedCommands, because the launcher's +set commands (e.g.
+  r_dynlights) run after the video start-up and used to undo them.
+- Ladder after a lost GPU: 1 = dynamic lights off, 2 = trace mode; the trace
+  now records the dynamic light index of every draw.
+- Longer boot.log crumbs so a full pipeline key fits on one line.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ src/common/platform/posix/nx/rdoom_nx.cpp     | 27 +++++++++++++++++++
+ src/common/platform/posix/nx/rdoom_nx.h       |  9 +++++--
+ src/common/platform/posix/sdl/sdlglvideo.cpp  | 23 +++++++++++++---
+ .../vulkan/renderer/vk_renderstate.cpp        | 10 +++----
+ src/d_main.cpp                                |  8 ++++++
+ 5 files changed, 67 insertions(+), 10 deletions(-)
+
+diff --git a/src/common/platform/posix/nx/rdoom_nx.cpp b/src/common/platform/posix/nx/rdoom_nx.cpp
+index 2690ed8f1..be9037df4 100644
+--- a/src/common/platform/posix/nx/rdoom_nx.cpp
++++ b/src/common/platform/posix/nx/rdoom_nx.cpp
+@@ -377,3 +377,30 @@ void RDoom_SessionLog(const char *category, const char *message)
+ {
+ 	RLOG_I(category, "%s", message);
+ }
++
++// ---------------------------------------------------------------------------
++// late CVAR overrides (see rdoom_nx.h)
++// ---------------------------------------------------------------------------
++
++static std::vector<std::pair<std::string, std::string>> g_lateCvars;
++
++void RDoom_AddLateCvar(const char *name, const char *value)
++{
++	for (auto &kv : g_lateCvars)
++		if (kv.first == name)
++		{
++			kv.second = value;
++			return;
++		}
++	g_lateCvars.push_back({ name, value });
++}
++
++void RDoom_ApplyLateCvars()
++{
++	extern void RDoom_SetCvarString(const char *name, const char *value);
++	for (auto &kv : g_lateCvars)
++	{
++		RDoom_SetCvarString(kv.first.c_str(), kv.second.c_str());
++		RLOG_I("session", "late override %s=%s", kv.first.c_str(), kv.second.c_str());
++	}
++}
+diff --git a/src/common/platform/posix/nx/rdoom_nx.h b/src/common/platform/posix/nx/rdoom_nx.h
+index ce3cd3130..b60fc316b 100644
+--- a/src/common/platform/posix/nx/rdoom_nx.h
++++ b/src/common/platform/posix/nx/rdoom_nx.h
+@@ -26,8 +26,13 @@ int RDoom_ClearShaderCaches();
+ void RDoom_VulkanDeviceLost(const char *what);
+ 
+ // Automatic GPU workarounds: each session that follows a lost GPU moves one step
+-// further (0 = none, 1 = draw trace); the step is kept while it works and
++// further (0 = none, 1 = dynamic lights off, 2 = draw trace); the step is kept while it works and
+ // starts over with a new build. Applied by the video start-up (sdlglvideo.cpp).
+-#define RDOOM_GPU_STEPS 1
++#define RDOOM_GPU_STEPS 2
+ bool RDoom_PreviousSessionLostGpu();
+ int RDoom_GpuWorkaroundStep();
++
++// CVAR overrides set during video start-up, applied again after the command
++// line's +set commands (which run later) so they take effect.
++void RDoom_AddLateCvar(const char *name, const char *value);
++void RDoom_ApplyLateCvars();
+diff --git a/src/common/platform/posix/sdl/sdlglvideo.cpp b/src/common/platform/posix/sdl/sdlglvideo.cpp
+index 67246e20c..b1e31aaa7 100644
+--- a/src/common/platform/posix/sdl/sdlglvideo.cpp
++++ b/src/common/platform/posix/sdl/sdlglvideo.cpp
+@@ -476,11 +476,15 @@ DFrameBuffer *SDLVideo::CreateFrameBuffer ()
+ 		applied += "NVK_SWITCH_PERF_LOG=1";
+ 		auto setcvar = [&](const char *name, const char *value) {
+ 			if (FBaseCVar *cv = FindCVar(name, nullptr)) { UCVarValue v; v.String = value; cv->SetGenericRep(v, CVAR_String); }
++			RDoom_AddLateCvar(name, value);
+ 			applied.AppendFormat(" %s=%s", name, value);
+ 		};
+-		// fans and depth bias are worked around by default now (hardware tests
+-		// 2026-10-11); a further loss goes straight to trace mode
+-		if (step >= 1)
++		// fans and depth bias are worked around by default (hardware tests
++		// 2026-10-11); the remaining hangs line up with the first surface lit by
++		// a dynamic light (shader light loop reading the light SSBO)
++		if (step == 1)
++			setcvar("r_dynlights", "0");
++		if (step >= 2)
+ 		{
+ 			setenv("NVK_DEBUG", "push_sync", 1);
+ 			applied += " NVK_DEBUG=push_sync (trace mode)";
+@@ -514,6 +518,7 @@ DFrameBuffer *SDLVideo::CreateFrameBuffer ()
+ 				UCVarValue v;
+ 				v.String = value;
+ 				cv->SetGenericRep(v, CVAR_String);
++				RDoom_AddLateCvar(line, value);
+ 				applied.AppendFormat("%s%s=%s", applied.IsEmpty() ? "" : " ", line, value);
+ 			}
+ 			else
+@@ -900,3 +905,15 @@ void I_SetWindowTitle(const char* caption)
+ 		SDL_SetWindowTitle(Priv::window, default_caption.GetChars());
+ 	}
+ }
++
++#ifdef __SWITCH__
++void RDoom_SetCvarString(const char *name, const char *value)
++{
++	if (FBaseCVar *cv = FindCVar(name, nullptr))
++	{
++		UCVarValue v;
++		v.String = value;
++		cv->SetGenericRep(v, CVAR_String);
++	}
++}
++#endif
+diff --git a/src/common/rendering/vulkan/renderer/vk_renderstate.cpp b/src/common/rendering/vulkan/renderer/vk_renderstate.cpp
+index 7837f0b3e..f4ccc7c19 100644
+--- a/src/common/rendering/vulkan/renderer/vk_renderstate.cpp
++++ b/src/common/rendering/vulkan/renderer/vk_renderstate.cpp
+@@ -76,7 +76,7 @@ int rd_vk_drawlog_started = 0;
+ extern int nx_levelframes;
+ void RDoom_Crumb(const char *what);
+ 
+-static void LogDraw(const VkPipelineKey &key, FMaterial *mat, const char *kind, int index, int count)
++static void LogDraw(const VkPipelineKey &key, FMaterial *mat, int lightIndex, const char *kind, int index, int count)
+ {
+ 	static int logged;
+ 	// 3D draws (depth or stencil in use), also during the screen wipe into a level
+@@ -92,14 +92,14 @@ static void LogDraw(const VkPipelineKey &key, FMaterial *mat, const char *kind,
+ 	logged++;
+ 	extern int rd_vk_drawlog_started;
+ 	rd_vk_drawlog_started = 1;
+-	char buf[220];
+-	snprintf(buf, sizeof(buf), "draw %d (level frame %d): %s first %d count %d | vfmt %d effect %d special %d alphatest %d drawtype %d layers %d depth %d/%d stencil %d | %s",
++	char buf[300];
++	snprintf(buf, sizeof(buf), "draw %d (level frame %d): %s first %d count %d | vfmt %d effect %d special %d alphatest %d drawtype %d layers %d depth %d/%d stencil %d light %d | %s",
+ 		logged, nx_levelframes, kind, index, count, key.VertexFormat, key.EffectState, key.SpecialEffect, key.AlphaTest, key.DrawType,
+-		key.NumTextureLayers, key.DepthTest, key.DepthWrite, key.StencilTest,
++		key.NumTextureLayers, key.DepthTest, key.DepthWrite, key.StencilTest, lightIndex,
+ 		mat && mat->Source() ? mat->Source()->GetName().GetChars() : "(no texture)");
+ 	RDoom_Crumb(buf);
+ }
+-#define RD_LOGDRAW(kind, index, count) LogDraw(mPipelineKey, mMaterial.mMaterial, kind, index, count)
++#define RD_LOGDRAW(kind, index, count) LogDraw(mPipelineKey, mMaterial.mMaterial, mLightIndex, kind, index, count)
+ #else
+ #define RD_LOGDRAW(kind, index, count)
+ #endif
+diff --git a/src/d_main.cpp b/src/d_main.cpp
+index 7d8bea679..d185d3777 100644
+--- a/src/d_main.cpp
++++ b/src/d_main.cpp
+@@ -4018,6 +4018,14 @@ static int D_InitGame(const FIWADInfo* iwad_info, std::vector<FileSys::ResourceN
+ 	gamestate = GS_FULLCONSOLE;
+ 	Net_Initialize();
+ 	C_RunDelayedCommands();
++#ifdef __SWITCH__
++	{
++		// diagnostics overrides (rdoom_debug.txt / GPU workaround steps) win over
++		// the launcher's +set commands, which run just above
++		extern void RDoom_ApplyLateCvars();
++		RDoom_ApplyLateCvars();
++	}
++#endif
+ 	gamestate = GS_STARTUP;
+ 
+ 	// enable custom invulnerability map here
+-- 
+2.56.0
+

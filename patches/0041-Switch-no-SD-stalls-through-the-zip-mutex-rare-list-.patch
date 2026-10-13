@@ -1,0 +1,269 @@
+From 9145afb52539f32d3c03ee6b3694e656613a845c Mon Sep 17 00:00:00 2001
+From: RDoom <171243930+aeon1911@users.noreply.github.com>
+Date: Tue, 13 Oct 2026 13:51:30 -0300
+Subject: [PATCH 41/46] Switch: no SD stalls through the zip mutex, rare list
+ saves, stabilizer on
+
+HW test of 5625345a5: explosions and doors smooth; a 57 ms BeginFrame stall
+was the texture list save (FString built line by line), a 2.4 s frame came
+while the card was busy writing, and smoke fights still had half the frames
+late with the GPU fill-bound at 60% resolution.
+
+- FZipFile::SetEntryAddress reads the local header without holding the
+  mutex (a thread waiting for the SD card blocked every thread opening a new
+  entry, the renderer included); release/acquire fences between the new
+  position and the cleared flag, which readers check without the mutex.
+- Texture list: built in a reserved std::string; first save one second
+  after the first new picture of a session, then at most every 20 s.
+- nx_stabilizer 60 by default on the Switch: purely visual detail (faint
+  and distant effects, lights, shadows) is trimmed only while frames are late.
+- Frames held back by the tic rate (menu, pause) count neither for the
+  stabilizer nor for the dynamic resolution.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ src/common/engine/nx_governor.cpp             | 10 ++++-
+ src/common/engine/nx_perf.cpp                 | 11 ++++-
+ src/common/engine/nx_perf.h                   |  1 +
+ src/common/filesystem/source/file_zip.cpp     | 42 +++++++++++++------
+ src/common/filesystem/source/resourcefile.cpp |  4 ++
+ .../vulkan/renderer/vk_renderpass.cpp         | 23 ++++++----
+ .../rendering/vulkan/renderer/vk_renderpass.h |  1 +
+ .../vulkan/system/vk_renderdevice.cpp         |  5 ++-
+ 8 files changed, 73 insertions(+), 24 deletions(-)
+
+diff --git a/src/common/engine/nx_governor.cpp b/src/common/engine/nx_governor.cpp
+index 259f6aa10..306794239 100644
+--- a/src/common/engine/nx_governor.cpp
++++ b/src/common/engine/nx_governor.cpp
+@@ -24,7 +24,15 @@
+ #include <algorithm>
+ #include <math.h>
+ 
+-CVAR(Int, nx_stabilizer, 0, CVAR_GLOBALCONFIG)	// target FPS, 0 = off
++// target FPS, 0 = off. On by default on the Switch: Brutal Doom's smoke made
++// half the frames of a fight late on the Switch Lite even at 60% resolution
++// (dozens of translucent layers); only purely visual detail is trimmed and
++// only while frames are late.
++#ifdef __SWITCH__
++CVAR(Int, nx_stabilizer, 60, CVAR_GLOBALCONFIG)
++#else
++CVAR(Int, nx_stabilizer, 0, CVAR_GLOBALCONFIG)
++#endif
+ CVAR(Bool, nx_stabilizer_debug, false, 0)
+ 
+ int nxGovLevel = 0;
+diff --git a/src/common/engine/nx_perf.cpp b/src/common/engine/nx_perf.cpp
+index 8af69fe62..9bc51a13c 100644
+--- a/src/common/engine/nx_perf.cpp
++++ b/src/common/engine/nx_perf.cpp
+@@ -41,6 +41,7 @@ static double startTime = -1;
+ static int linesWritten = 0;
+ static FILE *perfFile = nullptr;
+ static double sumFrame = 0, maxFrame = 0;
++static double lastTicWaitMS = 0;
+ static int frames = 0;
+ static int missed1 = 0, missed2 = 0;	// frames over one / over two vsync intervals
+ static double lastSummary = 0;
+@@ -105,6 +106,11 @@ double NXPerf_LastFrameMS()
+ 	return lastFrameMS;
+ }
+ 
++double NXPerf_LastTicWaitMS()
++{
++	return lastTicWaitMS;
++}
++
+ double NXPerf_LastSimMS()
+ {
+ 	return lastSimMS;
+@@ -140,6 +146,7 @@ void NXPerf_EndFrame()
+ 	double frame = lastFrame < 0 ? 0 : now - lastFrame;
+ 	lastFrame = now;
+ 	lastFrameMS = frame;
++	lastTicWaitMS = nxperf.wait_ms;
+ 	lastSimMS = nxperf.tic_ms;
+ 	lastTicMS = (nxperf.tics > 0) ? nxperf.tic_ms / nxperf.tics : 0;
+ 
+@@ -152,7 +159,9 @@ void NXPerf_EndFrame()
+ 	{
+ 		extern int nx_levelframes;
+ 		// Vulkan waits for the display/GPU inside acquire, present and the frame-start wait
+-		NXGovernor_Frame(frame, nxperf.swap_ms + nxperf.gpuwait_ms + nxperf.wait_ms + nxperf.vkacquire_ms + nxperf.vkpresent_ms + nxperf.vkpending_ms, nx_levelframes > 3);
++		// frames held back by the tic rate (menu open, paused: 35 fps) are not late frames
++		const bool ticCapped = nxperf.wait_ms > 8.0;
++		NXGovernor_Frame(frame, nxperf.swap_ms + nxperf.gpuwait_ms + nxperf.wait_ms + nxperf.vkacquire_ms + nxperf.vkpresent_ms + nxperf.vkpending_ms, nx_levelframes > 3 && !ticCapped);
+ 	}
+ 
+ 	if (nx_perflog > 0 && linesWritten < 3000)
+diff --git a/src/common/engine/nx_perf.h b/src/common/engine/nx_perf.h
+index 6ea5582d6..8c6110bc0 100644
+--- a/src/common/engine/nx_perf.h
++++ b/src/common/engine/nx_perf.h
+@@ -66,6 +66,7 @@ void NXPerf_Note(const char *fmt, ...);
+ // last completed frame, the simulation time inside it, and the average cost of one tic (0 if none ran)
+ double NXPerf_LastFrameMS();
+ double NXPerf_LastSimMS();
++double NXPerf_LastTicWaitMS();	// the last frame's wait for the next game tic
+ double NXPerf_LastTicMS();
+ // set by the game code: writes a breakdown (e.g. which actor classes cost the most) into the summary
+ extern void (*NXPerf_SummaryHook)(FILE *f);
+diff --git a/src/common/filesystem/source/file_zip.cpp b/src/common/filesystem/source/file_zip.cpp
+index ea6b1152c..44ed9b86c 100644
+--- a/src/common/filesystem/source/file_zip.cpp
++++ b/src/common/filesystem/source/file_zip.cpp
+@@ -24,6 +24,7 @@
+ 
+ #include <time.h>
+ #include <mutex>
++#include <atomic>
+ #include <stdexcept>
+ #include <cstdint>
+ #include "w_zip.h"
+@@ -353,27 +354,42 @@ void FZipFile::SetEntryAddress(uint32_t entry)
+ 	// This file is inside a zip and has not been opened before.
+ 	// Position points to the start of the local file header, which we must
+ 	// read and skip so that we can get to the actual file data.
++	//
++	// The header is read without holding the mutex: a background thread
++	// (sprite or sound decoding) waiting for the SD card here used to block
++	// every other thread opening a new entry, the renderer included (a 2.4 s
++	// frame on the Switch while the card was busy writing). The mutex only
++	// guards the update; two threads reading the same header agree anyway.
++	decltype(Entries[entry].Position) pos;
++	{
++		std::lock_guard<std::mutex> lock(EntryAddressMutex);
++		if (!(Entries[entry].Flags & RESFF_NEEDFILESTART)) return;
++		pos = Entries[entry].Position;
++	}
+ 	FZipLocalFileHeader localHeader;
+-	int skiplen;
+-
+-	// background threads (asset decoding) must not touch the shared reader
+-	std::lock_guard<std::mutex> lock(EntryAddressMutex);
+-	if (!(Entries[entry].Flags & RESFF_NEEDFILESTART)) return;
++	bool ok;
+ 	if (mainThread)
+ 	{
+-		Reader.Seek(Entries[entry].Position, FileReader::SeekSet);
+-		Reader.Read(&localHeader, sizeof(localHeader));
++		// only the main thread uses the shared reader
++		Reader.Seek(pos, FileReader::SeekSet);
++		ok = Reader.Read(&localHeader, sizeof(localHeader)) == (FileReader::Size)sizeof(localHeader);
+ 	}
+ 	else
+ 	{
+ 		FileReader fr;
+-		if (!fr.OpenFile(FileName)) return;
+-		fr.Seek(Entries[entry].Position, FileReader::SeekSet);
+-		fr.Read(&localHeader, sizeof(localHeader));
++		ok = fr.OpenFile(FileName) && fr.Seek(pos, FileReader::SeekSet) == 0 && fr.Read(&localHeader, sizeof(localHeader)) == (FileReader::Size)sizeof(localHeader);
++	}
++	if (!ok) return;
++	const int skiplen = LittleShort(localHeader.NameLength) + LittleShort(localHeader.ExtraLength);
++	std::lock_guard<std::mutex> lock(EntryAddressMutex);
++	if (Entries[entry].Flags & RESFF_NEEDFILESTART)
++	{
++		Entries[entry].Position = pos + sizeof(localHeader) + skiplen;
++		// readers check the flag without the mutex (GetEntryReader): the new
++		// position must be visible before the flag is cleared
++		std::atomic_thread_fence(std::memory_order_release);
++		Entries[entry].Flags &= ~RESFF_NEEDFILESTART;
+ 	}
+-	skiplen = LittleShort(localHeader.NameLength) + LittleShort(localHeader.ExtraLength);
+-	Entries[entry].Position += sizeof(localHeader) + skiplen;
+-	Entries[entry].Flags &= ~RESFF_NEEDFILESTART;
+ }
+ 
+ //==========================================================================
+diff --git a/src/common/filesystem/source/resourcefile.cpp b/src/common/filesystem/source/resourcefile.cpp
+index 5af670c9f..5ac45474f 100644
+--- a/src/common/filesystem/source/resourcefile.cpp
++++ b/src/common/filesystem/source/resourcefile.cpp
+@@ -22,6 +22,7 @@
+ */
+ 
+ #include <algorithm>
++#include <atomic>
+ #include <miniz.h>
+ #include "resourcefile.h"
+ #include "md5.hpp"
+@@ -678,6 +679,9 @@ FileReader FResourceFile::GetEntryReader(uint32_t entry, int readertype, int rea
+ 		{
+ 			SetEntryAddress(entry);
+ 		}
++		// pairs with the release fence in FZipFile::SetEntryAddress (another
++		// thread may have just set Position and cleared the flag)
++		std::atomic_thread_fence(std::memory_order_acquire);
+ 		if (!(Entries[entry].Flags & RESFF_COMPRESSED))
+ 		{
+ 			auto buf = Reader.GetBuffer();
+diff --git a/src/common/rendering/vulkan/renderer/vk_renderpass.cpp b/src/common/rendering/vulkan/renderer/vk_renderpass.cpp
+index 0ecf95b9f..8ae77f9e5 100644
+--- a/src/common/rendering/vulkan/renderer/vk_renderpass.cpp
++++ b/src/common/rendering/vulkan/renderer/vk_renderpass.cpp
+@@ -276,16 +276,25 @@ void VkRenderPassManager::SaveCacheWhenIdle()
+ 	if (VulkanDeviceWasLost)
+ 		return;
+ 	const uint64_t now = I_msTime();
+-	// The texture list goes to the card one second after the last new
+-	// picture (the write runs on the background writer): sessions are often
+-	// short, start, blow up the barrels, quit, and the list must survive that.
+-	if (mTexDirty && now - mLastTexMs >= 1000)
++	// The texture list goes to the card one second after the first new
++	// picture of a session (sessions are often short: start, blow up the
++	// barrels, quit), then at most every 20 seconds: every save rewrites and
++	// renames the file, and the SD card can stall for a long time on that,
++	// holding up reads by any thread (a 2.4 s frame on the Switch Lite).
++	if (mTexDirty && now - mLastTexMs >= 1000 && (mLastTexSaveMs == 0 || now - mLastTexSaveMs >= 20000))
+ 	{
+ 		mTexDirty = false;
+-		FString out;
++		mLastTexSaveMs = now;
++		std::string out;
++		out.reserve(mTexList.size() * 24);
++		char line[96];
+ 		for (auto &t : mTexList)
+-			out.AppendFormat("%d %d %s\n", t.UseType, t.ScaleFlags, t.Name.GetChars());
+-		RDoom_WriteFileAsync(WarmFilename("textures", "txt").GetChars(), out.GetChars(), out.Len());
++		{
++			int n = snprintf(line, sizeof(line), "%d %d %s\n", t.UseType, t.ScaleFlags, t.Name.GetChars());
++			if (n > 0)
++				out.append(line, min(n, (int)sizeof(line) - 1));
++		}
++		RDoom_WriteFileAsync(WarmFilename("textures", "txt").GetChars(), out.data(), out.size());
+ 		FString n;
+ 		n.Format("%d textures", (int)mTexList.size());
+ 		RDoom_SessionSet("vulkan_texture_list_saved", n.GetChars());
+diff --git a/src/common/rendering/vulkan/renderer/vk_renderpass.h b/src/common/rendering/vulkan/renderer/vk_renderpass.h
+index 34962ec22..e86595445 100644
+--- a/src/common/rendering/vulkan/renderer/vk_renderpass.h
++++ b/src/common/rendering/vulkan/renderer/vk_renderpass.h
+@@ -201,6 +201,7 @@ private:
+ 	std::vector<TextureUse> mTexList;
+ 	bool mTexLoaded = false, mTexDirty = false, mTexWarming = false;
+ 	uint64_t mLastTexMs = 0;
++	uint64_t mLastTexSaveMs = 0;	// 0 = not saved yet this session
+ 	void LoadTextureList();
+ 
+ 	VulkanRenderDevice* fb = nullptr;
+diff --git a/src/common/rendering/vulkan/system/vk_renderdevice.cpp b/src/common/rendering/vulkan/system/vk_renderdevice.cpp
+index ad4d6dd2f..5ddc78ba3 100644
+--- a/src/common/rendering/vulkan/system/vk_renderdevice.cpp
++++ b/src/common/rendering/vulkan/system/vk_renderdevice.cpp
+@@ -319,9 +319,10 @@ void VulkanRenderDevice::UpdateDynamicResolution()
+ 	// (1-2 ms per frame at 60% scale and 10 ms of GPU on the Switch Lite,
+ 	// which kept the scale at 60% for whole sessions). A scale that misses
+ 	// vsync right after a rise is not tried again for 20 seconds.
+-	const double frameMs = NXPerf_LastFrameMS();
+-	const double waitMs = nxperf.vkpending_ms;	// this frame's wait at BeginFrame
+ 	const double budget = 1000.0 / 60.0;
++	// a frame held back by the tic rate (menu, pause) says nothing about the GPU
++	const double frameMs = NXPerf_LastTicWaitMS() > 8.0 ? budget : NXPerf_LastFrameMS();
++	const double waitMs = nxperf.vkpending_ms;	// this frame's wait at BeginFrame
+ 	mDynFramesSinceRise++;
+ 	if (mDynCeilingFrames > 0 && --mDynCeilingFrames == 0)
+ 		mDynCeiling = 1.0f;
+-- 
+2.56.0
+

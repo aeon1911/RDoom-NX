@@ -1,0 +1,29 @@
+From 11e2fb5d33b94e5a88cafa8f5710ad9f44368b0a Mon Sep 17 00:00:00 2001
+From: Aeon <171243930+aeon1911@users.noreply.github.com>
+Date: Wed, 30 Sep 2026 18:09:46 -0300
+Subject: [PATCH 09/46] Restore attacks.zs byte-for-byte to UZDoom 5.0.3.
+
+The Project Brutality cleanup had left one blank line removed, so uzdoom.pk3
+was not built from exactly the upstream scripts.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01Fn3j1bfp175Wf4L7hzf5y6
+---
+ wadsrc/static/zscript/actors/attacks.zs | 1 +
+ 1 file changed, 1 insertion(+)
+
+diff --git a/wadsrc/static/zscript/actors/attacks.zs b/wadsrc/static/zscript/actors/attacks.zs
+index 9e0035434..055916faa 100644
+--- a/wadsrc/static/zscript/actors/attacks.zs
++++ b/wadsrc/static/zscript/actors/attacks.zs
+@@ -394,6 +394,7 @@ extend class Actor
+ 		{
+ 			return false, null;
+ 		}
++
+ 		// Don't spawn monsters if this actor has been massacred
+ 		if (DamageType == 'Massacre' && GetDefaultByType(missile).bIsMonster)
+ 		{
+-- 
+2.56.0
+

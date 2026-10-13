@@ -1,0 +1,170 @@
+From 4cd73d83c8e8d97aab57aa5f339d1500eaca81a2 Mon Sep 17 00:00:00 2001
+From: RDoom <171243930+aeon1911@users.noreply.github.com>
+Date: Sun, 11 Oct 2026 19:29:45 -0300
+Subject: [PATCH 25/46] Switch Vulkan: isolate the first-3D-draw hang (fans,
+ depth/stencil state), trace during wipes
+
+ZCULL is off with the transient depth buffers (no LOAD/STORE_ZCULL in the push
+dump any more) but the hardware still hangs on the first 3D draw, a 4-vertex
+triangle fan with depth and stencil in use. New automatic ladder after a lost
+GPU: 1 = fans as indexed triangles (rd_vk_nofans), 2 = + no depth/stencil
+writes, 3 = + no depth/stencil tests (rd_vk_zstate), 4 = trace mode; the draw
+log now starts at the first 3D draw, including the screen wipe into a level.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ src/common/platform/posix/nx/rdoom_nx.h       |  5 ++--
+ src/common/platform/posix/sdl/sdlglvideo.cpp  | 24 ++++++++---------
+ .../vulkan/renderer/vk_renderpass.cpp         | 12 +++++++++
+ .../vulkan/renderer/vk_renderstate.cpp        | 26 ++++++++++++++++++-
+ .../vulkan/system/vk_commandbuffer.cpp        |  3 ++-
+ 5 files changed, 53 insertions(+), 17 deletions(-)
+
+diff --git a/src/common/platform/posix/nx/rdoom_nx.h b/src/common/platform/posix/nx/rdoom_nx.h
+index 89d8b0ca2..1717f8fe5 100644
+--- a/src/common/platform/posix/nx/rdoom_nx.h
++++ b/src/common/platform/posix/nx/rdoom_nx.h
+@@ -26,8 +26,9 @@ int RDoom_ClearShaderCaches();
+ void RDoom_VulkanDeviceLost(const char *what);
+ 
+ // Automatic GPU workarounds: each session that follows a lost GPU moves one step
+-// further (0 = none, 1 = all driver workarounds + D32S8 depth, 2 = draw trace); the step is kept while it works and
++// further (0 = none, 1 = fans as triangles, 2 = + no depth/stencil writes,
++// 3 = + no depth/stencil tests, 4 = draw trace); the step is kept while it works and
+ // starts over with a new build. Applied by the video start-up (sdlglvideo.cpp).
+-#define RDOOM_GPU_STEPS 2
++#define RDOOM_GPU_STEPS 4
+ bool RDoom_PreviousSessionLostGpu();
+ int RDoom_GpuWorkaroundStep();
+diff --git a/src/common/platform/posix/sdl/sdlglvideo.cpp b/src/common/platform/posix/sdl/sdlglvideo.cpp
+index 9f278cb91..832497214 100644
+--- a/src/common/platform/posix/sdl/sdlglvideo.cpp
++++ b/src/common/platform/posix/sdl/sdlglvideo.cpp
+@@ -478,23 +478,21 @@ DFrameBuffer *SDLVideo::CreateFrameBuffer ()
+ 			if (FBaseCVar *cv = FindCVar(name, nullptr)) { UCVarValue v; v.String = value; cv->SetGenericRep(v, CVAR_String); }
+ 			applied.AppendFormat(" %s=%s", name, value);
+ 		};
+-		if (step == 1)
++		// one hypothesis per step for the hang on the first 3D draw (ZCULL is
++		// already off by default; driver workarounds did not help, 2026-10-11)
++		if (step >= 1 && step <= 3)
++			setcvar("rd_vk_nofans", "1");
++		if (step == 2)
++			setcvar("rd_vk_zstate", "1");
++		if (step == 3)
++			setcvar("rd_vk_zstate", "2");
++		if (step >= 4)
+ 		{
+-			// every driver-side workaround at once (one at a time did not help on
+-			// hardware, 2026-10-11) plus a D32S8 depth buffer
+-			setenv("NVK_DEBUG", "no_compression", 1);
+-			setenv("NVK_SWITCH_NO_UBO_CBUF", "1", 1);
+-			setenv("NVK_SWITCH_MAPPED_COMPLETION", "0", 1);
+-			applied += " NVK_DEBUG=no_compression NVK_SWITCH_NO_UBO_CBUF=1 NVK_SWITCH_MAPPED_COMPLETION=0";
+-			setcvar("rd_vk_depth32", "1");
+-		}
+-		else if (step >= 2)
+-		{
+-			// trace mode: every draw submitted and waited for, one log line per draw
++			// trace mode: every draw submitted and waited for, one log line per 3D draw
+ 			setenv("NVK_DEBUG", "push_sync", 1);
+ 			applied += " NVK_DEBUG=push_sync (trace mode)";
+ 			setcvar("vk_submit_size", "1");
+-			setcvar("rd_vk_drawlog", "2");
++			setcvar("rd_vk_drawlog", "1");
+ 			setcvar("rd_vk_frameoverlap", "0");
+ 		}
+ 		FString d;
+diff --git a/src/common/rendering/vulkan/renderer/vk_renderpass.cpp b/src/common/rendering/vulkan/renderer/vk_renderpass.cpp
+index 4fd851374..493624589 100644
+--- a/src/common/rendering/vulkan/renderer/vk_renderpass.cpp
++++ b/src/common/rendering/vulkan/renderer/vk_renderpass.cpp
+@@ -316,7 +316,19 @@ std::unique_ptr<VulkanPipeline> VkRenderPassSetup::CreatePipeline(const VkPipeli
+ 	static const VkCompareOp depthfunc2vk[] = { VK_COMPARE_OP_LESS, VK_COMPARE_OP_LESS_OR_EQUAL, VK_COMPARE_OP_ALWAYS };
+ 
+ 	builder.Topology(vktopology[key.DrawType]);
++#ifdef __SWITCH__
++	{
++		EXTERN_CVAR(Int, rd_vk_zstate)
++		if (rd_vk_zstate == 1)
++			builder.DepthStencilEnable(key.DepthTest, false, false);
++		else if (rd_vk_zstate >= 2)
++			builder.DepthStencilEnable(false, false, false);
++		else
++			builder.DepthStencilEnable(key.DepthTest, key.DepthWrite, key.StencilTest);
++	}
++#else
+ 	builder.DepthStencilEnable(key.DepthTest, key.DepthWrite, key.StencilTest);
++#endif
+ 	builder.DepthFunc(depthfunc2vk[key.DepthFunc]);
+ 	if (fb->device->EnabledFeatures.Features.depthClamp)
+ 		builder.DepthClampEnable(key.DepthClamp);
+diff --git a/src/common/rendering/vulkan/renderer/vk_renderstate.cpp b/src/common/rendering/vulkan/renderer/vk_renderstate.cpp
+index 3c7af8e9d..b11c9a8dc 100644
+--- a/src/common/rendering/vulkan/renderer/vk_renderstate.cpp
++++ b/src/common/rendering/vulkan/renderer/vk_renderstate.cpp
+@@ -60,15 +60,24 @@ void VkRenderState::ClearScreen()
+ // is submitted and waited for on its own; each recorded draw leaves a line in
+ // logs/boot.log first, so after a hang the last line names the draw that hung.
+ CVAR(Int, rd_vk_drawlog, 0, 0)
++// experiments for the GPU hang on the first 3D draw (hardware only):
++// rd_vk_nofans 1 = triangle fans drawn as indexed triangle lists
++// rd_vk_zstate 1 = no depth/stencil writes, 2 = no depth/stencil tests at all
++CVAR(Bool, rd_vk_nofans, false, 0)
++CVAR(Int, rd_vk_zstate, 0, 0)
++int rd_vk_drawlog_started = 0;
+ extern int nx_levelframes;
+ void RDoom_Crumb(const char *what);
+ 
+ static void LogDraw(const VkPipelineKey &key, FMaterial *mat, const char *kind, int index, int count)
+ {
+ 	static int logged;
+-	if (rd_vk_drawlog <= 0 || nx_levelframes < 1 || nx_levelframes > rd_vk_drawlog || logged >= 6000)
++	// 3D draws (depth or stencil in use), also during the screen wipe into a level
++	if (rd_vk_drawlog <= 0 || logged >= 3000 || (!key.DepthTest && !key.StencilTest && !logged))
+ 		return;
+ 	logged++;
++	extern int rd_vk_drawlog_started;
++	rd_vk_drawlog_started = 1;
+ 	char buf[220];
+ 	snprintf(buf, sizeof(buf), "draw %d (level frame %d): %s first %d count %d | vfmt %d effect %d special %d alphatest %d drawtype %d layers %d depth %d/%d stencil %d | %s",
+ 		logged, nx_levelframes, kind, index, count, key.VertexFormat, key.EffectState, key.SpecialEffect, key.AlphaTest, key.DrawType,
+@@ -83,6 +92,21 @@ static void LogDraw(const VkPipelineKey &key, FMaterial *mat, const char *kind,
+ 
+ void VkRenderState::Draw(int dt, int index, int count, bool apply)
+ {
++#ifdef __SWITCH__
++	if (rd_vk_nofans && dt == DT_TriangleFan && count >= 3 && count <= 999)
++	{
++		IIndexBuffer *oldIndexBuffer = mIndexBuffer;
++		mIndexBuffer = fb->GetBufferManager()->FanToTrisIndexBuffer.get();
++		if (apply || mNeedApply)
++			Apply(DT_Triangles);
++		else
++			ApplyVertexBuffers();
++		mCommandBuffer->drawIndexed((count - 2) * 3, 1, 0, index, 0);
++		mIndexBuffer = oldIndexBuffer;
++		RD_LOGDRAW("fan as triangles", index, count);
++		return;
++	}
++#endif
+ 	if (apply || mNeedApply)
+ 		Apply(dt);
+ 
+diff --git a/src/common/rendering/vulkan/system/vk_commandbuffer.cpp b/src/common/rendering/vulkan/system/vk_commandbuffer.cpp
+index cb2b503be..6c67c0175 100644
+--- a/src/common/rendering/vulkan/system/vk_commandbuffer.cpp
++++ b/src/common/rendering/vulkan/system/vk_commandbuffer.cpp
+@@ -175,7 +175,8 @@ void VkCommandBufferManager::FlushCommands(VulkanCommandBuffer** commands, size_
+ 		extern int nx_levelframes;
+ 		static int logged;
+ 		EXTERN_CVAR(Int, rd_vk_drawlog)
+-		if (rd_vk_drawlog > 0 && nx_levelframes >= 1 && nx_levelframes <= rd_vk_drawlog && logged < 6000)
++		extern int rd_vk_drawlog_started;
++		if (rd_vk_drawlog > 0 && rd_vk_drawlog_started && logged < 3000)
+ 		{
+ 			void RDoom_Crumb(const char *what);
+ 			char buf[96];
+-- 
+2.56.0
+

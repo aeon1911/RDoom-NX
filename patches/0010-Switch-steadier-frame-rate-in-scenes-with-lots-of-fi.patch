@@ -1,0 +1,1032 @@
+From 658e9ff3171d00ca4b37e341d4b7403a6cb0c0e0 Mon Sep 17 00:00:00 2001
+From: Aeon <171243930+aeon1911@users.noreply.github.com>
+Date: Wed, 30 Sep 2026 18:09:46 -0300
+Subject: [PATCH 10/46] Switch: steadier frame rate in scenes with lots of
+ fire, torches and effects.
+
+- Frame rate stabilizer (nx_stabilizer = target FPS): while frames miss the
+  target it trims only visual load step by step (fewer dynamic lights,
+  distant effects/particles, near-invisible effects, sprite shadow range,
+  dynamic light on sprites) and brings detail back slowly afterwards.
+- Dynamic light budget (nx_dynlight_max/nx_dynlight_dist): only the lights
+  nearest to the camera are used; the others fade out instead of popping.
+- Identical light data is not re-uploaded for every wall/flat (the driver
+  re-sends the whole constant buffer on each upload).
+- Mipmaps are built on the CPU: glGenerateMipmap goes through Mesa's blitter
+  with a full state save/restore per level, which made every new texture
+  cost milliseconds. Prefetched sprites now get their mipmaps at upload time
+  instead of from glGenerateMipmap in the middle of drawing.
+- SDL's threads (audio mixing for OpenAL) run on core 2 instead of competing
+  with the game thread on core 0 (from nx3.8).
+- perf.log: GL draw calls, dynamic lights used/total, light uploads skipped,
+  stabilizer level; FPS limiter sleep counts as waiting.
+- Version uz5.0.3-nx4.1.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01Fn3j1bfp175Wf4L7hzf5y6
+---
+ CMakeLists.txt                                |   2 +-
+ src/CMakeLists.txt                            |   2 +
+ src/common/engine/nx_governor.cpp             | 129 +++++++++++++++++
+ src/common/engine/nx_governor.h               |  18 +++
+ src/common/engine/nx_perf.cpp                 |  25 +++-
+ src/common/engine/nx_perf.h                   |   3 +
+ src/common/platform/posix/nx/nx_glthread.cpp  |  32 +++++
+ src/common/rendering/gles/gles_asynctex.cpp   |   4 +-
+ src/common/rendering/gles/gles_hwtexture.cpp  |  63 +++++++-
+ .../rendering/gles/gles_renderstate.cpp       |  14 +-
+ src/common/rendering/gles/gles_shader.h       |   4 +
+ src/common/rendering/v_framebuffer.cpp        |   2 +
+ src/playsim/a_dynlight.h                      |   5 +
+ src/rendering/hwrenderer/hw_dynlightdata.cpp  |   5 +-
+ src/rendering/hwrenderer/hw_entrypoint.cpp    |   4 +
+ src/rendering/hwrenderer/hw_nxlights.cpp      | 135 ++++++++++++++++++
+ src/rendering/hwrenderer/hw_nxlights.h        |  22 +++
+ src/rendering/hwrenderer/scene/hw_bsp.cpp     |  22 ++-
+ src/rendering/hwrenderer/scene/hw_flats.cpp   |   3 +-
+ .../hwrenderer/scene/hw_renderhacks.cpp       |   3 +-
+ .../hwrenderer/scene/hw_spritelight.cpp       |  14 +-
+ src/rendering/hwrenderer/scene/hw_sprites.cpp |   5 +-
+ src/rendering/hwrenderer/scene/hw_walls.cpp   |   5 +-
+ 23 files changed, 491 insertions(+), 30 deletions(-)
+ create mode 100644 src/common/engine/nx_governor.cpp
+ create mode 100644 src/common/engine/nx_governor.h
+ create mode 100644 src/rendering/hwrenderer/hw_nxlights.cpp
+ create mode 100644 src/rendering/hwrenderer/hw_nxlights.h
+
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index 098422dcb..dcc19933b 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -73,7 +73,7 @@ if( NINTENDO_SWITCH )
+ 	# unless we just do this
+ 	set( CMAKE_CXX_EXTENSIONS ON )
+ 	# used in both gzdoom and launcher
+-	set( SWITCH_APP_VERSION "uz5.0.3-general" )
++	set( SWITCH_APP_VERSION "uz5.0.3-nx4.1" )
+ endif()
+ 
+ # Recursive function to place PK3 archive source files into a hierarchy of source file in the IDE
+diff --git a/src/CMakeLists.txt b/src/CMakeLists.txt
+index 678f39059..575294f76 100644
+--- a/src/CMakeLists.txt
++++ b/src/CMakeLists.txt
+@@ -734,6 +734,7 @@ set( FASTMATH_SOURCES
+ 	common/textures/hires/xbr/xbrz_old.cpp
+ 	common/rendering/gl_load/gl_load.c
+ 	rendering/hwrenderer/hw_dynlightdata.cpp
++	rendering/hwrenderer/hw_nxlights.cpp
+ 	rendering/hwrenderer/scene/hw_bsp.cpp
+ 	rendering/hwrenderer/scene/hw_fakeflat.cpp
+ 	rendering/hwrenderer/scene/hw_decal.cpp
+@@ -1139,6 +1140,7 @@ set (PCH_SOURCES
+ 	common/thirdparty/libsmackerdec/src/SmackerDecoder.cpp
+ 	common/engine/cycler.cpp
+ 	common/engine/nx_perf.cpp
++	common/engine/nx_governor.cpp
+ 	common/engine/nx_jobs.cpp
+ 	rendering/hwrenderer/hw_nxprefetch.cpp
+ 	common/engine/d_event.cpp
+diff --git a/src/common/engine/nx_governor.cpp b/src/common/engine/nx_governor.cpp
+new file mode 100644
+index 000000000..259f6aa10
+--- /dev/null
++++ b/src/common/engine/nx_governor.cpp
+@@ -0,0 +1,129 @@
++//==========================================================================
++//
++// Frame rate stabilizer (Switch port)
++//
++// The Switch's CPU runs out of time in scenes with lots of fire, torches,
++// effects or monsters: the game logic and the GL driver's per-draw work
++// grow with the number of lights and sprites on screen. Instead of letting
++// the frame rate drop, this watches the frame times and, while frames miss
++// the target (nx_stabilizer = target FPS, 0 = off), trims the purely visual
++// load step by step:
++//   - fewer dynamic lights (the nearest ones stay, the others fade out),
++//   - effects/decorations far away are not drawn (monsters, projectiles,
++//     pickups and everything that can be shot are always drawn),
++//   - almost invisible effects are not drawn,
++//   - sprite shadows reach less far.
++// Nothing that affects the game (actors, collisions, damage, scripts) is
++// changed. When there is time to spare again, detail comes back slowly.
++//
++//==========================================================================
++
++#include "nx_governor.h"
++#include "c_cvars.h"
++#include "printf.h"
++#include <algorithm>
++#include <math.h>
++
++CVAR(Int, nx_stabilizer, 0, CVAR_GLOBALCONFIG)	// target FPS, 0 = off
++CVAR(Bool, nx_stabilizer_debug, false, 0)
++
++int nxGovLevel = 0;
++
++static double hist[8];
++static int nhist = 0, histpos = 0;
++static int hold = 0;			// frames before the next change
++static int good = 0;			// frames in a row with plenty of time to spare
++static int lowerDelay = 105;	// good frames needed before detail comes back (grows when it had to go down again right away)
++static int sinceRaise = 0;
++static int sinceLower = 1000;
++
++static const int	lightMaxT[NXGOV_MAXLEVEL + 1] = { 0, 24, 16, 10, 6, 4, 2 };
++static const double	lightDistT[NXGOV_MAXLEVEL + 1] = { 0, 3000, 2400, 1800, 1400, 1000, 700 };
++static const double	cullT[NXGOV_MAXLEVEL + 1] = { 0, 4000, 3000, 2200, 1600, 1200, 900 };
++static const double	minAlphaT[NXGOV_MAXLEVEL + 1] = { 0, 0.03, 0.05, 0.07, 0.09, 0.12, 0.15 };
++static const double	shadowT[NXGOV_MAXLEVEL + 1] = { 1, 1, 0.75, 0.5, 0.35, 0.2, 0 };
++
++// "0 = no limit" values: the stricter of both
++template<class T> static T Tighter(T preset, T table)
++{
++	if (preset <= 0) return table;
++	if (table <= 0) return preset;
++	return std::min(preset, table);
++}
++
++int NXGov_LightMax(int preset) { return Tighter(preset, lightMaxT[nxGovLevel]); }
++double NXGov_LightDist(double preset) { return Tighter(preset, lightDistT[nxGovLevel]); }
++double NXGov_EffectCull(double preset) { return Tighter(preset, cullT[nxGovLevel]); }
++double NXGov_MinAlpha(double preset) { return std::max(preset, minAlphaT[nxGovLevel]); }
++double NXGov_ShadowDist(double preset) { return preset * shadowT[nxGovLevel]; }
++
++static void SetLevel(int level, const char *why, double value)
++{
++	if (level == nxGovLevel) return;
++	if (nx_stabilizer_debug) Printf("stabilizer: level %d -> %d (%s %.1f ms)\n", nxGovLevel, level, why, value);
++	nxGovLevel = level;
++}
++
++void NXGovernor_Frame(double frame_ms, double waits_ms, bool inlevel)
++{
++	const int fps = nx_stabilizer;
++	if (fps <= 0)
++	{
++		nxGovLevel = 0;
++		nhist = 0;
++		return;
++	}
++	if (!inlevel || frame_ms <= 0 || frame_ms > 1000)
++	{
++		// menus, loading, wipes: no decisions, start over afterwards
++		nhist = 0;
++		good = 0;
++		hold = std::max(hold, 10);
++		return;
++	}
++	const double target = 1000.0 / fps;
++
++	hist[histpos] = frame_ms;
++	histpos = (histpos + 1) & 7;
++	if (nhist < 8) nhist++;
++	if (hold > 0) hold--;
++	sinceRaise++;
++	sinceLower++;
++	if (sinceRaise > 900) lowerDelay = 105;	// calm for ~30 s: back to the normal pace
++
++	if (nhist >= 6 && hold == 0 && nxGovLevel < NXGOV_MAXLEVEL)
++	{
++		// sustained: the median of the last 6 frames misses the target
++		double last6[6];
++		for (int i = 0; i < 6; i++) last6[i] = hist[(histpos + 7 - i) & 7];
++		std::nth_element(last6, last6 + 3, last6 + 6);
++		double median = last6[3];
++		// or at least 2 of the last 4 frames were clearly late
++		int late = 0;
++		for (int i = 0; i < 4; i++) if (hist[(histpos + 7 - i) & 7] > target * 1.35) late++;
++
++		if (median > target * 1.10 || late >= 2)
++		{
++			// detail came back only a moment ago and it's too much again: wait longer next time
++			if (sinceLower < 60) lowerDelay = std::min(lowerDelay * 2, 600);
++			SetLevel(nxGovLevel + 1, late >= 2 ? "late frames" : "median", median);
++			hold = 6;	// give the change a few frames to show
++			good = 0;
++			sinceRaise = 0;
++			return;
++		}
++	}
++
++	// plenty of time to spare (the frame was on time and less than ~2/3 of it was actual work)
++	double work = frame_ms - waits_ms;
++	if (frame_ms <= target * 1.03 && work <= target * 0.62) good++;
++	else good = 0;
++
++	if (good >= lowerDelay && nxGovLevel > 0 && hold == 0)
++	{
++		SetLevel(nxGovLevel - 1, "spare time", work);
++		good = 0;
++		sinceLower = 0;
++		hold = 30;
++	}
++}
+diff --git a/src/common/engine/nx_governor.h b/src/common/engine/nx_governor.h
+new file mode 100644
+index 000000000..346c83323
+--- /dev/null
++++ b/src/common/engine/nx_governor.h
+@@ -0,0 +1,18 @@
++#pragma once
++// Switch port: frame rate stabilizer (see nx_governor.cpp)
++
++// 0 = full detail. Each level trims a little more of the purely visual load
++// (dynamic lights, distant effects, sprite shadows) while the frame rate is
++// below its target.
++extern int nxGovLevel;
++constexpr int NXGOV_MAXLEVEL = 6;
++
++// called once per frame by the frame profiler with the frame's timings
++void NXGovernor_Frame(double frame_ms, double waits_ms, bool inlevel);
++
++// effective limits for the current level combined with the user's settings (0 = no limit)
++int NXGov_LightMax(int preset);
++double NXGov_LightDist(double preset);
++double NXGov_EffectCull(double preset);
++double NXGov_MinAlpha(double preset);
++double NXGov_ShadowDist(double preset);
+diff --git a/src/common/engine/nx_perf.cpp b/src/common/engine/nx_perf.cpp
+index e3295cb0c..9394148f5 100644
+--- a/src/common/engine/nx_perf.cpp
++++ b/src/common/engine/nx_perf.cpp
+@@ -5,6 +5,7 @@
+ ** SPDX-License-Identifier: GPL-3.0-or-later
+ */
+ 
++#include "nx_governor.h"
+ #include <stdio.h>
+ #include <time.h>
+ #include "nx_perf.h"
+@@ -37,7 +38,7 @@ void (*NXPerf_SummaryHook)(FILE *f) = nullptr;
+ static struct
+ {
+ 	double tic, think, display, swap, sndupd, sndstart, tex, scene, bsp, hud, update, gpuwait, frame, gc, wait, net, input, music, client, glsync, glfinish, draw2d, frameend, present;
+-	int tics, thinkers, sndstarts, drawitems, transitems, glsyncs, spriteskips;
++	int tics, thinkers, sndstarts, drawitems, transitems, glsyncs, spriteskips, draws, lightuploads, lightskips, dynlights, dynlightsall, govlevel;
+ } win;
+ 
+ #ifdef __SWITCH__
+@@ -64,7 +65,7 @@ static void WriteSettings(FILE *f)
+ 		"vid_vsync", "vid_maxfps", "cl_capfps", "vid_scalefactor", "nx_effect_cull", "nx_effect_minalpha", "r_actorspriteshadowdist", "vid_preferbackend", "gl_multithread", "r_dynlights", "gles_max_lights_per_surface",
+ 		"r_actorspriteshadow", "gl_texture_filter", "gl_texture_filter_anisotropic", "r_maxparticles", "cl_maxdecals",
+ 		"snd_channels", "snd_efx", "snd_samplerate", "gles_async_textures", "snd_asyncload", "nx_workers",
+-		"gl_sort_textures", "nx_glthread", "nx_glthread_core", "nx_swapinterval", "r_ticstability", "nx_lateswap", nullptr };
++		"gl_sort_textures", "nx_dynlight_max", "nx_dynlight_dist", "nx_stabilizer", "nx_glthread", "nx_glthread_core", "nx_swapinterval", "r_ticstability", "nx_lateswap", nullptr };
+ 	fprintf(f, "# settings:");
+ 	for (int i = 0; names[i]; i++)
+ 	{
+@@ -93,6 +94,11 @@ void NXPerf_EndFrame()
+ 	lastMisses = misses;
+ 	lastBytes = bytes;
+ 
++	{
++		extern int nx_levelframes;
++		NXGovernor_Frame(frame, nxperf.swap_ms + nxperf.gpuwait_ms + nxperf.wait_ms, nx_levelframes > 3);
++	}
++
+ 	if (nx_perflog > 0 && linesWritten < 3000)
+ 	{
+ 		win.tic += nxperf.tic_ms;
+@@ -126,6 +132,12 @@ void NXPerf_EndFrame()
+ 		win.draw2d += nxperf.draw2d_ms;
+ 		win.present += nxperf.present_ms;
+ 		win.frameend += nxperf.frameend_ms;
++		win.draws += nxperf.draws;
++		win.lightuploads += nxperf.lightuploads;
++		win.lightskips += nxperf.lightskips;
++		win.dynlights += nxperf.dynlights;
++		win.dynlightsall += nxperf.dynlightsall;
++		win.govlevel += nxGovLevel;
+ 		frames++;
+ 		sumFrame += frame;
+ 		if (frame > maxFrame) maxFrame = frame;
+@@ -138,18 +150,19 @@ void NXPerf_EndFrame()
+ 				if (perfFile)
+ 				{
+ 					WriteSettings(perfFile);
+-					fprintf(perfFile, "# time(s) frame(ms) | tics tic(ms) think(ms) | display(ms): scene bsp hud update gpuwait swap | items transl | shaders n/ms | textures n/ms/kpix | sounds n/ms | sndupdate(ms) sndstart n/ms | io misses/KB | async tex up/wait/budget/pre snd\n");
++					fprintf(perfFile, "# time(s) frame(ms) | tics tic(ms) think(ms) | display(ms): scene bsp hud update gpuwait swap | items transl | shaders n/ms | textures n/ms/kpix | sounds n/ms | sndupdate(ms) sndstart n/ms | io misses/KB | async tex up/wait/budget/pre snd | draws | lights used/all up/same | stab\n");
+ 				}
+ 			}
+ 			if (perfFile)
+ 			{
+-				fprintf(perfFile, "%8.2f %7.1f | %d %7.1f %6.1f | %7.1f: %5.1f %5.1f %5.1f %5.1f %5.1f %4.1f | %d %d | %d/%.1f | %d/%.1f/%lld | %d/%.1f | %.1f %d/%.1f | %llu/%llu | %d/%d/%d/%d %d\n",
++				fprintf(perfFile, "%8.2f %7.1f | %d %7.1f %6.1f | %7.1f: %5.1f %5.1f %5.1f %5.1f %5.1f %4.1f | %d %d | %d/%.1f | %d/%.1f/%lld | %d/%.1f | %.1f %d/%.1f | %llu/%llu | %d/%d/%d/%d %d | %d | %d/%d %d/%d | %d\n",
+ 					(now - startTime) / 1000.0, frame, nxperf.tics, nxperf.tic_ms, nxperf.think_ms, nxperf.display_ms,
+ 					nxperf.scene_ms, nxperf.bsp_ms, nxperf.hud_ms, nxperf.update_ms, nxperf.gpuwait_ms, nxperf.swap_ms, nxperf.drawitems, nxperf.transitems,
+ 					nxperf.shaders, nxperf.shader_ms, nxperf.textures, nxperf.tex_ms, (long long)(nxperf.texpixels / 1000),
+ 					nxperf.sounds, nxperf.sound_ms, nxperf.sndupd_ms, nxperf.sndstarts, nxperf.sndstart_ms,
+ 					(unsigned long long)dmiss, (unsigned long long)(dbytes >> 10),
+-					nxperf.tex_async, nxperf.tex_wait, nxperf.tex_budget, nxperf.tex_preupload, nxperf.snd_async);
++					nxperf.tex_async, nxperf.tex_wait, nxperf.tex_budget, nxperf.tex_preupload, nxperf.snd_async,
++					nxperf.draws, nxperf.dynlights, nxperf.dynlightsall, nxperf.lightuploads, nxperf.lightskips, nxGovLevel);
+ 				linesWritten++;
+ 			}
+ 		}
+@@ -171,6 +184,8 @@ void NXPerf_EndFrame()
+ 				fprintf(perfFile, "#   per tic: %.1f ms, %d thinkers | draw items per frame %d (%d translucent) | sound starts/s %.0f | sprites waiting for their picture per frame %.1f\n",
+ 					win.tics ? win.tic / win.tics : 0.0, win.tics ? win.thinkers / win.tics : 0, win.drawitems / frames, win.transitems / frames,
+ 					win.sndstarts * 1000.0 / (sumFrame > 0 ? sumFrame : 1), win.spriteskips / n);
++				fprintf(perfFile, "#   GL draw calls per frame %.0f | dynamic lights per frame: %.1f used of %.1f | light uploads %.0f, identical skipped %.0f | stabilizer level avg %.2f (now %d)\n",
++					win.draws / n, win.dynlights / n, win.dynlightsall / n, win.lightuploads / n, win.lightskips / n, win.govlevel / n, nxGovLevel);
+ 			}
+ 			NXGLThreadStats(perfFile);
+ 			if (NXPerf_SummaryHook) NXPerf_SummaryHook(perfFile);
+diff --git a/src/common/engine/nx_perf.h b/src/common/engine/nx_perf.h
+index 4631ba04a..0d1d360f5 100644
+--- a/src/common/engine/nx_perf.h
++++ b/src/common/engine/nx_perf.h
+@@ -33,6 +33,9 @@ struct NXPerfCounters
+ 	int thinkers = 0;		// thinkers ticked (summed over the frame's tics)
+ 	int tex_async = 0, tex_wait = 0, tex_budget = 0, snd_async = 0, tex_preupload = 0;
+ 	int64_t texpixels = 0;
++	int draws = 0;				// GL draw calls of the 3D scene and 2D
++	int lightuploads = 0, lightskips = 0;	// dynamic light data uploaded / skipped because it was the same as the last one
++	int dynlights = 0, dynlightsall = 0;	// dynamic lights allowed this frame / active in the level
+ };
+ 
+ extern NXPerfCounters nxperf;
+diff --git a/src/common/platform/posix/nx/nx_glthread.cpp b/src/common/platform/posix/nx/nx_glthread.cpp
+index f14402c0a..653e022f3 100644
+--- a/src/common/platform/posix/nx/nx_glthread.cpp
++++ b/src/common/platform/posix/nx/nx_glthread.cpp
+@@ -15,6 +15,7 @@
+ #include <switch.h>
+ #include <pthread.h>
+ #include <string.h>
++#include <stdlib.h>
+ #include <stdio.h>
+ #include <stdint.h>
+ #include <stdarg.h>
+@@ -60,8 +61,39 @@ template<class T> static T &At(void *base, size_t off) { return *(T *)((char *)b
+ 
+ // The driver thread is created with the default (small) pthread stack; Mesa
+ // compiles shaders on it, so give it a large one.
++// SDL's own threads (the audio thread, which also runs OpenAL's mixer) are
++// created by libnx on core 0 with the lowest priority: there they can only mix
++// sound while the game's thread waits, and whenever the game needs the audio
++// lock that the preempted mixer holds, the game has to wait for it. They go to
++// core 2 instead (above the asset worker), away from the game.
++CVAR(Bool, nx_audio_core2, true, CVAR_ARCHIVE | CVAR_GLOBALCONFIG)
++extern "C" int SDL_SYS_CreateThread(void *thread);
++struct NXThreadStart { void *(*fn)(void *); void *arg; };
++static void *NXSDLThreadEntry(void *p)
++{
++	NXThreadStart t = *(NXThreadStart *)p;
++	free(p);
++	svcSetThreadCoreMask(CUR_THREAD_HANDLE, 2, 1ULL << 2);
++	svcSetThreadPriority(CUR_THREAD_HANDLE, 0x2D);
++	return t.fn(t.arg);
++}
++
+ extern "C" int __wrap_pthread_create(pthread_t *thread, const pthread_attr_t *attr, void *(*fn)(void *), void *arg)
+ {
++	uintptr_t ra = (uintptr_t)__builtin_return_address(0);
++	uintptr_t sdl = (uintptr_t)&SDL_SYS_CreateThread;
++	if (nx_audio_core2 && ra >= sdl && ra < sdl + 0x100)
++	{
++		auto t = (NXThreadStart *)malloc(sizeof(NXThreadStart));
++		if (t)
++		{
++			t->fn = fn;
++			t->arg = arg;
++			int r = __real_pthread_create(thread, attr, NXSDLThreadEntry, t);
++			if (r != 0) free(t);
++			return r;
++		}
++	}
+ 	if (gCreatingThread && attr == nullptr)
+ 	{
+ 		pthread_attr_t big;
+diff --git a/src/common/rendering/gles/gles_asynctex.cpp b/src/common/rendering/gles/gles_asynctex.cpp
+index a97cb7507..a09cd4bd3 100644
+--- a/src/common/rendering/gles/gles_asynctex.cpp
++++ b/src/common/rendering/gles/gles_asynctex.cpp
+@@ -272,7 +272,9 @@ static void PreUpload()
+ 		auto hw = static_cast<FHardwareTexture *>(mat->GetLayer(layerindex, 0, &layer));
+ 		if (hw == nullptr || hw->GetTextureHandle() != 0 || layer->layerTexture != key.tex || (layer->scaleFlags | CTF_ProcessData) != key.flags) continue;
+ 		preuploading = true;
+-		hw->BindOrCreate(key.tex, 0, CLAMP_XY_NOMIP, 0, layer->scaleFlags);
++		// with mipmaps (built on the CPU): world sprites need them, and a texture created without
++		// them would get them from glGenerateMipmap in the middle of drawing (slow on the Switch)
++		hw->BindOrCreate(key.tex, 0, CLAMP_XY, 0, layer->scaleFlags);
+ 		preuploading = false;
+ 		count++;
+ 	}
+diff --git a/src/common/rendering/gles/gles_hwtexture.cpp b/src/common/rendering/gles/gles_hwtexture.cpp
+index c46a9693e..fe07fe82c 100644
+--- a/src/common/rendering/gles/gles_hwtexture.cpp
++++ b/src/common/rendering/gles/gles_hwtexture.cpp
+@@ -58,6 +58,60 @@ TexFilter_s TexFilter[] = {
+ //===========================================================================
+ unsigned int FHardwareTexture::lastbound[FHardwareTexture::MAX_TEXTURES];
+ 
++//===========================================================================
++//
++// Switch port: mipmaps are built on the CPU and uploaded level by level.
++//
++// glGenerateMipmap goes through Mesa's blitter on the Switch: one draw per
++// mip level with a full save/restore of the GL state around it, and the next
++// real draw has to revalidate everything. That made every new texture cost
++// milliseconds (even tiny ones), which showed up as hitches whenever new
++// sprites appeared (fire, explosions, monsters). A 2x2 box filter on the CPU
++// costs a few microseconds for a sprite.
++//
++//===========================================================================
++
++CVAR(Bool, gles_cpu_mipmaps, true, CVAR_GLOBALCONFIG)
++
++static void NXDownsample(const unsigned char *src, int sw, int sh, unsigned char *dst, int dw, int dh, int bpp)
++{
++	// 2x2 box filter (1x2 or 2x1 once one side is down to 1 pixel)
++	const int sx = sw > 1 ? 2 : 1, sy = sh > 1 ? 2 : 1;
++	const size_t srow = size_t(sw) * bpp;
++	for (int y = 0; y < dh; y++)
++	{
++		const unsigned char *r0 = src + size_t(y * sy) * srow;
++		const unsigned char *r1 = sy == 2 ? r0 + srow : r0;
++		unsigned char *d = dst + size_t(y) * dw * bpp;
++		for (int x = 0; x < dw; x++)
++		{
++			const unsigned char *a = r0 + size_t(x * sx) * bpp, *b = a + (sx - 1) * bpp;
++			const unsigned char *c = r1 + size_t(x * sx) * bpp, *e = c + (sx - 1) * bpp;
++			for (int i = 0; i < bpp; i++) d[i] = (unsigned char)((a[i] + b[i] + c[i] + e[i] + 2) >> 2);
++			d += bpp;
++		}
++	}
++}
++
++static void NXUploadMipmaps(const unsigned char *level0, int w, int h, int bpp, int texformat, int sourcetype)
++{
++	TArray<unsigned char> bufA, bufB;
++	const unsigned char *src = level0;
++	int level = 0;
++	while (w > 1 || h > 1)
++	{
++		int nw = w > 1 ? w / 2 : 1, nh = h > 1 ? h / 2 : 1;
++		TArray<unsigned char> &dst = (level & 1) ? bufB : bufA;
++		dst.Resize(unsigned(nw) * nh * bpp);
++		NXDownsample(src, w, h, dst.Data(), nw, nh, bpp);
++		level++;
++		glTexImage2D(GL_TEXTURE_2D, level, texformat, nw, nh, 0, sourcetype, GL_UNSIGNED_BYTE, dst.Data());
++		src = dst.Data();
++		w = nw;
++		h = nh;
++	}
++}
++
+ //===========================================================================
+ //
+ //	Loads the texture image into the hardware
+@@ -165,14 +219,17 @@ unsigned int FHardwareTexture::CreateTexture(unsigned char * buffer, int w, int
+ 		}
+ 	}
+ 
+-	if (deletebuffer && buffer) free(buffer);
+-
+ 	if (mipmap && TexFilter[gl_texture_filter].mipmapping)
+ 	{
+-		glGenerateMipmap(GL_TEXTURE_2D);
++		if (gles_cpu_mipmaps && buffer && (glTextureBytes == 1 || glTextureBytes == 4))
++			NXUploadMipmaps(buffer, rw, rh, glTextureBytes, texformat, sourcetype);
++		else
++			glGenerateMipmap(GL_TEXTURE_2D);
+ 		mipmapped = true;
+ 	}
+ 
++	if (deletebuffer && buffer) free(buffer);
++
+ 	if (texunit > 0) glActiveTexture(GL_TEXTURE0);
+ 	else if (texunit == -1) glBindTexture(GL_TEXTURE_2D, textureBinding);
+ 	return glTexID;
+diff --git a/src/common/rendering/gles/gles_renderstate.cpp b/src/common/rendering/gles/gles_renderstate.cpp
+index 5d5a058ff..04b3b9679 100644
+--- a/src/common/rendering/gles/gles_renderstate.cpp
++++ b/src/common/rendering/gles/gles_renderstate.cpp
+@@ -31,6 +31,7 @@
+ #include "gles_samplers.h"
+ 
+ #include "hw_clock.h"
++#include "nx_perf.h"
+ #include "printf.h"
+ 
+ #include "hwrenderer/data/hw_viewpointbuffer.h"
+@@ -365,7 +366,16 @@ bool FGLRenderState::ApplyShader()
+ 		if (totalVectors > (int)gles.numlightvectors)
+ 			totalVectors = gles.numlightvectors;
+ 
+-		glUniform4fv(activeShader->cur->lights_index, totalVectors, lightPtr);
++		auto &last = activeShader->cur->nxLastLights;
++		const unsigned nfloats = unsigned(totalVectors) * 4;
++		if (last.Size() != nfloats || memcmp(last.Data(), lightPtr, nfloats * sizeof(float)))
++		{
++			glUniform4fv(activeShader->cur->lights_index, totalVectors, lightPtr);
++			last.Resize(nfloats);
++			if (nfloats) memcpy(last.Data(), lightPtr, nfloats * sizeof(float));
++			nxperf.lightuploads++;
++		}
++		else nxperf.lightskips++;
+ 
+ 		int range[4] = { 0,
+ 			modLights * LIGHT_VEC4_NUM,
+@@ -588,6 +598,7 @@ void FGLRenderState::Draw(int dt, int index, int count, bool apply)
+ 			Apply();
+ 		}
+ 	drawcalls.Clock();
++	nxperf.draws++;
+ 	glDrawArrays(dt2gl[dt], index, count);
+ 	drawcalls.Unclock();
+ }
+@@ -599,6 +610,7 @@ void FGLRenderState::DrawIndexed(int dt, int index, int count, bool apply)
+ 		Apply();
+ 	}
+ 	drawcalls.Clock();
++	nxperf.draws++;
+ 	glDrawElements(dt2gl[dt], count, GL_UNSIGNED_INT, (void*)(intptr_t)(index * sizeof(uint32_t)));
+ 	drawcalls.Unclock();
+ }
+diff --git a/src/common/rendering/gles/gles_shader.h b/src/common/rendering/gles/gles_shader.h
+index 32d3a0b67..696d4cbcb 100644
+--- a/src/common/rendering/gles/gles_shader.h
++++ b/src/common/rendering/gles/gles_shader.h
+@@ -355,6 +355,10 @@ public: class ShaderVariantData
+ 
+ 
+ 		int lights_index = 0;
++		// Switch port: copy of the light data last uploaded to this program. Neighbouring
++		// walls and flats lit by the same torches get byte-identical light data; skipping the
++		// upload then saves the driver a full re-upload of the shader's constant buffer.
++		TArray<float> nxLastLights;
+ 		int bones_index = 0;
+ 		int modelmatrix_index = 0;
+ 		int normalmodelmatrix_index = 0;
+diff --git a/src/common/rendering/v_framebuffer.cpp b/src/common/rendering/v_framebuffer.cpp
+index 8836bf561..2a5117d04 100644
+--- a/src/common/rendering/v_framebuffer.cpp
++++ b/src/common/rendering/v_framebuffer.cpp
+@@ -22,6 +22,7 @@
+ **
+ */
+ 
++#include "nx_perf.h"
+ #include <stdio.h>
+ 
+ 
+@@ -248,6 +249,7 @@ void DFrameBuffer::FPSLimit()
+ 	if (vid_maxfps <= 0 || cl_capfps)
+ 		return;
+ 
++	NXPERF_SCOPE(wait_ms, nullptr);	// Switch port: time spent here is waiting, not work (frame rate stabilizer)
+ 	uint64_t targetWakeTime = fpsLimitTime + 1'000'000 / vid_maxfps;
+ 
+ 	while (true)
+diff --git a/src/playsim/a_dynlight.h b/src/playsim/a_dynlight.h
+index f6eccb447..b9e24833a 100644
+--- a/src/playsim/a_dynlight.h
++++ b/src/playsim/a_dynlight.h
+@@ -307,4 +307,9 @@ public:
+ 	double lightDefIntensity;
+ 
+ 	FDynamicLightTouchLists touchlists;
++
++	// Switch port: dynamic light budget (hw_nxlights.cpp); zeroed when the light is created
++	int nxFrame;	// frame in which the light may be drawn
++	float nxFade;	// brightness multiplier (fading in/out)
++	bool nxCut;		// left out by the light count (fades back in)
+ };
+diff --git a/src/rendering/hwrenderer/hw_dynlightdata.cpp b/src/rendering/hwrenderer/hw_dynlightdata.cpp
+index badd47186..5b46857a8 100644
+--- a/src/rendering/hwrenderer/hw_dynlightdata.cpp
++++ b/src/rendering/hwrenderer/hw_dynlightdata.cpp
+@@ -18,6 +18,7 @@
+ #include "actorinlines.h"
+ #include "a_dynlight.h"
+ #include "hw_dynlightdata.h"
++#include "hw_nxlights.h"
+ #include"hw_cvars.h"
+ #include "v_video.h"
+ #include "hwrenderer/scene/hw_drawstructs.h"
+@@ -85,8 +86,8 @@ void AddLightToList(FDynLightData &dld, int group, FDynamicLight * light, bool f
+ 	if (light->target && (light->target->renderflags2 & RF2_LIGHTMULTALPHA))
+ 		cs *= (float)light->target->Alpha;
+ 
+-	// Multiply intensity from GLDEFS
+-	cs *= (float)light->GetLightDefIntensity();
++	// Multiply intensity from GLDEFS (and the Switch port's light budget fade)
++	cs *= (float)light->GetLightDefIntensity() * NXLightFade(light);
+ 
+ 	float r = light->GetRed() / 255.0f * cs;
+ 	float g = light->GetGreen() / 255.0f * cs;
+diff --git a/src/rendering/hwrenderer/hw_entrypoint.cpp b/src/rendering/hwrenderer/hw_entrypoint.cpp
+index 963f605c9..08ef23f43 100644
+--- a/src/rendering/hwrenderer/hw_entrypoint.cpp
++++ b/src/rendering/hwrenderer/hw_entrypoint.cpp
+@@ -55,6 +55,7 @@ void CleanSWDrawer()
+ 
+ #include "g_levellocals.h"
+ #include "a_dynlight.h"
++#include "hw_nxlights.h"
+ 
+ 
+ void CollectLights(FLevelLocals* Level)
+@@ -100,6 +101,9 @@ sector_t* RenderViewpoint(FRenderViewpoint& mainvp, AActor* camera, IntRect* bou
+ 
+ 	R_SetupFrame(mainvp, r_viewwindow, camera);
+ 
++	// Switch port: pick the dynamic lights that may be drawn this frame (nx_dynlight_max/dist)
++	if (mainview && camera->Level->HasDynamicLights) NXLights_Select(camera->Level, mainvp.Pos);
++
+ 	if (mainview && toscreen && !(camera->Level->flags3 & LEVEL3_NOSHADOWMAP) && camera->Level->HasDynamicLights && gl_light_shadowmap && screen->allowSSBO() && (screen->hwcaps & RFL_SHADER_STORAGE_BUFFER))
+ 	{
+ 		screen->SetAABBTree(camera->Level->aabbTree);
+diff --git a/src/rendering/hwrenderer/hw_nxlights.cpp b/src/rendering/hwrenderer/hw_nxlights.cpp
+new file mode 100644
+index 000000000..9842edc64
+--- /dev/null
++++ b/src/rendering/hwrenderer/hw_nxlights.cpp
+@@ -0,0 +1,135 @@
++//==========================================================================
++//
++// Dynamic light budget (Switch port)
++//
++// Every dynamic light (torches, candles, fire, fireballs, muzzle flashes...)
++// costs CPU time on every wall, flat and sprite it touches: the light data is
++// gathered and uploaded for each draw call, and the GL driver's per-draw work
++// grows with it. In maps and mods with lots of fire this dominated the frame
++// on the Switch's CPU.
++//
++// Once per frame only the lights nearest to the camera are kept (at most
++// nx_dynlight_max of them, none further than nx_dynlight_dist map units from
++// the camera). Lights entering or leaving the set fade in and out over a
++// fraction of a second, and lights close to the distance limit are dimmed
++// gradually, so there is no popping. Both limits 0 = vanilla behaviour.
++//
++//==========================================================================
++
++#include "hw_nxlights.h"
++#include "g_levellocals.h"
++#include "c_cvars.h"
++#include "i_time.h"
++#include "tarray.h"
++#include <algorithm>
++#include "nx_perf.h"
++#include "nx_governor.h"
++
++EXTERN_CVAR(Int, nx_perflog)
++
++CVAR(Int, nx_dynlight_max, 0, CVAR_GLOBALCONFIG)		// 0 = no limit
++CVAR(Float, nx_dynlight_dist, 0.f, CVAR_GLOBALCONFIG)	// 0 = no limit (map units from the camera to the light's edge)
++
++int nxLightFrame = 0;
++bool nxLightBudget = false;
++
++static uint64_t nxLastTime = 0;
++
++void NXLights_Select(FLevelLocals *Level, const DVector3 &viewpos)
++{
++	// the frame rate stabilizer can tighten both limits while frames are late
++	const int maxlights = NXGov_LightMax(nx_dynlight_max);
++	const double maxdist = NXGov_LightDist(nx_dynlight_dist);
++
++	if (maxlights <= 0 && maxdist <= 0)
++	{
++		nxLightBudget = false;
++		if (nx_perflog > 0)
++		{
++			int n = 0;
++			for (auto light = Level->lights; light; light = light->next) if (light->IsActive()) n++;
++			nxperf.dynlights += n;
++			nxperf.dynlightsall += n;
++		}
++		return;
++	}
++	nxLightBudget = true;
++	nxLightFrame++;
++
++	// fade speed follows real time so it looks the same at any frame rate
++	uint64_t now = I_msTime();
++	double dt = nxLastTime == 0 ? 33. : double(now - nxLastTime);
++	nxLastTime = now;
++	if (dt > 100.) dt = 100.;
++	const float step = float(dt / 250.);	// ~1/4 second for a full fade
++
++	struct Cand { double d; double dist; FDynamicLight *light; };
++	static TArray<Cand> cands;
++	cands.Clear();
++
++	for (auto light = Level->lights; light; light = light->next)
++	{
++		if (!light->IsActive())
++		{
++			light->nxFade = 0.f;
++			light->nxCut = false;
++			continue;
++		}
++		double radius = light->GetRadius();
++		if (radius <= 0) continue;
++		// distance from the camera to the edge of the light's sphere (0 = inside it)
++		double d = (light->Pos - viewpos).Length() - radius;
++		if (d < 0) d = 0;
++		if (maxdist > 0 && d >= maxdist)
++		{
++			// out of range: it was dimmed to 0 on its way out already
++			light->nxFade = 0.f;
++			light->nxCut = false;
++			continue;
++		}
++		// lights that are lit already are preferred a little (no flickering at the edge of the set)
++		double key = light->nxFade > 0.5f ? d * 0.8 : d;
++		cands.Push({ key, d, light });
++	}
++
++	unsigned keep = cands.Size();
++	if (maxlights > 0 && keep > (unsigned)maxlights)
++	{
++		std::nth_element(cands.begin(), cands.begin() + maxlights, cands.end(), [](const Cand &a, const Cand &b) { return a.d < b.d; });
++		keep = maxlights;
++	}
++	for (unsigned i = 0; i < cands.Size(); i++)
++	{
++		FDynamicLight *light = cands[i].light;
++		if (i < keep)
++		{
++			float t = 1.f;
++			if (maxdist > 0)
++			{
++				// dim gradually over the last quarter of the allowed distance
++				double fadelen = maxdist * 0.25;
++				double d = cands[i].dist;
++				if (d > maxdist - fadelen) t = float(std::clamp((maxdist - d) / fadelen, 0., 1.));
++			}
++			if (light->nxCut)
++			{
++				// it was left out by the light count before: fade back in
++				light->nxFade = std::min(t, light->nxFade + step);
++				if (light->nxFade >= t) light->nxCut = false;
++			}
++			else light->nxFade = t;	// new lights (muzzle flashes etc.) show up at once
++		}
++		else
++		{
++			// over the light count: fade out
++			light->nxFade = std::max(0.f, light->nxFade - step);
++			light->nxCut = true;
++		}
++		if (light->nxFade > 0.01f)
++		{
++			light->nxFrame = nxLightFrame;
++			nxperf.dynlights++;
++		}
++	}
++	nxperf.dynlightsall += cands.Size();
++}
+diff --git a/src/rendering/hwrenderer/hw_nxlights.h b/src/rendering/hwrenderer/hw_nxlights.h
+new file mode 100644
+index 000000000..cb00f19c9
+--- /dev/null
++++ b/src/rendering/hwrenderer/hw_nxlights.h
+@@ -0,0 +1,22 @@
++#pragma once
++// Switch port: dynamic light budget (see hw_nxlights.cpp)
++
++#include "a_dynlight.h"
++
++extern int nxLightFrame;		// frame stamp of the current selection
++extern bool nxLightBudget;		// the budget is active this frame
++
++// true = the light may be used this frame
++inline bool NXLightAllowed(const FDynamicLight *light)
++{
++	return !nxLightBudget || light->nxFrame == nxLightFrame;
++}
++
++// brightness multiplier of an allowed light (fades in/out at the budget's edges)
++inline float NXLightFade(const FDynamicLight *light)
++{
++	return nxLightBudget ? light->nxFade : 1.f;
++}
++
++struct FLevelLocals;
++void NXLights_Select(FLevelLocals *Level, const DVector3 &viewpos);
+diff --git a/src/rendering/hwrenderer/scene/hw_bsp.cpp b/src/rendering/hwrenderer/scene/hw_bsp.cpp
+index a9ee29cd1..72d3cd2e2 100644
+--- a/src/rendering/hwrenderer/scene/hw_bsp.cpp
++++ b/src/rendering/hwrenderer/scene/hw_bsp.cpp
+@@ -15,6 +15,7 @@
+ **
+ */
+ 
++#include "nx_governor.h"
+ #include "p_lnspec.h"
+ #include "p_local.h"
+ #include "a_sharedglobal.h"
+@@ -566,14 +567,15 @@ void HWDrawInfo::AddSpecialPortalLines(subsector_t * sub, sector_t * sector, lin
+ // Switch port: effects and decorations (gore, casings, smoke, torches...)
+ // further away than this aren't drawn. Monsters, projectiles, players,
+ // pickups and anything that can be shot are always drawn. 0 = off.
+-CVAR(Float, nx_effect_cull, 0.f, CVAR_ARCHIVE | CVAR_GLOBALCONFIG)
++CVAR(Float, nx_effect_cull, 0.f, 0)
+ // ...and fading effects (smoke, sparks) below this opacity aren't drawn either
+-CVAR(Float, nx_effect_minalpha, 0.f, CVAR_ARCHIVE | CVAR_GLOBALCONFIG)
++CVAR(Float, nx_effect_minalpha, 0.f, 0)
+ 
+ static inline bool NXCullEffect(AActor *thing, const DVector3 &viewpos)
+ {
+-	double cull = nx_effect_cull;
+-	double minalpha = nx_effect_minalpha;
++	// the frame rate stabilizer can tighten both while frames are late
++	double cull = NXGov_EffectCull(nx_effect_cull);
++	double minalpha = NXGov_MinAlpha(nx_effect_minalpha);
+ 	if (cull <= 0 && minalpha <= 0) return false;
+ 	if (thing->player || (thing->flags3 & MF3_ISMONSTER) || (thing->flags & (MF_MISSILE | MF_SPECIAL | MF_SHOOTABLE))) return false;
+ 	if (minalpha > 0 && !(thing->RenderStyle.Flags & (STYLEF_Alpha1 | STYLEF_TransSoulsAlpha)) && thing->Alpha < minalpha) return true;
+@@ -612,7 +614,7 @@ void HWDrawInfo::RenderThings(subsector_t * sub, sector_t * sector)
+ 			if (R_ShouldDrawSpriteShadow(thing))
+ 			{
+ 				double dist = (thing->Pos() - vp.Pos).LengthSquared();
+-				double check = r_actorspriteshadowdist;
++				double check = NXGov_ShadowDist(r_actorspriteshadowdist);
+ 				if (dist <= check * check)
+ 				{
+ 					sprite.Process(this, thing, sector, in_area, false, true);
+@@ -644,7 +646,7 @@ void HWDrawInfo::RenderThings(subsector_t * sub, sector_t * sector)
+ 		if (R_ShouldDrawSpriteShadow(thing))
+ 		{
+ 			double dist = (thing->Pos() - vp.Pos).LengthSquared();
+-			double check = r_actorspriteshadowdist;
++			double check = NXGov_ShadowDist(r_actorspriteshadowdist);
+ 			if (dist <= check * check)
+ 			{
+ 				sprite.Process(this, thing, sector, in_area, true, true);
+@@ -658,11 +660,17 @@ void HWDrawInfo::RenderThings(subsector_t * sub, sector_t * sector)
+ void HWDrawInfo::RenderParticles(subsector_t *sub, sector_t *front)
+ {
+ 	SetupSprite.Clock();
++	// Switch port: particles are pure effects - far away ones are skipped like other effects (nx_effect_cull)
++	const double nxcull = NXGov_EffectCull(nx_effect_cull);
++	const double nxcull2 = nxcull * nxcull;
++	const DVector2 nxview = Viewpoint.Pos.XY();
+ 	for (uint32_t i = 0; i < sub->sprites.Size(); i++)
+ 	{
+ 		DVisualThinker *sp = sub->sprites[i];
+ 		if (!sp || sp->ObjectFlags & OF_EuthanizeMe)
+ 			continue;
++		if (nxcull > 0 && (sp->PT.Pos.XY() - nxview).LengthSquared() > nxcull2)
++			continue;
+ 		if (mClipPortal)
+ 		{
+ 			int clipres = mClipPortal->ClipPoint(sp->PT.Pos.XY());
+@@ -674,6 +682,8 @@ void HWDrawInfo::RenderParticles(subsector_t *sub, sector_t *front)
+ 	}
+ 	for (int i = Level->ParticlesInSubsec[sub->Index()]; i != NO_PARTICLE; i = Level->Particles[i].snext)
+ 	{
++		if (nxcull > 0 && (Level->Particles[i].Pos.XY() - nxview).LengthSquared() > nxcull2)
++			continue;
+ 		if (mClipPortal)
+ 		{
+ 			int clipres = mClipPortal->ClipPoint(Level->Particles[i].Pos.XY());
+diff --git a/src/rendering/hwrenderer/scene/hw_flats.cpp b/src/rendering/hwrenderer/scene/hw_flats.cpp
+index 8daf8faf0..8f8102773 100644
+--- a/src/rendering/hwrenderer/scene/hw_flats.cpp
++++ b/src/rendering/hwrenderer/scene/hw_flats.cpp
+@@ -27,6 +27,7 @@
+ #include "p_lnspec.h"
+ #include "matrix.h"
+ #include "hw_dynlightdata.h"
++#include "hw_nxlights.h"
+ #include "hw_cvars.h"
+ #include "hw_clock.h"
+ #include "hw_lighting.h"
+@@ -161,7 +162,7 @@ void HWFlat::SetupLights(HWDrawInfo *di, FDynLightData &lightdata, int portalgro
+ 
+ 			FDynamicLight * light = node->lightsource;
+ 
+-			if (!light->IsActive() || light->DontLightMap())
++			if (!light->IsActive() || light->DontLightMap() || !NXLightAllowed(light))
+ 			{
+ 				continue;
+ 			}
+diff --git a/src/rendering/hwrenderer/scene/hw_renderhacks.cpp b/src/rendering/hwrenderer/scene/hw_renderhacks.cpp
+index b30b55aaf..3e7641d3f 100644
+--- a/src/rendering/hwrenderer/scene/hw_renderhacks.cpp
++++ b/src/rendering/hwrenderer/scene/hw_renderhacks.cpp
+@@ -15,6 +15,7 @@
+ **
+ */
+ 
++#include "hw_nxlights.h"
+ #include "a_sharedglobal.h"
+ #include "a_dynlight.h"
+ #include "r_utility.h"
+@@ -118,7 +119,7 @@ int HWDrawInfo::SetupLightsForOtherPlane(subsector_t * sub, FDynLightData &light
+ 
+ 				FDynamicLight * light = node->lightsource;
+ 
+-				if (!light->IsActive())
++				if (!light->IsActive() || !NXLightAllowed(light))
+ 				{
+ 					continue;
+ 				}
+diff --git a/src/rendering/hwrenderer/scene/hw_spritelight.cpp b/src/rendering/hwrenderer/scene/hw_spritelight.cpp
+index 9882969a3..3d5ac75fe 100644
+--- a/src/rendering/hwrenderer/scene/hw_spritelight.cpp
++++ b/src/rendering/hwrenderer/scene/hw_spritelight.cpp
+@@ -23,6 +23,7 @@
+ #include "g_levellocals.h"
+ #include "actorinlines.h"
+ #include "hw_dynlightdata.h"
++#include "hw_nxlights.h"
+ #include "hw_shadowmap.h"
+ #include "hwrenderer/scene/hw_drawinfo.h"
+ #include "hwrenderer/scene/hw_drawstructs.h"
+@@ -124,7 +125,7 @@ void HWDrawInfo::GetDynSpriteLight(AActor *self, float x, float y, float z, FSec
+ 			if (!node) continue;
+ 
+ 			light=node->lightsource;
+-			if (light->ShouldLightActor(self))
++			if (light->ShouldLightActor(self) && NXLightAllowed(light))
+ 			{
+ 				float dist;
+ 				FVector3 L;
+@@ -182,10 +183,11 @@ void HWDrawInfo::GetDynSpriteLight(AActor *self, float x, float y, float z, FSec
+ 							lb *= alpha;
+ 						}
+ 
+-						// Get GLDEFS intensity
+-						lr *= light->GetLightDefIntensity();
+-						lg *= light->GetLightDefIntensity();
+-						lb *= light->GetLightDefIntensity();
++						// Get GLDEFS intensity (and the Switch port's light budget fade)
++						const float nxint = float(light->GetLightDefIntensity()) * NXLightFade(light);
++						lr *= nxint;
++						lg *= nxint;
++						lb *= nxint;
+ 
+ 						if (light->IsSubtractive())
+ 						{
+@@ -253,7 +255,7 @@ void hw_GetDynModelLight(AActor *self, FDynLightData &modellightdata)
+ 					auto node = pair->Value.get();
+ 					if (!node) continue;
+ 					FDynamicLight *light = node->lightsource;
+-					if (light->ShouldLightActor(self))
++					if (light->ShouldLightActor(self) && NXLightAllowed(light))
+ 					{
+ 						int group = subsector->sector->PortalGroup;
+ 						DVector3 pos = light->PosRelative(group);
+diff --git a/src/rendering/hwrenderer/scene/hw_sprites.cpp b/src/rendering/hwrenderer/scene/hw_sprites.cpp
+index d248e2356..17ead2446 100644
+--- a/src/rendering/hwrenderer/scene/hw_sprites.cpp
++++ b/src/rendering/hwrenderer/scene/hw_sprites.cpp
+@@ -15,6 +15,7 @@
+ **
+ */
+ 
++#include "nx_governor.h"
+ #include "p_local.h"
+ #include "p_effect.h"
+ #include "g_level.h"
+@@ -180,7 +181,9 @@ void HWSprite::DrawSprite(HWDrawInfo *di, FRenderState &state, bool translucent)
+ 			if (dynlightindex == -1)	// only set if we got no light buffer index. This covers all cases where sprite lighting is used.
+ 			{
+ 				float out[3] = {};
+-				di->GetDynSpriteLight(gl_light_sprites ? actor : nullptr, gl_light_particles ? particle : nullptr, out);
++				// Switch port: at its higher levels the frame rate stabilizer stops lighting sprites with dynamic lights
++				const bool nxlit = nxGovLevel < 4;
++				di->GetDynSpriteLight((gl_light_sprites && nxlit) ? actor : nullptr, (gl_light_particles && nxlit) ? particle : nullptr, out);
+ 				state.SetDynLight(out[0], out[1], out[2]);
+ 			}
+ 		}
+diff --git a/src/rendering/hwrenderer/scene/hw_walls.cpp b/src/rendering/hwrenderer/scene/hw_walls.cpp
+index 59214124e..76946f3e8 100644
+--- a/src/rendering/hwrenderer/scene/hw_walls.cpp
++++ b/src/rendering/hwrenderer/scene/hw_walls.cpp
+@@ -28,6 +28,7 @@
+ #include "actorinlines.h"
+ #include "texturemanager.h"
+ #include "hw_dynlightdata.h"
++#include "hw_nxlights.h"
+ #include "hw_material.h"
+ #include "hw_cvars.h"
+ #include "hw_clock.h"
+@@ -436,7 +437,7 @@ void HWWall::SetupLights(HWDrawInfo*di, FDynLightData &lightdata)
+ 				auto node = pair->Value.get();
+ 				if (!node) continue;
+ 
+-				if (node->lightsource->IsActive() && !node->lightsource->DontLightMap())
++				if (node->lightsource->IsActive() && !node->lightsource->DontLightMap() && NXLightAllowed(node->lightsource))
+ 				{
+ 					iter_dlight++;
+ 
+@@ -499,7 +500,7 @@ void HWWall::SetupLights(HWDrawInfo*di, FDynLightData &lightdata)
+ 				auto node = pair->Value.get();
+ 				if (!node) continue;
+ 
+-				if (node->lightsource->IsActive() && !node->lightsource->DontLightMap())
++				if (node->lightsource->IsActive() && !node->lightsource->DontLightMap() && NXLightAllowed(node->lightsource))
+ 				{
+ 					iter_dlight++;
+ 
+-- 
+2.56.0
+

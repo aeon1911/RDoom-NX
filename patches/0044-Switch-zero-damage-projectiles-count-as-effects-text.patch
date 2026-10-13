@@ -1,0 +1,162 @@
+From 6ed650339370a082b2e50711a51af2f99bb31af1 Mon Sep 17 00:00:00 2001
+From: RDoom <171243930+aeon1911@users.noreply.github.com>
+Date: Tue, 13 Oct 2026 14:52:33 -0300
+Subject: [PATCH 44/46] Switch: zero-damage projectiles count as effects;
+ texture list saved by a worker
+
+HW test of fb774e06a (80 s, MAP01-MAP02): mostly 60 fps, 0-3 frames over
+35 ms per 5 s; one explosion gave ~25 frames of 41-69 ms waiting up to 55 ms
+for the GPU with ~300 translucent sprites, of which the area budget left out
+only 17: Brutal Doom spawns its sparks, flames and debris as projectiles,
+which the trims never touched. And every list save (each 20 s) still cost
+the game thread 95-165 ms inside SaveCacheWhenIdle.
+
+- hw_nxeffect.h: NXIsPureEffect for both trims; projectiles that hurt stay,
+  zero-damage ones are effects.
+- The texture list is formatted, queued and logged by a worker; the game
+  thread only copies the names.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ .../vulkan/renderer/vk_renderpass.cpp         | 34 +++++++++++++------
+ src/rendering/hwrenderer/scene/hw_bsp.cpp     |  3 +-
+ src/rendering/hwrenderer/scene/hw_nxeffect.h  | 18 ++++++++++
+ src/rendering/hwrenderer/scene/hw_sprites.cpp |  8 +++--
+ 4 files changed, 48 insertions(+), 15 deletions(-)
+ create mode 100644 src/rendering/hwrenderer/scene/hw_nxeffect.h
+
+diff --git a/src/common/rendering/vulkan/renderer/vk_renderpass.cpp b/src/common/rendering/vulkan/renderer/vk_renderpass.cpp
+index 6834414b0..a7c0b60c9 100644
+--- a/src/common/rendering/vulkan/renderer/vk_renderpass.cpp
++++ b/src/common/rendering/vulkan/renderer/vk_renderpass.cpp
+@@ -45,6 +45,7 @@
+ #include "gamestate.h"
+ #include "nx_perf.h"
+ #include "nx_jobs.h"
++#include <memory>
+ #include "c_cvars.h"
+ 
+ VkRenderPassManager::VkRenderPassManager(VulkanRenderDevice* fb) : fb(fb)
+@@ -293,19 +294,30 @@ void VkRenderPassManager::SaveCacheWhenIdle()
+ 	{
+ 		mTexDirty = false;
+ 		mLastTexSaveMs = now;
+-		std::string out;
+-		out.reserve(mTexList.size() * 24);
+-		char line[96];
++		// formatted, queued and logged by a worker: on the Switch the save
++		// still cost the game thread 95-165 ms every 20 s, done here
++		struct Entry { std::string name; int useType, scaleFlags; };
++		auto list = std::make_shared<std::vector<Entry>>();
++		list->reserve(mTexList.size());
+ 		for (auto &t : mTexList)
++			list->push_back({ t.Name.GetChars(), t.UseType, t.ScaleFlags });
++		std::string file = WarmFilename("textures", "txt").GetChars();
++		NXJobs_Push([list, file]()
+ 		{
+-			int n = snprintf(line, sizeof(line), "%d %d %s\n", t.UseType, t.ScaleFlags, t.Name.GetChars());
+-			if (n > 0)
+-				out.append(line, min(n, (int)sizeof(line) - 1));
+-		}
+-		RDoom_WriteFileAsync(WarmFilename("textures", "txt").GetChars(), out.data(), out.size());
+-		FString n;
+-		n.Format("%d textures", (int)mTexList.size());
+-		RDoom_SessionSet("vulkan_texture_list_saved", n.GetChars());
++			std::string out;
++			out.reserve(list->size() * 24);
++			char line[96];
++			for (auto &t : *list)
++			{
++				int n = snprintf(line, sizeof(line), "%d %d %s\n", t.useType, t.scaleFlags, t.name.c_str());
++				if (n > 0)
++					out.append(line, std::min(n, (int)sizeof(line) - 1));
++			}
++			RDoom_WriteFileAsync(file.c_str(), out.data(), out.size());
++			char n[32];
++			snprintf(n, sizeof(n), "%d textures", (int)list->size());
++			RDoom_SessionSet("vulkan_texture_list_saved", n);
++		}, NXJOB_LOW);
+ 	}
+ 	if (mUnsavedPipelines == 0 || now - mLastPipelineMs < 3000)
+ 		return;
+diff --git a/src/rendering/hwrenderer/scene/hw_bsp.cpp b/src/rendering/hwrenderer/scene/hw_bsp.cpp
+index 86bc82ccf..1e337a308 100644
+--- a/src/rendering/hwrenderer/scene/hw_bsp.cpp
++++ b/src/rendering/hwrenderer/scene/hw_bsp.cpp
+@@ -29,6 +29,7 @@
+ #include "hwrenderer/scene/hw_clipper.h"
+ #include "hwrenderer/scene/hw_drawstructs.h"
+ #include "hwrenderer/scene/hw_drawinfo.h"
++#include "hwrenderer/scene/hw_nxeffect.h"
+ #include "hwrenderer/scene/hw_portal.h"
+ #include "hw_clock.h"
+ #include "flatvertices.h"
+@@ -584,7 +585,7 @@ static inline bool NXCullEffect(AActor *thing, const DVector3 &viewpos)
+ 	double cull = NXGov_EffectCull(nx_effect_cull);
+ 	double minalpha = NXGov_MinAlpha(nx_effect_minalpha);
+ 	if (cull <= 0 && minalpha <= 0) return false;
+-	if (thing->player || (thing->flags3 & MF3_ISMONSTER) || (thing->flags & (MF_MISSILE | MF_SPECIAL | MF_SHOOTABLE))) return false;
++	if (!NXIsPureEffect(thing)) return false;
+ 	if (minalpha > 0 && !(thing->RenderStyle.Flags & (STYLEF_Alpha1 | STYLEF_TransSoulsAlpha)) && thing->Alpha < minalpha) return true;
+ 	return cull > 0 && (thing->Pos() - viewpos).LengthSquared() > cull * cull;
+ }
+diff --git a/src/rendering/hwrenderer/scene/hw_nxeffect.h b/src/rendering/hwrenderer/scene/hw_nxeffect.h
+new file mode 100644
+index 000000000..dc55f6ad5
+--- /dev/null
++++ b/src/rendering/hwrenderer/scene/hw_nxeffect.h
+@@ -0,0 +1,18 @@
++#pragma once
++// Switch port: actors that are purely visual, which the frame rate stabilizer
++// may leave out (hw_bsp.cpp, hw_sprites.cpp). Players, monsters, pickups,
++// shootable things and projectiles that hurt are never trimmed. Brutal Doom
++// spawns its sparks, flames and debris as zero-damage projectiles: those are
++// effects (an explosion had ~300 translucent sprites while the area budget,
++// which skipped every projectile, could only leave out 17 of them).
++
++#include "actor.h"
++
++inline bool NXIsPureEffect(AActor *thing)
++{
++	if (thing->player || (thing->flags3 & MF3_ISMONSTER) || (thing->flags & (MF_SPECIAL | MF_SHOOTABLE)))
++		return false;
++	if ((thing->flags & MF_MISSILE) && !thing->IsZeroDamage())
++		return false;
++	return true;
++}
+diff --git a/src/rendering/hwrenderer/scene/hw_sprites.cpp b/src/rendering/hwrenderer/scene/hw_sprites.cpp
+index 0f918a4e1..20163e6f7 100644
+--- a/src/rendering/hwrenderer/scene/hw_sprites.cpp
++++ b/src/rendering/hwrenderer/scene/hw_sprites.cpp
+@@ -40,6 +40,7 @@
+ #include "hw_models.h"
+ #include "hwrenderer/scene/hw_drawstructs.h"
+ #include "hwrenderer/scene/hw_drawinfo.h"
++#include "hwrenderer/scene/hw_nxeffect.h"
+ #include "hwrenderer/scene/hw_fakeflat.h"
+ #include "hwrenderer/scene/hw_portal.h"
+ #include "flatvertices.h"
+@@ -1692,8 +1693,9 @@ void HWSprite::ProcessParticle(HWDrawInfo *di, particle_t *particle, sector_t *s
+ //==========================================================================
+ //
+ // Switch port: while the frame rate stabilizer is active, translucent
+-// effects (smoke, sparks, gore splats - never monsters, projectiles, pickups
+-// or anything that can be shot) may cover only so much of the screen.
++// effects (smoke, sparks, gore splats - never monsters, damaging projectiles,
++// pickups or anything that can be shot; see hw_nxeffect.h) may cover only so
++// much of the screen.
+ // Sprites are processed in BSP order, near to far, so what is left out is
+ // the smoke behind other smoke. 0 = no limit (nx_effect_area).
+ //
+@@ -1706,7 +1708,7 @@ bool HWSprite::NXEffectOverBudget(HWDrawInfo *di, AActor *thing)
+ 	const double budget = NXGov_EffectArea(nx_effect_area);
+ 	if (budget <= 0 || thing == nullptr)
+ 		return false;
+-	if (thing->player || (thing->flags3 & MF3_ISMONSTER) || (thing->flags & (MF_MISSILE | MF_SPECIAL | MF_SHOOTABLE)))
++	if (!NXIsPureEffect(thing))
+ 		return false;
+ 	// screen fraction of the sprite: its world size against what the view
+ 	// covers at its depth (horizontal FOV, screen aspect)
+-- 
+2.56.0
+

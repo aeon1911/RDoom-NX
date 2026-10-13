@@ -1,0 +1,742 @@
+From cac639bb64757d61f965100240c4c912fcc6b62b Mon Sep 17 00:00:00 2001
+From: Aeon <171243930+aeon1911@users.noreply.github.com>
+Date: Mon, 28 Sep 2026 11:58:14 -0300
+Subject: [PATCH 02/46] Drop Project Brutality-only behavior from the Switch
+ port.
+
+The launcher no longer treats a filename containing brutal or pb as
+Project Brutality, and it no longer injects pb_* or nashgore_* cvars
+or the shot-effect option. Class-name effect thinning is gone, so
+Brutal Doom, Lexicon, Trailblazer and Samsara keep their own actors.
+SD cache, async loading, prefetch, shader variants, the loading
+screen, the 30 FPS lock, core pinning and the logs stay.
+---
+ CMakeLists.txt                                |   2 +-
+ src/CMakeLists.txt                            |   1 -
+ src/common/audio/sound/s_sound.cpp            |   2 +-
+ src/common/engine/nx_perf.cpp                 |  11 +-
+ src/common/engine/nx_perf.h                   |   1 -
+ src/common/filesystem/source/files.cpp        |   2 +-
+ .../platform/posix/nx/nx_loadscreen.cpp       |   9 +-
+ src/common/rendering/gles/gles_asynctex.h     |   2 +-
+ src/playsim/dthinker.cpp                      |  15 --
+ src/playsim/nx_fxthin.cpp                     | 151 ------------------
+ src/playsim/nx_fxthin.h                       |   8 -
+ src/playsim/p_actionfunctions.cpp             |   4 -
+ tools/nxlauncher/src/data.c                   |  99 +-----------
+ tools/nxlauncher/src/data.h                   |   3 -
+ tools/nxlauncher/src/ui.c                     |  29 +---
+ wadsrc/static/zscript/actors/actor.zs         |   1 -
+ wadsrc/static/zscript/actors/attacks.zs       |  11 --
+ 17 files changed, 24 insertions(+), 327 deletions(-)
+ delete mode 100644 src/playsim/nx_fxthin.cpp
+ delete mode 100644 src/playsim/nx_fxthin.h
+
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index fac5c1d89..098422dcb 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -73,7 +73,7 @@ if( NINTENDO_SWITCH )
+ 	# unless we just do this
+ 	set( CMAKE_CXX_EXTENSIONS ON )
+ 	# used in both gzdoom and launcher
+-	set( SWITCH_APP_VERSION "uz5.0.3-nx3.7" )
++	set( SWITCH_APP_VERSION "uz5.0.3-general" )
+ endif()
+ 
+ # Recursive function to place PK3 archive source files into a hierarchy of source file in the IDE
+diff --git a/src/CMakeLists.txt b/src/CMakeLists.txt
+index 9a06a4082..6d7c3715a 100644
+--- a/src/CMakeLists.txt
++++ b/src/CMakeLists.txt
+@@ -873,7 +873,6 @@ set (PCH_SOURCES
+ 	playsim/p_spec.cpp
+ 	p_states.cpp
+ 	playsim/p_things.cpp
+-	playsim/nx_fxthin.cpp
+ 	p_tick.cpp
+ 	playsim/p_user.cpp
+ 	rendering/r_utility.cpp
+diff --git a/src/common/audio/sound/s_sound.cpp b/src/common/audio/sound/s_sound.cpp
+index 21133d6e6..28f5a8344 100644
+--- a/src/common/audio/sound/s_sound.cpp
++++ b/src/common/audio/sound/s_sound.cpp
+@@ -88,7 +88,7 @@ void SoundEngine::Init(TArray<uint8_t> &curve)
+ // Background sound loading (Switch port)
+ //
+ // Decoding a sound (mostly Ogg Vorbis in big mods) takes several
+-// milliseconds on the Switch's CPU, and Project Brutality plays dozens of
++// milliseconds on the Switch's CPU, and a large gameplay mod plays dozens of
+ // different sounds when fighting. Sounds that are not loaded yet are now
+ // decoded by a worker thread and start playing as soon as they are ready
+ // (a few frames later) instead of freezing the game.
+diff --git a/src/common/engine/nx_perf.cpp b/src/common/engine/nx_perf.cpp
+index 04790eb6c..e3295cb0c 100644
+--- a/src/common/engine/nx_perf.cpp
++++ b/src/common/engine/nx_perf.cpp
+@@ -37,7 +37,7 @@ void (*NXPerf_SummaryHook)(FILE *f) = nullptr;
+ static struct
+ {
+ 	double tic, think, display, swap, sndupd, sndstart, tex, scene, bsp, hud, update, gpuwait, frame, gc, wait, net, input, music, client, glsync, glfinish, draw2d, frameend, present;
+-	int tics, thinkers, sndstarts, drawitems, transitems, glsyncs, fxskipped, spriteskips;
++	int tics, thinkers, sndstarts, drawitems, transitems, glsyncs, spriteskips;
+ } win;
+ 
+ #ifdef __SWITCH__
+@@ -64,9 +64,7 @@ static void WriteSettings(FILE *f)
+ 		"vid_vsync", "vid_maxfps", "cl_capfps", "vid_scalefactor", "nx_effect_cull", "nx_effect_minalpha", "r_actorspriteshadowdist", "vid_preferbackend", "gl_multithread", "r_dynlights", "gles_max_lights_per_surface",
+ 		"r_actorspriteshadow", "gl_texture_filter", "gl_texture_filter_anisotropic", "r_maxparticles", "cl_maxdecals",
+ 		"snd_channels", "snd_efx", "snd_samplerate", "gles_async_textures", "snd_asyncload", "nx_workers",
+-		"nashgore_maxgore", "nashgore_maxcasings", "nashgore_bloodmult", "nashgore_gibamount", "nashgore_corpseblood",
+-		"pb_simplemonsterbehavior", "pb_performance_fire", "pb_tracerlight", "pb_cheapcasings", "pb_disable_decorations",
+-		"pb_decorative_flame_barrels", "gl_sort_textures", "nx_glthread", "nx_glthread_core", "nx_swapinterval", "r_ticstability", "nx_fx_far", "nx_fx_thin", "nx_lateswap", "pb_gunsmoketype", nullptr };
++		"gl_sort_textures", "nx_glthread", "nx_glthread_core", "nx_swapinterval", "r_ticstability", "nx_lateswap", nullptr };
+ 	fprintf(f, "# settings:");
+ 	for (int i = 0; names[i]; i++)
+ 	{
+@@ -124,7 +122,6 @@ void NXPerf_EndFrame()
+ 		win.glsync += nxperf.glsync_ms;
+ 		win.glfinish += nxperf.glfinish_ms;
+ 		win.glsyncs += nxperf.glsyncs;
+-		win.fxskipped += nxperf.fxskipped;
+ 		win.spriteskips += nxperf.spriteskips;
+ 		win.draw2d += nxperf.draw2d_ms;
+ 		win.present += nxperf.present_ms;
+@@ -171,9 +168,9 @@ void NXPerf_EndFrame()
+ 					(win.frame - win.tic - win.display - win.sndupd - win.gc - win.wait - win.net - win.input - win.music - win.client) / n);
+ 				fprintf(perfFile, "#   gl thread: %s | waits per frame: mid-frame %.1f ms (%.1f syncs), before swap %.1f ms\n",
+ 					NXGLThreadOn() ? "on" : "off", win.glsync / n, win.glsyncs / n, win.glfinish / n);
+-				fprintf(perfFile, "#   per tic: %.1f ms, %d thinkers | draw items per frame %d (%d translucent) | sound starts/s %.0f | effects skipped/s %.0f | sprites waiting for their picture per frame %.1f\n",
++				fprintf(perfFile, "#   per tic: %.1f ms, %d thinkers | draw items per frame %d (%d translucent) | sound starts/s %.0f | sprites waiting for their picture per frame %.1f\n",
+ 					win.tics ? win.tic / win.tics : 0.0, win.tics ? win.thinkers / win.tics : 0, win.drawitems / frames, win.transitems / frames,
+-					win.sndstarts * 1000.0 / (sumFrame > 0 ? sumFrame : 1), win.fxskipped * 1000.0 / (sumFrame > 0 ? sumFrame : 1), win.spriteskips / n);
++					win.sndstarts * 1000.0 / (sumFrame > 0 ? sumFrame : 1), win.spriteskips / n);
+ 			}
+ 			NXGLThreadStats(perfFile);
+ 			if (NXPerf_SummaryHook) NXPerf_SummaryHook(perfFile);
+diff --git a/src/common/engine/nx_perf.h b/src/common/engine/nx_perf.h
+index 1ba85eeac..4631ba04a 100644
+--- a/src/common/engine/nx_perf.h
++++ b/src/common/engine/nx_perf.h
+@@ -25,7 +25,6 @@ struct NXPerfCounters
+ 	double glsync_ms = 0;	// game thread waiting for the GL driver thread in the middle of a frame
+ 	double glfinish_ms = 0;	// game thread waiting for the GL driver thread before the buffer swap
+ 	int glsyncs = 0;
+-	int fxskipped = 0;		// effect actors skipped by nx_fx_thin
+ 	int spriteskips = 0;	// sprite draws skipped because the picture wasn't on the GPU yet
+ 	double present_ms = 0;	// copy of the finished frame to the window (waits for a free window buffer)
+ 	double draw2d_ms = 0;	// 2D drawing (HUD, menus, messages) - part of update_ms
+diff --git a/src/common/filesystem/source/files.cpp b/src/common/filesystem/source/files.cpp
+index 2d68406a2..47da1dd85 100644
+--- a/src/common/filesystem/source/files.cpp
++++ b/src/common/filesystem/source/files.cpp
+@@ -70,7 +70,7 @@ namespace FileSys {
+ //
+ // On the Switch every fread that misses stdio's tiny buffer is an IPC
+ // round trip to the FS sysmodule plus an SD card access. Opening big mods
+-// (Project Brutality has 60000+ lumps) touches the header of nearly every
++// (a large gameplay mod has tens of thousands of lumps) touches the header of nearly every
+ // lump in an order that has nothing to do with the physical file layout,
+ // which resulted in several hundred thousand small random reads.
+ // This cache reads archives in large aligned blocks and keeps them in an
+diff --git a/src/common/platform/posix/nx/nx_loadscreen.cpp b/src/common/platform/posix/nx/nx_loadscreen.cpp
+index 24af6248c..f0fbb2bb7 100644
+--- a/src/common/platform/posix/nx/nx_loadscreen.cpp
++++ b/src/common/platform/posix/nx/nx_loadscreen.cpp
+@@ -377,8 +377,8 @@ const char *const Tips[] =
+ {
+ 	"Dica: na aba Mods do launcher, aperte A em um mod e use o direcional para mudar a ordem de carregamento.",
+ 	"Dica: a primeira abertura de um conjunto de mods é a mais lenta. Nas próximas, o tempo restante aparece aqui.",
+-	"Dica: mods de mapas (ex.: Lexicon) vão antes dos mods de gameplay (ex.: Project Brutality) na ordem de carregamento.",
+-	"Dica: o perfil de desempenho \"Switch\" no launcher reduz os efeitos mais pesados do Project Brutality.",
++	"Dica: mods de mapas vão antes dos mods de gameplay na ordem de carregamento.",
++	"Dica: o perfil \"Switch (leve)\" reduz luzes, partículas e efeitos distantes.",
+ 	"Dica: abra o launcher segurando R em um jogo (modo aplicativo) para ter a RAM completa do console.",
+ 	"Dica: cada perfil do launcher guarda seus próprios mods, ordem e opções.",
+ };
+@@ -962,13 +962,12 @@ void NXLS_OnPrint(const char *text)
+ 	}
+ 	else if (!strncmp(text, "S_Init", 6)) { SetMilestone(MS_SOUND); gDetail.clear(); }
+ 	else if (!strncmp(text, "Texman.Init", 11)) { SetMilestone(MS_TEXTURES); gDetail.clear(); }
+-	else if (!strncmp(text, "LoadActors", 10)) { SetMilestone(MS_ACTORS); gDetail = "Isso é o que mais demora com mods grandes como o Project Brutality"; }
++	else if (!strncmp(text, "LoadActors", 10)) { SetMilestone(MS_ACTORS); gDetail = "Isso é o que mais demora com mods grandes"; }
+ 	else if (!strncmp(text, "script parsing took", 19)) { SetMilestone(MS_SCRIPTSDONE); gDetail.clear(); }
+ 	else if (!strncmp(text, "R_Init", 6)) { SetMilestone(MS_RINIT); gDetail.clear(); }
+ 	else if (!strncmp(text, "M_Init", 6)) { SetMilestone(MS_MENUS); gDetail.clear(); }
+ 	else if (!strncmp(text, "P_Init", 6)) { SetMilestone(MS_PLAYLOOP); gDetail.clear(); }
+ 	else if (!strncmp(text, "D_CheckNetGame", 14)) { SetMilestone(MS_NETGAME); gDetail.clear(); }
+-	else if (gMilestone == MS_ACTORS && !strncmp(text, "PB_", 3)) { /* Project Brutality's own messages */ }
+ 	else if (!strncmp(text, "Execution could not continue", 28)) { /* fatal error follows */ }
+ 
+ 	if (gMilestone == MS_WINIT && gFiles.size() > 0 && gFiles[0].state == 0) gFiles[0].state = 1;
+@@ -997,7 +996,7 @@ void NXLS_TestShot(const char *name)
+ 
+ int main(int argc, char **argv)
+ {
+-	const char *args[] = { "uzdoom", "-iwad", "doom_fusion.ipk3", "-file", "lexicon-core-v1.0.pk3", "lexicon-base-v1.0.pk3", "Project_Brutality-master.pk3", "+logfile", "x.log" };
++	const char *args[] = { "uzdoom", "-iwad", "doom_fusion.ipk3", "-file", "lexicon-core-v1.0.pk3", "lexicon-base-v1.0.pk3", "gameplay.pk3", "+logfile", "x.log" };
+ 	NXLS_Start(9, (char **)args);
+ 	std::vector<uint32_t> buf(SW * SH);
+ 	auto shot = [&](const char *name) {
+diff --git a/src/common/rendering/gles/gles_asynctex.h b/src/common/rendering/gles/gles_asynctex.h
+index b4ebab5c5..8adc3b897 100644
+--- a/src/common/rendering/gles/gles_asynctex.h
++++ b/src/common/rendering/gles/gles_asynctex.h
+@@ -2,7 +2,7 @@
+ // Background preparation of textures (Switch port).
+ //
+ // Reading and decoding a sprite from the mod's archive takes several
+-// milliseconds on the Switch's CPU. Mods like Project Brutality have
++// milliseconds on the Switch's CPU. Large gameplay mods have
+ // thousands of sprite frames, so every shot, explosion or new enemy used
+ // to stall the game while dozens of new frames were decoded. Sprites and
+ // HUD graphics are now decoded by worker threads; until a picture is ready
+diff --git a/src/playsim/dthinker.cpp b/src/playsim/dthinker.cpp
+index ade6f3c58..7ff168059 100644
+--- a/src/playsim/dthinker.cpp
++++ b/src/playsim/dthinker.cpp
+@@ -21,7 +21,6 @@
+ **
+ */
+ 
+-#include "nx_fxthin.h"
+ #include "dthinker.h"
+ #include "printf.h"
+ #include "stats.h"
+@@ -877,13 +876,6 @@ int FThinkerList::TickThinkers(FThinkerList *dest, int& counter)
+ 		NextToThink = node->NextThinker;
+ 		if (node->ObjectFlags & OF_JustSpawned)
+ 		{
+-			// Switch: purely visual effects over the budget go away before doing anything
+-			if (NXFx_DropNewThinker(node))
+-			{
+-				node->Destroy();
+-				node = NextToThink;
+-				continue;
+-			}
+ 			// Leave OF_JustSpawn set until after Tick() so the ticker can check it.
+ 			if (dest != nullptr)
+ 			{ // Move thinker from this list to the destination list
+@@ -929,13 +921,6 @@ int FThinkerList::ProfileThinkers(FThinkerList *dest, int& counter, TMap<FName,
+ 		NextToThink = node->NextThinker;
+ 		if (node->ObjectFlags & OF_JustSpawned)
+ 		{
+-			// Switch: purely visual effects over the budget go away before doing anything
+-			if (NXFx_DropNewThinker(node))
+-			{
+-				node->Destroy();
+-				node = NextToThink;
+-				continue;
+-			}
+ 			// Leave OF_JustSpawn set until after Tick() so the ticker can check it.
+ 			if (dest != nullptr)
+ 			{ // Move thinker from this list to the destination list
+diff --git a/src/playsim/nx_fxthin.cpp b/src/playsim/nx_fxthin.cpp
+deleted file mode 100644
+index d16e11295..000000000
+--- a/src/playsim/nx_fxthin.cpp
++++ /dev/null
+@@ -1,151 +0,0 @@
+-// Switch port: thin out purely visual effect actors (smoke, sparks, debris...)
+-//
+-// Heavy gameplay mods spawn dozens of effect actors every tic. On the Switch's
+-// CPU each of them costs script time to spawn and to animate, which is where
+-// most of the frame time goes in big fights. This skips a share of the spawns
+-// of the classes listed in nx_fx_thin (and of everything derived from them),
+-// and all of those spawned farther away than nx_fx_far (where the renderer
+-// culls them anyway).
+-//
+-//   nx_fx_thin "PB_GunFireSmoke=0.5,PB_AnimatedSmokeThinker=0.3"
+-//     class name = share that is kept (0 = none, 1 = all)
+-//
+-// Only list classes that are pure visuals: a skipped spawn behaves exactly like
+-// an A_SpawnItemEx whose failchance hit, or like an actor that removes itself
+-// on its first tic.
+-
+-#include "actor.h"
+-#include "d_player.h"
+-#include "c_cvars.h"
+-#include "c_dispatch.h"
+-#include "vm.h"
+-#include "nx_perf.h"
+-#include "nx_fxthin.h"
+-
+-static bool nxfxDirty = true;
+-static bool nxfxActive = false;
+-
+-CUSTOM_CVAR(String, nx_fx_thin, "", CVAR_ARCHIVE | CVAR_GLOBALCONFIG)
+-{
+-	nxfxDirty = true;
+-}
+-CUSTOM_CVAR(Float, nx_fx_far, 0.f, CVAR_ARCHIVE | CVAR_GLOBALCONFIG)
+-{
+-	nxfxDirty = true;
+-}
+-
+-struct NXFxRule { FName name; float keep; };
+-static TArray<NXFxRule> nxfxRules;
+-static TMap<PClass *, float> nxfxCache;	// resolved share per class (1 = not listed)
+-static uint32_t nxfxSeed = 0x9E3779B9u;
+-
+-static inline float NXFxRandom()
+-{
+-	// xorshift: must not touch the game's random numbers (demos, saves)
+-	nxfxSeed ^= nxfxSeed << 13;
+-	nxfxSeed ^= nxfxSeed >> 17;
+-	nxfxSeed ^= nxfxSeed << 5;
+-	return (nxfxSeed >> 8) * (1.0f / 16777216.0f);
+-}
+-
+-static void NXFxParse()
+-{
+-	nxfxDirty = false;
+-	nxfxRules.Clear();
+-	nxfxCache.Clear();
+-	FString list = *nx_fx_thin;
+-	auto entries = list.Split(",", FString::TOK_SKIPEMPTY);
+-	for (auto &e : entries)
+-	{
+-		e.StripLeftRight();
+-		long eq = e.IndexOf('=');
+-		NXFxRule rule;
+-		FString name = eq >= 0 ? e.Left(eq) : e;
+-		name.StripLeftRight();
+-		if (name.IsEmpty() || !name.CompareNoCase("none")) continue;	// "none" = empty list (a launcher argument can't be empty)
+-		rule.name = FName(name.GetChars());
+-		rule.keep = eq >= 0 ? (float)atof(e.GetChars() + eq + 1) : 0.f;
+-		if (rule.keep < 0) rule.keep = 0;
+-		if (rule.keep > 1) rule.keep = 1;
+-		nxfxRules.Push(rule);
+-	}
+-	nxfxActive = nxfxRules.Size() > 0;
+-}
+-
+-static float NXFxKeep(PClass *cls)
+-{
+-	if (auto p = nxfxCache.CheckKey(cls)) return *p;
+-	float keep = 1.f;
+-	for (PClass *c = cls; c != nullptr && keep >= 1.f; c = c->ParentClass)
+-	{
+-		for (auto &r : nxfxRules)
+-		{
+-			if (r.name == c->TypeName) { keep = r.keep; break; }
+-		}
+-	}
+-	nxfxCache[cls] = keep;
+-	return keep;
+-}
+-
+-static bool NXFxFar(const DVector3 &pos)
+-{
+-	double far = nx_fx_far;
+-	if (far <= 0) return false;
+-	AActor *cam = players[consoleplayer].camera;
+-	if (cam == nullptr) return false;
+-	return (pos - cam->Pos()).LengthSquared() > far * far;
+-}
+-
+-bool NXFx_SkipSpawn(PClass *cls, const DVector3 &pos)
+-{
+-	if (nxfxDirty) NXFxParse();
+-	if (!nxfxActive || cls == nullptr) return false;
+-	float keep = NXFxKeep(cls);
+-	if (keep >= 1.f) return false;
+-	if (NXFxFar(pos) || keep <= 0.f || NXFxRandom() >= keep)
+-	{
+-		nxperf.fxskipped++;
+-		return true;
+-	}
+-	return false;
+-}
+-
+-bool NXFx_DropNewThinker(DThinker *thinker)
+-{
+-	if (nxfxDirty) NXFxParse();
+-	if (!nxfxActive) return false;
+-	PClass *cls = thinker->GetClass();
+-	float keep = NXFxKeep(cls);
+-	if (keep >= 1.f) return false;
+-	bool drop;
+-	if (cls->IsDescendantOf(RUNTIME_CLASS(AActor)))
+-	{
+-		auto actor = static_cast<AActor *>(thinker);
+-		// never touch anything that takes part in the game (pickups are Inventory;
+-		// some effects like PB's casings are MF_SPECIAL only to react when touched)
+-		if (actor->player || actor->tid != 0 || (actor->flags & (MF_SHOOTABLE | MF_SOLID)) || (actor->flags3 & MF3_ISMONSTER) || actor->IsKindOf(NAME_Inventory))
+-			return false;
+-		drop = NXFxFar(actor->Pos()) || keep <= 0.f || NXFxRandom() >= keep;
+-	}
+-	else
+-	{
+-		drop = keep <= 0.f || NXFxRandom() >= keep;
+-	}
+-	if (drop) nxperf.fxskipped++;
+-	return drop;
+-}
+-
+-// ZScript side (A_SpawnItem / A_SpawnItemEx): true = behave like a failed spawn
+-DEFINE_ACTION_FUNCTION(AActor, NXFxSkip)
+-{
+-	PARAM_SELF_PROLOGUE(AActor);
+-	PARAM_CLASS(cls, AActor);
+-	ACTION_RETURN_BOOL(NXFx_SkipSpawn(cls, self->Pos()));
+-}
+-
+-CCMD(nx_fx_status)
+-{
+-	if (nxfxDirty) NXFxParse();
+-	Printf("nx_fx_thin: %d rules, far %.0f\n", nxfxRules.Size(), (double)nx_fx_far);
+-	for (auto &r : nxfxRules) Printf("  %s keep %.2f\n", r.name.GetChars(), r.keep);
+-}
+diff --git a/src/playsim/nx_fxthin.h b/src/playsim/nx_fxthin.h
+deleted file mode 100644
+index d653b1856..000000000
+--- a/src/playsim/nx_fxthin.h
++++ /dev/null
+@@ -1,8 +0,0 @@
+-#pragma once
+-// Switch port: thinning of purely visual effect actors (see nx_fxthin.cpp)
+-class PClass;
+-class DThinker;
+-#include "vectors.h"
+-
+-bool NXFx_SkipSpawn(PClass *cls, const DVector3 &pos);	// before spawning: true = don't spawn
+-bool NXFx_DropNewThinker(DThinker *thinker);				// on a thinker's first tic: true = destroy it
+diff --git a/src/playsim/p_actionfunctions.cpp b/src/playsim/p_actionfunctions.cpp
+index 4fcc55266..4a5cbb6aa 100644
+--- a/src/playsim/p_actionfunctions.cpp
++++ b/src/playsim/p_actionfunctions.cpp
+@@ -22,7 +22,6 @@
+ **
+ */
+ 
+-#include "nx_fxthin.h"
+ #include "gi.h"
+ #include "g_level.h"
+ #include "actor.h"
+@@ -907,9 +906,6 @@ DEFINE_ACTION_FUNCTION(AActor, A_SpawnProjectile)
+ 	PARAM_ANGLE	(Pitch);
+ 	PARAM_INT	(ptr);
+ 
+-	// Switch: listed visual effects are thinned out (same as a projectile that could not spawn)
+-	if (ti && NXFx_SkipSpawn(ti, self->Pos())) ACTION_RETURN_OBJECT(nullptr);
+-
+ 	AActor *ref = COPY_AAPTR(self, ptr);
+ 
+ 	int aimmode = flags & CMF_AIMMODE;
+diff --git a/tools/nxlauncher/src/data.c b/tools/nxlauncher/src/data.c
+index d732f6934..c5914be4e 100644
+--- a/tools/nxlauncher/src/data.c
++++ b/tools/nxlauncher/src/data.c
+@@ -27,8 +27,8 @@ const char *const preset_names[PRESET_COUNT] = { "Qualidade", "Equilibrado", "Sw
+ const char *const preset_desc[PRESET_COUNT] =
+ {
+ 	"Tudo ligado, como no PC. Pode travar em cenas pesadas.",
+-	"Luzes leves; no Brutality: metade do sangue/cápsulas e barris de fogo simples.",
+-	"Sem luzes, efeitos mínimos, barris originais do Doom, monstros mais simples.",
++	"Luzes leves, menos partículas e sem reverberação.",
++	"Sem luzes dinâmicas, poucos efeitos distantes e som mais leve.",
+ };
+ const char *const monster_names[5] = { "Padrão", "Sem monstros", "Rápidos", "Renascem", "Rápidos e renascem" };
+ 
+@@ -155,7 +155,6 @@ static void profile_defaults(Profile *p)
+ 	p->scale = 100;
+ 	p->fpslimit = 0;
+ 	p->glthread = 0;
+-	p->simplefx = 1;
+ }
+ 
+ static Profile *find_profile(const char *name)
+@@ -177,19 +176,6 @@ int data_find_mod(const Profile *p, const char *name)
+ 	return -1;
+ }
+ 
+-int data_is_pb(const Profile *p)
+-{
+-	for (int i = 0; i < p->nmods; i++)
+-	{
+-		char low[MAX_PATH_LEN];
+-		int j;
+-		for (j = 0; p->mods[i][j] && j < MAX_PATH_LEN - 1; j++) low[j] = (char)tolower((unsigned char)p->mods[i][j]);
+-		low[j] = 0;
+-		if (strstr(low, "brutal") || !strncmp(low, "pb_", 3) || !strncmp(low, "pb-", 3) || strstr(low, "project_b") || strstr(low, "projectb")) return 1;
+-	}
+-	return 0;
+-}
+-
+ //==========================================================================
+ // ini file
+ //==========================================================================
+@@ -264,7 +250,6 @@ static void load_ini(void)
+ 		else if (!strcasecmp(key, "RenderScale")) p->scale = atoi(val);
+ 		else if (!strcasecmp(key, "FPSLimit")) p->fpslimit = atoi(val);
+ 		else if (!strcasecmp(key, "GLThread")) p->glthread = atoi(val);
+-		else if (!strcasecmp(key, "SimpleShotFX")) p->simplefx = atoi(val);
+ 		else if (!strcasecmp(key, "ShowFPS")) p->showfps = atoi(val);
+ 		else if (!strcasecmp(key, "Skill")) p->skill = atoi(val);
+ 		else if (!strcasecmp(key, "Monsters"))
+@@ -304,7 +289,6 @@ int data_save(void)
+ 		fprintf(f, "RenderScale = %d\n", p->scale);
+ 		fprintf(f, "FPSLimit = %d\n", p->fpslimit);
+ 		fprintf(f, "GLThread = %d\n", p->glthread);
+-		fprintf(f, "SimpleShotFX = %d\n", p->simplefx);
+ 		fprintf(f, "ShowFPS = %d\n", p->showfps);
+ 		fprintf(f, "Skill = %d\n", p->skill);
+ 		fprintf(f, "MonsterMode = %d\n", p->monsters);
+@@ -356,33 +340,11 @@ int data_init(void)
+ 	ini_version = 0;
+ 	load_ini();
+ 
+-	// nx3.2: Project Brutality profiles move to the lightest preset once
+-	// (the heavy fights were far too slow with the others)
+-	if (ini_version < 3)
+-	{
+-		for (int i = 0; i < nprofiles; i++)
+-			if (data_is_pb(&profiles[i])) profiles[i].preset = PRESET_SWITCH;
+-	}
+-	// nx3.3: Brutality profiles get a steady 30 FPS cap once
+-	if (ini_version < 4)
+-	{
+-		for (int i = 0; i < nprofiles; i++)
+-			if (data_is_pb(&profiles[i])) profiles[i].fpslimit = 30;
+-	}
+-	// nx3.5: GL driver thread on for everybody, Brutality locked at 30 (VSync every other refresh)
+-	if (ini_version < 5)
+-	{
+-		for (int i = 0; i < nprofiles; i++)
+-		{
+-			profiles[i].glthread = 1;
+-			if (data_is_pb(&profiles[i])) profiles[i].fpslimit = 30;
+-		}
+-	}
+-	// nx3.7: plain shot effects for everybody (only used with Brutality)
++	// The GL driver thread froze the game on the console when it turned on
++	// during startup. Force it off once for profiles saved by older builds.
+ 	if (ini_version < 6)
+ 	{
+-		// the GL driver thread froze the game on the console (nx3.6): off until it's proven
+-		for (int i = 0; i < nprofiles; i++) { profiles[i].simplefx = 1; profiles[i].glthread = 0; }
++		for (int i = 0; i < nprofiles; i++) profiles[i].glthread = 0;
+ 	}
+ 
+ 	// drop entries without a game file (keep custom ones so that nothing gets lost)
+@@ -393,7 +355,6 @@ int data_init(void)
+ 		if (profiles[i].scale < 50 || profiles[i].scale > 100) profiles[i].scale = 100;
+ 		if (profiles[i].fpslimit != 30 && profiles[i].fpslimit != 35 && profiles[i].fpslimit != 40) profiles[i].fpslimit = 0;
+ 		profiles[i].glthread = profiles[i].glthread ? 1 : 0;
+-		profiles[i].simplefx = profiles[i].simplefx ? 1 : 0;
+ 		if (profiles[i].monsters < 0 || profiles[i].monsters > 4) profiles[i].monsters = 0;
+ 		if (profiles[i].skill < 0 || profiles[i].skill > 5) profiles[i].skill = 0;
+ 	}
+@@ -461,42 +422,15 @@ static const char *const engine_presets[PRESET_COUNT] =
+ {
+ 	"+set r_dynlights 1 +set gles_max_lights_per_surface 16 +set r_maxparticles 4000 +set cl_maxdecals 1024 +set gl_light_particles 1 "
+ 	"+set r_actorspriteshadow 1 +set r_actorspriteshadowdist 1500 +set gl_texture_filter_anisotropic 8 +set gl_sort_textures 0 +set snd_channels 128 +set snd_efx 1 "
+-	"+set nx_effect_cull 0 +set nx_effect_minalpha 0 +set nx_fx_thin none +set nx_fx_far 0 ",
++	"+set nx_effect_cull 0 +set nx_effect_minalpha 0 ",
+ 
+ 	"+set r_dynlights 1 +set gles_max_lights_per_surface 6 +set r_maxparticles 600 +set cl_maxdecals 200 +set gl_light_particles 0 "
+ 	"+set r_actorspriteshadow 1 +set r_actorspriteshadowdist 800 +set gl_texture_filter_anisotropic 4 +set gl_sort_textures 1 +set snd_channels 64 +set snd_efx 0 "
+-	"+set nx_effect_cull 4000 +set nx_effect_minalpha 0.06 +set nx_fx_thin none +set nx_fx_far 0 ",
++	"+set nx_effect_cull 4000 +set nx_effect_minalpha 0.06 ",
+ 
+ 	"+set r_dynlights 0 +set gles_max_lights_per_surface 2 +set r_maxparticles 150 +set cl_maxdecals 64 +set gl_light_particles 0 "
+ 	"+set r_actorspriteshadow 1 +set r_actorspriteshadowdist 600 +set gl_texture_filter_anisotropic 2 +set gl_sort_textures 1 +set snd_channels 40 +set snd_efx 0 "
+-	"+set nx_effect_cull 2500 +set nx_effect_minalpha 0.12 +set nx_fx_thin none +set nx_fx_far 0 ",
+-};
+-
+-// Project Brutality's own options (only passed when PB is in the mod list).
+-// Most of PB's cost in fights is the number of effect actors (blood, gibs,
+-// casings, smoke) that all move and get drawn every tic.
+-static const char *const pb_presets[PRESET_COUNT] =
+-{
+-	"+set PB_tracerlight 1 +set pb_performance_fire 0 +set pb_simplemonsterbehavior 0 +set pb_disable_decorations 0 +set pb_decorative_flame_barrels 0 "
+-	"+set nashgore_maxgore 1024 +set nashgore_maxcasings 50 +set nashgore_bloodmult 1.0 +set nashgore_gibamount 255 "
+-	"+set nashgore_footprints 1 +set nashgore_bloodspurt 1 +set nashgore_corpseblood 1 +set nashgore_splat 1 "
+-	"+set pb_hidebloodmist 0 +set pb_cheapcasings 1 +set pb_dasheffect 1 +set pb_lowflashesmode 0 +set pb_showblooddrops 1 +set pb_showglasscracks 1 "
+-	"+set pb_gunsmoketype 0 ",
+-
+-	// weapon smoke off (PB's own "Gun Smoke Type: Off" plus the barrel heat,
+-	// casing and enemy muzzle smoke that option doesn't cover); nothing else is thinned
+-	"+set PB_tracerlight 0 +set pb_performance_fire 1 +set pb_simplemonsterbehavior 0 +set pb_disable_decorations 0 +set pb_decorative_flame_barrels 1 "
+-	"+set nashgore_maxgore 128 +set nashgore_maxcasings 16 +set nashgore_bloodmult 0.6 +set nashgore_gibamount 128 "
+-	"+set nashgore_footprints 0 +set nashgore_bloodspurt 1 +set nashgore_corpseblood 0 +set nashgore_splat 1 "
+-	"+set pb_hidebloodmist 1 +set pb_cheapcasings 1 +set pb_dasheffect 1 +set pb_lowflashesmode 0 +set pb_showblooddrops 1 +set pb_showglasscracks 1 "
+-	"+set pb_gunsmoketype 2 ",
+-
+-	"+set PB_tracerlight 0 +set pb_performance_fire 1 +set pb_simplemonsterbehavior 1 +set pb_disable_decorations 1 +set pb_decorative_flame_barrels 1 "
+-	"+set nashgore_maxgore 40 +set nashgore_maxcasings 6 +set nashgore_bloodmult 0.3 +set nashgore_gibamount 48 "
+-	"+set nashgore_footprints 0 +set nashgore_bloodspurt 0 +set nashgore_corpseblood 0 +set nashgore_splat 0 "
+-	"+set pb_hidebloodmist 1 +set pb_cheapcasings 1 +set pb_dasheffect 0 +set pb_lowflashesmode 1 +set pb_showblooddrops 0 +set pb_showglasscracks 0 "
+-	"+set pb_huddynamics 0 +set pb_execution_box 0 "
+-	"+set pb_gunsmoketype 2 ",
++	"+set nx_effect_cull 2500 +set nx_effect_minalpha 0.12 ",
+ };
+ 
+ void data_launch(int index)
+@@ -550,23 +484,6 @@ void data_launch(int index)
+ 	if (p->noloadscreen) arg("-nxnoload ");
+ 
+ 	arg("%s", engine_presets[p->preset]);
+-	if (data_is_pb(p))
+-	{
+-		arg("%s", pb_presets[p->preset]);
+-		// purely visual effect actors that are dropped (nx_fx_thin, class = share kept)
+-		char fx[1024] = "";
+-		if (p->preset != PRESET_QUALITY)
+-			// weapon smoke: barrel heat, casing and enemy muzzle smoke (PB's "Gun Smoke Type: Off" misses those)
+-			strcat(fx, "PB_GunFireSmoke=0,GunFireSmoke=0,NewCasingSmoke=0,");
+-		if (p->simplefx)
+-			// shot effects like in the original game: no detailed bullet impacts, debris, sparks,
+-			// ricochets, ejected casings or extra muzzle flashes (bullets, damage and blood stay)
+-			strcat(fx, "PB_BaseBulletImpact=0,PB_AnimatedSmokeThinker=0,SparkX=0,HitSpark=0,RicoChet=0,"
+-				"PB_CasingBase=0,RifleCaseSpawn=0,Mp40CaseSpawn=0,SMGCasingSpawner=0,MastermindCaseSpawn=0,ShotgunWad=0,"
+-				"OrangeLensFlareAlt=0,PB_MuzzleSpark=0,MarineMuzzle1=0,");
+-		size_t n = strlen(fx);
+-		if (n > 0) { fx[n - 1] = 0; arg("+set nx_fx_thin %s ", fx); }
+-	}
+ 	arg("+set vid_scalefactor %d.%02d ", p->scale / 100, p->scale % 100);
+ 	// 30 = VSync on every other refresh of the 60 Hz screen: a real lock with
+ 	// even frame pacing. 35/40 are plain caps without VSync.
+diff --git a/tools/nxlauncher/src/data.h b/tools/nxlauncher/src/data.h
+index 741811875..1ceae3c86 100644
+--- a/tools/nxlauncher/src/data.h
++++ b/tools/nxlauncher/src/data.h
+@@ -27,7 +27,6 @@ typedef struct
+ 	int scale;	// render scale in percent
+ 	int fpslimit;	// 0 = VSync 60, 30 = VSync every other refresh (locked 30), 35/40 = frame rate cap
+ 	int glthread;	// GL driver on its own CPU core (Mesa glthread)
+-	int simplefx;	// Brutality: plain (vanilla-like) shot effects
+ 	int showfps;
+ 	int skill;	// 0 = ask in game
+ 	int monsters;	// index into monster options
+@@ -66,8 +65,6 @@ const char *data_iwad_title(const char *iwad);
+ void data_iwad_path(const char *iwad, char *out, int outlen);
+ double data_file_mb(const char *dir, const char *name);
+ int data_find_mod(const Profile *p, const char *name);
+-int data_is_pb(const Profile *p);
+-
+ int data_add_profile(const char *name, const char *iwad, const Profile *copyfrom);
+ void data_delete_profile(int index);
+ 
+diff --git a/tools/nxlauncher/src/ui.c b/tools/nxlauncher/src/ui.c
+index 496072967..61dd24a91 100644
+--- a/tools/nxlauncher/src/ui.c
++++ b/tools/nxlauncher/src/ui.c
+@@ -712,8 +712,6 @@ static void Mods_Draw(float dt)
+ 	}
+ 	DrawScrollbar(colx[1] + colw - 10, py + 74, visible * rowh - 6, avail_scroll, visible, n_avail);
+ 
+-	if (data_is_pb(p) && p->preset == PRESET_QUALITY)
+-		gfx_text(FONT_LIGHT, 16, 48, py + ph + 10, C_ACCENT2, "Project Brutality detectado: use o desempenho \"Equilibrado\" ou \"Switch (leve)\" na aba OPÇÕES.");
+ }
+ 
+ static void Mods_Update(void)
+@@ -778,22 +776,10 @@ static void Mods_Update(void)
+ 		{
+ 			if (p->nmods >= MAX_MODS) { ui_message("Limite", "Este perfil já tem o máximo de mods."); return; }
+ 			FileEntry *f = &pwad_files[avail_list[avail_sel]];
+-			int waspb = data_is_pb(p);
+ 			strncpy(p->mods[p->nmods++], f->name, MAX_PATH_LEN - 1);
+ 			order_sel = p->nmods - 1;
+-			if (!waspb && data_is_pb(p) && p->preset == PRESET_BALANCED)
+-			{
+-				// Project Brutality needs the light preset to play smoothly on the Switch
+-				p->preset = PRESET_SWITCH;
+-				if (p->fpslimit == 0) p->fpslimit = 30;
+-				data_save();
+-				Toast("Brutality: desempenho ajustado para \"%s\"", preset_names[PRESET_SWITCH]);
+-			}
+-			else
+-			{
+-				data_save();
+-				Toast("Adicionado: %s", f->name);
+-			}
++			data_save();
++			Toast("Adicionado: %s", f->name);
+ 		}
+ 	}
+ }
+@@ -804,7 +790,7 @@ static void Mods_Update(void)
+ 
+ enum Opts
+ {
+-	OPT_PRESET, OPT_SCALE, OPT_FPSLIMIT, OPT_SHOTFX, OPT_GLTHREAD, OPT_FPS, OPT_LOADSCREEN, OPT_SKILL, OPT_MONSTERS, OPT_WARP, OPT_CLASS,
++	OPT_PRESET, OPT_SCALE, OPT_FPSLIMIT, OPT_GLTHREAD, OPT_FPS, OPT_LOADSCREEN, OPT_SKILL, OPT_MONSTERS, OPT_WARP, OPT_CLASS,
+ 	OPT_LOADGAME, OPT_LOG, OPT_EXTRA, OPT_RENAME, OPT_IWAD, OPT_COUNT
+ };
+ 
+@@ -830,12 +816,6 @@ static void OptInfo(Profile *p, int o, const char **label, const char **desc, ch
+ 		else if (p->fpslimit > 0) snprintf(value, vlen, "%d FPS", p->fpslimit);
+ 		else snprintf(value, vlen, "Sem limite (VSync)");
+ 		break;
+-	case OPT_SHOTFX:
+-		*label = "Efeitos de tiro (Brutality)";
+-		*desc = p->simplefx ? "Como no Doom original: sem impactos, faíscas, cápsulas e clarões extras. Mais leve (dano e sangue iguais)."
+-			: "Todos os efeitos de tiro do Brutality (mais pesado nos tiroteios).";
+-		snprintf(value, vlen, "%s", p->simplefx ? "Simples (vanilla)" : "Brutality");
+-		break;
+ 	case OPT_GLTHREAD:
+ 		*label = "Driver de vídeo em outro núcleo";
+ 		*desc = "EXPERIMENTAL: driver de vídeo em outro núcleo (pode dar mais FPS, mas já travou o jogo no console). Se congelar, desligue e mande o hang.log.";
+@@ -959,7 +939,6 @@ static void Options_Update(void)
+ 			changed = 1;
+ 			break;
+ 		}
+-		case OPT_SHOTFX: p->simplefx = !p->simplefx; changed = 1; break;
+ 		case OPT_GLTHREAD: p->glthread = !p->glthread; changed = 1; break;
+ 		case OPT_FPS: p->showfps = !p->showfps; changed = 1; break;
+ 		case OPT_LOADSCREEN: p->noloadscreen = !p->noloadscreen; changed = 1; break;
+@@ -1151,7 +1130,7 @@ int ui_run(void)
+ 
+ 	if (plat_applet_mode())
+ 		ui_message("Modo applet (pouca RAM)",
+-			"O launcher foi aberto pelo Álbum. Nesse modo só ~400 MB de RAM ficam livres, o que NÃO basta para Project Brutality, Lexicon ou WadFusion. Para ter a RAM completa, segure R ao abrir qualquer jogo e inicie o launcher pelo menu que aparecer.");
++			"O launcher foi aberto pelo Álbum. Nesse modo só ~400 MB de RAM ficam livres, o que não basta para mods grandes. Para ter a RAM completa, segure R ao abrir qualquer jogo e inicie o launcher pelo menu que aparecer.");
+ 
+ 	for (;;)
+ 	{
+diff --git a/wadsrc/static/zscript/actors/actor.zs b/wadsrc/static/zscript/actors/actor.zs
+index f83f3bc0a..44e8b51c0 100644
+--- a/wadsrc/static/zscript/actors/actor.zs
++++ b/wadsrc/static/zscript/actors/actor.zs
+@@ -1317,7 +1317,6 @@ class Actor : Thinker native
+ 	native clearscope bool IsActorPlayingSound(int channel, Sound snd = -1);
+ 	native void A_SeekerMissile(int threshold, int turnmax, int flags = 0, int chance = 50, int distance = 10);
+ 	native action state A_Jump(int chance, statelabel label, ...);
+-	native bool NXFxSkip(class<Actor> cls);	// Switch port: effect thinning (nx_fx_thin)
+ 	native Actor A_SpawnProjectile(class<Actor> missiletype, double spawnheight = 32, double spawnofs_xy = 0, double angle = 0, int flags = 0, double pitch = 0, int ptr = AAPTR_TARGET);
+ 	native void A_CustomRailgun(int damage, int spawnofs_xy = 0, color color1 = 0, color color2 = 0, int flags = 0, int aim = 0, double maxdiff = 0, class<Actor> pufftype = "BulletPuff", double spread_xy = 0, double spread_z = 0, double range = 0, int duration = 0, double sparsity = 1.0, double driftspeed = 1.0, class<Actor> spawnclass = null, double spawnofs_z = 0, int spiraloffset = 270, int limit = 0, double veleffect = 3);
+ 	native void A_Print(string whattoprint, double time = 0, name fontname = "none");
+diff --git a/wadsrc/static/zscript/actors/attacks.zs b/wadsrc/static/zscript/actors/attacks.zs
+index 98bed3ffb..9e0035434 100644
+--- a/wadsrc/static/zscript/actors/attacks.zs
++++ b/wadsrc/static/zscript/actors/attacks.zs
+@@ -394,12 +394,6 @@ extend class Actor
+ 		{
+ 			return false, null;
+ 		}
+-		// Switch port: listed visual effects are thinned out (nx_fx_thin)
+-		if (NXFxSkip(missile))
+-		{
+-			return true, null;
+-		}
+-
+ 		// Don't spawn monsters if this actor has been massacred
+ 		if (DamageType == 'Massacre' && GetDefaultByType(missile).bIsMonster)
+ 		{
+@@ -443,11 +437,6 @@ extend class Actor
+ 		{
+ 			return true, null;
+ 		}
+-		// Switch port: listed visual effects are thinned out (nx_fx_thin)
+-		if (NXFxSkip(missile))
+-		{
+-			return true, null;
+-		}
+ 		// Don't spawn monsters if this actor has been massacred
+ 		if (DamageType == 'Massacre' && GetDefaultByType(missile).bIsMonster)
+ 		{
+-- 
+2.56.0
+

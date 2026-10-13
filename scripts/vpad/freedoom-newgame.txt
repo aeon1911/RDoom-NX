@@ -1,0 +1,23 @@
+wait 13
+tap PLUS
+wait 25
+tap A
+wait 1.7
+tap A
+wait 1.2
+tap A
+wait 1.2
+tap A
+wait 8.5
+shot 01-map
+hold ZR
+wait 0.6
+shot 02-firing
+wait 1.5
+release ZR
+stick L 0 1 2
+hold ZR
+wait 3
+release ZR
+wait 1
+shot 03-after

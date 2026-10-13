@@ -1,0 +1,305 @@
+From ced107eb7a78fe609d96990cb81c92ea8cc234fb Mon Sep 17 00:00:00 2001
+From: RDoom <171243930+aeon1911@users.noreply.github.com>
+Date: Sun, 11 Oct 2026 12:31:22 -0300
+Subject: [PATCH 19/46] Vulkan on Switch: upload textures through a linear
+ image and the 3D engine.
+
+NVK exposes a single queue family with the compute bit on the GM20B and then
+implements vkCmdCopyBufferToImage with an internal compute shader. Texture
+uploads now write the pixels into a host-visible linear image (unified
+memory, no staging buffer) and vkCmdBlitImage it into the tiled texture,
+which NVK does with a 3D meta draw. Falls back to vkCmdCopyBufferToImage when
+the format has no linear blit support. Used for hardware textures and
+post-process textures; rd_vk_blitupload 0 restores the old path.
+
+In Ryujinx, which cannot run NVK's internal compute shaders, this is what
+turns the black Vulkan picture into the rendered map (evidence/ryujinx/
+32-vk-freedoom). ZVulkan's ImageBuilder gains InitialLayout().
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ .../ZVulkan/include/zvulkan/vulkanbuilders.h  |   1 +
+ libraries/ZVulkan/src/vulkanbuilders.cpp      |   6 +
+ src/CMakeLists.txt                            |   1 +
+ .../vulkan/textures/vk_hwtexture.cpp          |  25 +++--
+ .../rendering/vulkan/textures/vk_nxupload.cpp | 104 ++++++++++++++++++
+ .../rendering/vulkan/textures/vk_nxupload.h   |  13 +++
+ .../vulkan/textures/vk_pptexture.cpp          |  13 ++-
+ 7 files changed, 149 insertions(+), 14 deletions(-)
+ create mode 100644 src/common/rendering/vulkan/textures/vk_nxupload.cpp
+ create mode 100644 src/common/rendering/vulkan/textures/vk_nxupload.h
+
+diff --git a/libraries/ZVulkan/include/zvulkan/vulkanbuilders.h b/libraries/ZVulkan/include/zvulkan/vulkanbuilders.h
+index 4e1167669..1b10a4a4b 100644
+--- a/libraries/ZVulkan/include/zvulkan/vulkanbuilders.h
++++ b/libraries/ZVulkan/include/zvulkan/vulkanbuilders.h
+@@ -125,6 +125,7 @@ public:
+ 	ImageBuilder& Usage(VkImageUsageFlags imageUsage, VmaMemoryUsage memoryUsage = VMA_MEMORY_USAGE_GPU_ONLY, VmaAllocationCreateFlags allocFlags = 0);
+ 	ImageBuilder& MemoryType(VkMemoryPropertyFlags requiredFlags, VkMemoryPropertyFlags preferredFlags, uint32_t memoryTypeBits = 0);
+ 	ImageBuilder& LinearTiling();
++	ImageBuilder& InitialLayout(VkImageLayout layout);
+ 	ImageBuilder& DebugName(const char* name) { debugName = name; return *this; }
+ 
+ 	bool IsFormatSupported(VulkanDevice *device, VkFormatFeatureFlags bufferFeatures = 0);
+diff --git a/libraries/ZVulkan/src/vulkanbuilders.cpp b/libraries/ZVulkan/src/vulkanbuilders.cpp
+index 6c35f1e4b..eca6d2845 100644
+--- a/libraries/ZVulkan/src/vulkanbuilders.cpp
++++ b/libraries/ZVulkan/src/vulkanbuilders.cpp
+@@ -412,6 +412,12 @@ ImageBuilder& ImageBuilder::LinearTiling()
+ 	return *this;
+ }
+ 
++ImageBuilder& ImageBuilder::InitialLayout(VkImageLayout layout)
++{
++	imageInfo.initialLayout = layout;
++	return *this;
++}
++
+ ImageBuilder& ImageBuilder::Usage(VkImageUsageFlags usage, VmaMemoryUsage memoryUsage, VmaAllocationCreateFlags allocFlags)
+ {
+ 	imageInfo.usage = usage;
+diff --git a/src/CMakeLists.txt b/src/CMakeLists.txt
+index 6b01b8708..0530f2f4f 100644
+--- a/src/CMakeLists.txt
++++ b/src/CMakeLists.txt
+@@ -776,6 +776,7 @@ set (VULKAN_SOURCES
+ 	common/rendering/vulkan/shaders/vk_ppshader.cpp
+ 	common/rendering/vulkan/textures/vk_samplers.cpp
+ 	common/rendering/vulkan/textures/vk_hwtexture.cpp
++	common/rendering/vulkan/textures/vk_nxupload.cpp
+ 	common/rendering/vulkan/textures/vk_pptexture.cpp
+ 	common/rendering/vulkan/textures/vk_imagetransition.cpp
+ 	common/rendering/vulkan/textures/vk_renderbuffers.cpp
+diff --git a/src/common/rendering/vulkan/textures/vk_hwtexture.cpp b/src/common/rendering/vulkan/textures/vk_hwtexture.cpp
+index 5381ae2e7..7e4ef5596 100644
+--- a/src/common/rendering/vulkan/textures/vk_hwtexture.cpp
++++ b/src/common/rendering/vulkan/textures/vk_hwtexture.cpp
+@@ -36,6 +36,7 @@
+ #include "vulkan/renderer/vk_postprocess.h"
+ #include "vulkan/shaders/vk_shader.h"
+ #include "vk_hwtexture.h"
++#include "vk_nxupload.h"
+ 
+ VkHardwareTexture::VkHardwareTexture(VulkanRenderDevice* fb, int numchannels) : fb(fb)
+ {
+@@ -142,16 +143,6 @@ void VkHardwareTexture::CreateTexture(int w, int h, int pixelsize, VkFormat form
+ 
+ 	int totalSize = w * h * pixelsize;
+ 
+-	auto stagingBuffer = BufferBuilder()
+-		.Size(totalSize)
+-		.Usage(VK_BUFFER_USAGE_TRANSFER_SRC_BIT, VMA_MEMORY_USAGE_CPU_ONLY)
+-		.DebugName("VkHardwareTexture.mStagingBuffer")
+-		.Create(fb->device.get());
+-
+-	uint8_t *data = (uint8_t*)stagingBuffer->Map(0, totalSize);
+-	memcpy(data, pixels, totalSize);
+-	stagingBuffer->Unmap();
+-
+ 	mImage.Image = ImageBuilder()
+ 		.Format(format)
+ 		.Size(w, h, !mipmap ? 1 : GetMipLevels(w, h))
+@@ -170,6 +161,19 @@ void VkHardwareTexture::CreateTexture(int w, int h, int pixelsize, VkFormat form
+ 		.AddImage(&mImage, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, true)
+ 		.Execute(cmdbuffer);
+ 
++	std::unique_ptr<VulkanBuffer> stagingBuffer;
++	if (!NX_UploadViaBlit(fb, cmdbuffer, mImage.Image->image, format, w, h, pixelsize, pixels))
++	{
++	stagingBuffer = BufferBuilder()
++		.Size(totalSize)
++		.Usage(VK_BUFFER_USAGE_TRANSFER_SRC_BIT, VMA_MEMORY_USAGE_CPU_ONLY)
++		.DebugName("VkHardwareTexture.mStagingBuffer")
++		.Create(fb->device.get());
++
++	uint8_t *data = (uint8_t*)stagingBuffer->Map(0, totalSize);
++	memcpy(data, pixels, totalSize);
++	stagingBuffer->Unmap();
++
+ 	VkBufferImageCopy region = {};
+ 	region.imageSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+ 	region.imageSubresource.layerCount = 1;
+@@ -177,6 +181,7 @@ void VkHardwareTexture::CreateTexture(int w, int h, int pixelsize, VkFormat form
+ 	region.imageExtent.width = w;
+ 	region.imageExtent.height = h;
+ 	cmdbuffer->copyBufferToImage(stagingBuffer->buffer, mImage.Image->image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &region);
++	}
+ 
+ 	if (mipmap) mImage.GenerateMipmaps(cmdbuffer);
+ 
+diff --git a/src/common/rendering/vulkan/textures/vk_nxupload.cpp b/src/common/rendering/vulkan/textures/vk_nxupload.cpp
+new file mode 100644
+index 000000000..fd628fc6c
+--- /dev/null
++++ b/src/common/rendering/vulkan/textures/vk_nxupload.cpp
+@@ -0,0 +1,104 @@
++/*
++** vk_nxupload.cpp
++** Texture uploads on the Switch: CPU-written linear image + vkCmdBlitImage.
++**
++** NVK has one queue family on the GM20B and it has the compute bit, so it
++** implements vkCmdCopyBufferToImage with an internal compute shader. Every
++** texture upload therefore switches the channel between compute and 3D work.
++** On the Tegra X1's unified memory the pixels can instead be written straight
++** into a linear image that the 3D engine then blits into the optimally tiled
++** texture (NVK's blit is a 3D meta draw); the staging buffer is not needed.
++** This is also the path Ryujinx can emulate: it does not run NVK's internal
++** compute shaders correctly, and textures uploaded that way stay black
++** (vktest/matrix, evidence/vkmatrix).
++**
++** Copyright 2026 RDoom contributors. GPLv3 (same as UZDoom).
++*/
++
++#include "vk_nxupload.h"
++
++#ifdef __SWITCH__
++
++#include <string.h>
++#include <map>
++#include <zvulkan/vulkanbuilders.h>
++#include "vulkan/system/vk_renderdevice.h"
++#include "vulkan/system/vk_commandbuffer.h"
++#include "c_cvars.h"
++
++CVAR(Bool, rd_vk_blitupload, true, 0)
++
++static bool FormatSupported(VulkanRenderDevice *fb, VkFormat format)
++{
++	static std::map<VkFormat, bool> cache;
++	auto it = cache.find(format);
++	if (it != cache.end())
++		return it->second;
++	VkFormatProperties props = {};
++	vkGetPhysicalDeviceFormatProperties(fb->device->PhysicalDevice.Device, format, &props);
++	bool ok = (props.linearTilingFeatures & VK_FORMAT_FEATURE_BLIT_SRC_BIT) &&
++		(props.optimalTilingFeatures & VK_FORMAT_FEATURE_BLIT_DST_BIT);
++	cache[format] = ok;
++	return ok;
++}
++
++bool NX_UploadViaBlit(VulkanRenderDevice *fb, VulkanCommandBuffer *cmd, VkImage dst, VkFormat format,
++	int w, int h, int pixelsize, const void *pixels, int layer)
++{
++	if (!rd_vk_blitupload || !pixels || w <= 0 || h <= 0 || !FormatSupported(fb, format))
++		return false;
++
++	auto src = ImageBuilder()
++		.Format(format)
++		.Size(w, h)
++		.LinearTiling()
++		.InitialLayout(VK_IMAGE_LAYOUT_PREINITIALIZED)
++		.Usage(VK_IMAGE_USAGE_TRANSFER_SRC_BIT, VMA_MEMORY_USAGE_CPU_ONLY)
++		.DebugName("NX_UploadViaBlit.linear")
++		.TryCreate(fb->device.get());
++	if (!src)
++		return false;
++
++	VkImageSubresource sub = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0 };
++	VkSubresourceLayout layout = {};
++	vkGetImageSubresourceLayout(fb->device->device, src->image, &sub, &layout);
++	uint8_t *mem = (uint8_t *)src->Map(0, (size_t)(layout.offset + layout.size));
++	if (!mem)
++		return false;
++	const size_t rowBytes = (size_t)w * pixelsize;
++	const uint8_t *in = (const uint8_t *)pixels;
++	for (int y = 0; y < h; y++)
++		memcpy(mem + layout.offset + (size_t)y * layout.rowPitch, in + (size_t)y * rowBytes, rowBytes);
++	src->Unmap();
++
++	VkImageMemoryBarrier barrier = { VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER };
++	barrier.srcAccessMask = VK_ACCESS_HOST_WRITE_BIT;
++	barrier.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
++	barrier.oldLayout = VK_IMAGE_LAYOUT_PREINITIALIZED;
++	barrier.newLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
++	barrier.srcQueueFamilyIndex = barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
++	barrier.image = src->image;
++	barrier.subresourceRange = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1 };
++	cmd->pipelineBarrier(VK_PIPELINE_STAGE_HOST_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, nullptr, 0, nullptr, 1, &barrier);
++
++	VkImageBlit blit = {};
++	blit.srcSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 };
++	blit.srcOffsets[1] = { w, h, 1 };
++	blit.dstSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, 0, (uint32_t)layer, 1 };
++	blit.dstOffsets[1] = { w, h, 1 };
++	cmd->blitImage(src->image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, dst, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &blit, VK_FILTER_NEAREST);
++
++	auto *list = fb->GetCommands()->TransferDeleteList.get();
++	list->TotalSize += (size_t)(layout.offset + layout.size);
++	list->Add(std::move(src));
++	return true;
++}
++
++#else
++
++bool NX_UploadViaBlit(VulkanRenderDevice *, VulkanCommandBuffer *, VkImage, VkFormat, int, int, int, const void *, int)
++{
++	return false;
++}
++
++#endif
+diff --git a/src/common/rendering/vulkan/textures/vk_nxupload.h b/src/common/rendering/vulkan/textures/vk_nxupload.h
+new file mode 100644
+index 000000000..f7b929985
+--- /dev/null
++++ b/src/common/rendering/vulkan/textures/vk_nxupload.h
+@@ -0,0 +1,13 @@
++#pragma once
++// Switch texture upload through the 3D engine (see vk_nxupload.cpp).
++
++#include <zvulkan/vulkanobjects.h>
++
++class VulkanRenderDevice;
++
++// Copies w x h tightly packed pixels into mip 0 of one array layer of dst.
++// dst must be in TRANSFER_DST_OPTIMAL and stays there. Returns false (and
++// records nothing) when the format cannot take this path; the caller then
++// uses vkCmdCopyBufferToImage.
++bool NX_UploadViaBlit(VulkanRenderDevice *fb, VulkanCommandBuffer *cmd, VkImage dst, VkFormat format,
++	int w, int h, int pixelsize, const void *pixels, int layer = 0);
+diff --git a/src/common/rendering/vulkan/textures/vk_pptexture.cpp b/src/common/rendering/vulkan/textures/vk_pptexture.cpp
+index f0d627711..e47cea0bd 100644
+--- a/src/common/rendering/vulkan/textures/vk_pptexture.cpp
++++ b/src/common/rendering/vulkan/textures/vk_pptexture.cpp
+@@ -21,6 +21,7 @@
+ */
+ 
+ #include "vk_pptexture.h"
++#include "vk_nxupload.h"
+ #include "vk_texture.h"
+ #include "vulkan/system/vk_renderdevice.h"
+ #include "vulkan/system/vk_commandbuffer.h"
+@@ -61,16 +62,19 @@ VkPPTexture::VkPPTexture(VulkanRenderDevice* fb, PPTexture *texture) : fb(fb)
+ 	{
+ 		size_t totalsize = texture->Width * texture->Height * pixelsize;
+ 
++		VkImageTransition()
++			.AddImage(&TexImage, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, true)
++			.Execute(fb->GetCommands()->GetTransferCommands());
++
++		if (!NX_UploadViaBlit(fb, fb->GetCommands()->GetTransferCommands(), TexImage.Image->image, format,
++			texture->Width, texture->Height, pixelsize, texture->Data.get()))
++		{
+ 		Staging = BufferBuilder()
+ 			.Size(totalsize)
+ 			.Usage(VK_BUFFER_USAGE_TRANSFER_SRC_BIT, VMA_MEMORY_USAGE_CPU_ONLY)
+ 			.DebugName("VkPPTextureStaging")
+ 			.Create(fb->device.get());
+ 
+-		VkImageTransition()
+-			.AddImage(&TexImage, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, true)
+-			.Execute(fb->GetCommands()->GetTransferCommands());
+-
+ 		void *data = Staging->Map(0, totalsize);
+ 		memcpy(data, texture->Data.get(), totalsize);
+ 		Staging->Unmap();
+@@ -82,6 +86,7 @@ VkPPTexture::VkPPTexture(VulkanRenderDevice* fb, PPTexture *texture) : fb(fb)
+ 		region.imageExtent.width = texture->Width;
+ 		region.imageExtent.height = texture->Height;
+ 		fb->GetCommands()->GetTransferCommands()->copyBufferToImage(Staging->buffer, TexImage.Image->image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &region);
++		}
+ 
+ 		VkImageTransition()
+ 			.AddImage(&TexImage, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, false)
+-- 
+2.56.0
+

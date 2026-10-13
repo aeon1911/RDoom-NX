@@ -1,0 +1,345 @@
+From 06d6549f8dabc4766aeaf4a24d7d2167d0bf8a34 Mon Sep 17 00:00:00 2001
+From: RDoom <171243930+aeon1911@users.noreply.github.com>
+Date: Mon, 12 Oct 2026 20:13:03 -0300
+Subject: [PATCH 37/46] Switch Vulkan: preload the effect textures a game used,
+ dynres from frame pacing
+
+Console logs (87e335d13): the first explosion still dropped frames even
+in a second session, because every fire/smoke/gore sprite was uploaded the
+first time it appeared (9-23 textures per frame); the second explosion
+was smooth. And the dynamic resolution stayed at 60%: with the scene
+submitted early, the GPU timestamps of a frame include the idle gaps
+between its submits.
+
+- Untranslated sprites, skin sprites and decals first drawn during a level
+  are listed per game (cache/uzdoom/rdoom-textures-<hash>.txt) and
+  uploaded at the end of the next level precache (PrecacheUsedTextures).
+- The dynamic resolution now drops only when the previous frame missed
+  vsync and this one had to wait for the GPU, and climbs back by 10% after
+  45 frames on time without waiting.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ src/common/rendering/v_video.h                |  3 +
+ .../vulkan/renderer/vk_renderpass.cpp         | 91 ++++++++++++++++++-
+ .../rendering/vulkan/renderer/vk_renderpass.h | 12 ++-
+ .../vulkan/system/vk_renderdevice.cpp         | 49 +++++-----
+ .../rendering/vulkan/system/vk_renderdevice.h |  1 +
+ .../vulkan/textures/vk_hwtexture.cpp          |  5 +
+ src/rendering/hwrenderer/hw_precache.cpp      |  5 +
+ 7 files changed, 136 insertions(+), 30 deletions(-)
+
+diff --git a/src/common/rendering/v_video.h b/src/common/rendering/v_video.h
+index e0364248e..ac0fe126c 100644
+--- a/src/common/rendering/v_video.h
++++ b/src/common/rendering/v_video.h
+@@ -284,6 +284,9 @@ public:
+ 	// Dynamic resolution of the 3D view (Switch Vulkan): shrinks mSceneViewport
+ 	// for the main view; the backend scales it back up before the HUD.
+ 	virtual void ScaleSceneViewport() {}
++	// End of the level precache: upload the textures this game used before
++	// (Switch Vulkan keeps a list per IWAD + mods)
++	virtual void PrecacheUsedTextures() {}
+ 	virtual void SetSaveBuffers(bool yes) {}
+ 	virtual void ImageTransitionScene(bool unknown) {}
+ 	virtual void CopyScreenToBuffer(int width, int height, uint8_t* buffer)	{ memset(buffer, 0, width* height); }
+diff --git a/src/common/rendering/vulkan/renderer/vk_renderpass.cpp b/src/common/rendering/vulkan/renderer/vk_renderpass.cpp
+index df40c9bbd..402b12620 100644
+--- a/src/common/rendering/vulkan/renderer/vk_renderpass.cpp
++++ b/src/common/rendering/vulkan/renderer/vk_renderpass.cpp
+@@ -40,6 +40,9 @@
+ #include "i_specialpaths.h"
+ #include "cmdlib.h"
+ #include "filesystem.h"
++#include "hw_material.h"
++#include "texturemanager.h"
++#include "gamestate.h"
+ #include "nx_perf.h"
+ #include "c_cvars.h"
+ 
+@@ -126,7 +129,7 @@ void VkRenderPassManager::PipelineCreated(const VkRenderPassKey &passKey, const
+ #endif
+ }
+ 
+-FString VkRenderPassManager::WarmFilename()
++FString VkRenderPassManager::WarmFilename(const char *kind, const char *ext)
+ {
+ 	// one list per game: hash of the loaded resource files
+ 	uint32_t h = 2166136261u;
+@@ -137,7 +140,7 @@ FString VkRenderPassManager::WarmFilename()
+ 			h = (h ^ (uint8_t)*p) * 16777619u;
+ 	}
+ 	FString path = M_GetCachePath(true);
+-	path.AppendFormat("/rdoom-pipelines-%08x.bin", h);
++	path.AppendFormat("/rdoom-%s-%08x.%s", kind, h, ext);
+ 	return path;
+ }
+ 
+@@ -192,6 +195,82 @@ void VkRenderPassManager::WarmupPipelines()
+ #endif
+ }
+ 
++void VkRenderPassManager::LoadTextureList()
++{
++	if (mTexLoaded)
++		return;
++	mTexLoaded = true;
++	FileReader fr;
++	if (!fr.OpenFile(WarmFilename("textures", "txt").GetChars()))
++		return;
++	auto data = fr.Read();
++	FString text((const char *)data.data(), data.size());
++	auto lines = text.Split("\n");
++	for (auto &line : lines)
++	{
++		int useType = 0, scaleFlags = 0;
++		char name[64] = "";
++		if (sscanf(line.GetChars(), "%d %d %63s", &useType, &scaleFlags, name) == 3 && mTexList.size() < 2000)
++			mTexList.push_back({ name, useType, scaleFlags });
++	}
++}
++
++void VkRenderPassManager::TextureFirstUsed(FGameTexture *tex, int scaleFlags)
++{
++#ifdef __SWITCH__
++	if (mTexWarming || !tex || gamestate != GS_LEVEL)
++		return;
++	// walls and flats are precached with the map already; what shows up by
++	// surprise are effect sprites (fire, smoke, gore) and decals
++	const ETextureType ut = tex->GetUseType();
++	if (ut != ETextureType::Sprite && ut != ETextureType::Decal && ut != ETextureType::SkinSprite)
++		return;
++	const FString &name = tex->GetName();
++	if (name.IsEmpty() || name.Len() > 60 || name.IndexOf(' ') >= 0)
++		return;
++	LoadTextureList();
++	const int useType = (int)tex->GetUseType();
++	for (auto &t : mTexList)
++		if (t.UseType == useType && t.ScaleFlags == scaleFlags && t.Name.CompareNoCase(name) == 0)
++			return;
++	if (mTexList.size() < 2000)
++	{
++		mTexList.push_back({ name, useType, scaleFlags });
++		mTexDirty = true;
++		mUnsavedPipelines++;	// the saver below also writes this list
++		mLastPipelineMs = I_msTime();
++	}
++#endif
++}
++
++void VkRenderPassManager::PrecacheListedTextures()
++{
++#ifdef __SWITCH__
++	LoadTextureList();
++	if (mTexList.empty())
++		return;
++	mTexWarming = true;
++	const uint64_t start = I_msTime();
++	int done = 0;
++	for (auto &t : mTexList)
++	{
++		FTextureID id = TexMan.CheckForTexture(t.Name.GetChars(), (ETextureType)t.UseType, FTextureManager::TEXMAN_TryAny);
++		FGameTexture *tex = id.isValid() ? TexMan.GetGameTexture(id) : nullptr;
++		if (!tex || !tex->isValid())
++			continue;
++		FMaterial *mat = FMaterial::ValidateTexture(tex, t.ScaleFlags, true);
++		if (!mat)
++			continue;
++		fb->PrecacheMaterial(mat, 0);
++		done++;
++	}
++	mTexWarming = false;
++	FString n;
++	n.Format("%d of %d textures in %d ms", done, (int)mTexList.size(), (int)(I_msTime() - start));
++	RDoom_SessionSet("vulkan_texture_warmup", n.GetChars());
++#endif
++}
++
+ void VkRenderPassManager::SaveCacheWhenIdle()
+ {
+ #ifdef __SWITCH__
+@@ -209,6 +288,14 @@ void VkRenderPassManager::SaveCacheWhenIdle()
+ 	catch (...)
+ 	{
+ 	}
++	if (mTexDirty)
++	{
++		mTexDirty = false;
++		FString out;
++		for (auto &t : mTexList)
++			out.AppendFormat("%d %d %s\n", t.UseType, t.ScaleFlags, t.Name.GetChars());
++		RDoom_WriteFileAsync(WarmFilename("textures", "txt").GetChars(), out.GetChars(), out.Len());
++	}
+ 	if (mWarmDirty)
+ 	{
+ 		mWarmDirty = false;
+diff --git a/src/common/rendering/vulkan/renderer/vk_renderpass.h b/src/common/rendering/vulkan/renderer/vk_renderpass.h
+index b99827791..86ec5a0dd 100644
+--- a/src/common/rendering/vulkan/renderer/vk_renderpass.h
++++ b/src/common/rendering/vulkan/renderer/vk_renderpass.h
+@@ -176,6 +176,12 @@ public:
+ 	// loads, behind the loading screen.
+ 	void WarmupPipelines();
+ 
++	// The same for textures: every untranslated material first drawn during a
++	// level is listed (rdoom-textures-<hash>.txt) and uploaded again at the
++	// end of the next level's precache.
++	void TextureFirstUsed(FGameTexture *tex, int scaleFlags);
++	void PrecacheListedTextures();
++
+ private:
+ 	int mUnsavedPipelines = 0;
+ 	uint64_t mLastPipelineMs = 0;
+@@ -189,8 +195,12 @@ private:
+ 	};
+ 	std::vector<WarmEntry> mWarm;
+ 	bool mWarmLoaded = false, mWarmDirty = false, mWarming = false;
+-	FString WarmFilename();
++	FString WarmFilename(const char *kind = "pipelines", const char *ext = "bin");
+ 	void LoadWarmList();
++	struct TextureUse { FString Name; int UseType, ScaleFlags; };
++	std::vector<TextureUse> mTexList;
++	bool mTexLoaded = false, mTexDirty = false, mTexWarming = false;
++	void LoadTextureList();
+ 
+ 	VulkanRenderDevice* fb = nullptr;
+ 
+diff --git a/src/common/rendering/vulkan/system/vk_renderdevice.cpp b/src/common/rendering/vulkan/system/vk_renderdevice.cpp
+index d48f86044..e9a41562c 100644
+--- a/src/common/rendering/vulkan/system/vk_renderdevice.cpp
++++ b/src/common/rendering/vulkan/system/vk_renderdevice.cpp
+@@ -301,51 +301,45 @@ void VulkanRenderDevice::UpdateDynamicResolution()
+ 		mDynScale = clamp((float)rd_dynres_force, 0.25f, 1.0f);
+ 		return;
+ 	}
+-	double frameMs, sceneMs;
+-	if (!mCommands->TakeGpuFrameTime(frameMs, sceneMs))
+-		return;
+ 	const float minScale = clamp((float)rd_dynres_min, 0.4f, 1.0f);
+-	if (!rd_dynres || rd_gpubench > 0 || gamestate != GS_LEVEL || frameMs <= 0)
++	if (!rd_dynres || rd_gpubench > 0 || gamestate != GS_LEVEL)
+ 	{
+ 		mDynScale = 1.0f;
+ 		mDynCalmFrames = 0;
+ 		return;
+ 	}
+-	const double target = clamp((double)rd_dynres_target, 6.0, 30.0);
+-	const double restMs = frameMs - sceneMs;	// post-processing, 2D, present (+ the upscale when scaled)
+-	if (mDynScale >= 0.999f)
+-		mDynRestAtFull = mDynRestAtFull * 0.9 + restMs * 0.1;
+-	if (frameMs > target && sceneMs > 0.5)
++	// The GPU timestamps of a frame include the gaps between its submits (the
++	// scene goes out early, the rest at the end), so they overstate the GPU
++	// load. What matters is simpler: the previous frame missed vsync and this
++	// frame had to wait for the GPU (frame N-2) before it could start.
++	const double frameMs = NXPerf_LastFrameMS();
++	const double waitMs = nxperf.vkpending_ms;	// this frame's wait at BeginFrame
++	const double budget = 1000.0 / 60.0;
++	if (frameMs > budget + 1.5 && waitMs > 2.5)
+ 	{
+-		// the 3D view's cost follows its area; the rest of the frame stays
+-		const double wantScene = max(target - restMs, sceneMs * 0.25);
+-		float s = mDynScale * (float)sqrt(wantScene / sceneMs);
++		float s = mDynScale * (float)sqrt(budget / frameMs);
+ 		s = max(s, mDynScale * 0.8f);	// at most 20% per step
+ 		mDynScale = clamp(floorf(s * 20.0f) / 20.0f, minScale, 1.0f);
+ 		mDynCalmFrames = 0;
+ 	}
+-	else if (mDynScale < 1.0f && sceneMs > 0)
++	else if (mDynScale < 1.0f && frameMs < budget + 0.6 && waitMs < 1.5)
+ 	{
+-		// one step up only when the frame predicted for it fits with room to
+-		// spare; at full scale the upscale pass disappears from the frame
+-		const float next = min(1.0f, mDynScale + 0.1f);
+-		const double ratio = (next * next) / (mDynScale * mDynScale);
+-		const double predicted = (next >= 0.999f ? mDynRestAtFull : restMs) + sceneMs * ratio;
+-		if (predicted < target * 0.9)
++		if (++mDynCalmFrames >= 45)
+ 		{
+-			if (++mDynCalmFrames >= 15)
+-			{
+-				mDynScale = next;
+-				mDynCalmFrames = 0;
+-			}
+-		}
+-		else
++			mDynScale = min(1.0f, mDynScale + 0.1f);
+ 			mDynCalmFrames = 0;
++		}
+ 	}
+-	else
++	else if (waitMs >= 1.5)
+ 		mDynCalmFrames = 0;
+ }
+ 
++void VulkanRenderDevice::PrecacheUsedTextures()
++{
++	if (mRenderPassManager)
++		mRenderPassManager->PrecacheListedTextures();
++}
++
+ void VulkanRenderDevice::ScaleSceneViewport()
+ {
+ 	mSceneScaled = false;
+@@ -362,6 +356,7 @@ void VulkanRenderDevice::ScaleSceneViewport()
+ #else
+ void VulkanRenderDevice::UpdateDynamicResolution() {}
+ void VulkanRenderDevice::ScaleSceneViewport() {}
++void VulkanRenderDevice::PrecacheUsedTextures() {}
+ #endif
+ 
+ void VulkanRenderDevice::PostProcessScene(bool swscene, int fixedcm, float flash, const std::function<void()> &afterBloomDrawEndScene2D)
+diff --git a/src/common/rendering/vulkan/system/vk_renderdevice.h b/src/common/rendering/vulkan/system/vk_renderdevice.h
+index d3082e6df..3661e954a 100644
+--- a/src/common/rendering/vulkan/system/vk_renderdevice.h
++++ b/src/common/rendering/vulkan/system/vk_renderdevice.h
+@@ -117,6 +117,7 @@ public:
+ 	int PerFrameSlot() const override;
+ 	void SyncNextFrame() override;
+ 	void ScaleSceneViewport() override;
++	void PrecacheUsedTextures() override;
+ #ifdef __SWITCH__
+ 	bool AllowSSAO() override;
+ #endif
+diff --git a/src/common/rendering/vulkan/textures/vk_hwtexture.cpp b/src/common/rendering/vulkan/textures/vk_hwtexture.cpp
+index f442b7630..83b7c991f 100644
+--- a/src/common/rendering/vulkan/textures/vk_hwtexture.cpp
++++ b/src/common/rendering/vulkan/textures/vk_hwtexture.cpp
+@@ -36,6 +36,7 @@
+ #include "vulkan/renderer/vk_postprocess.h"
+ #include "vulkan/shaders/vk_shader.h"
+ #include "vk_hwtexture.h"
++#include "vulkan/renderer/vk_renderpass.h"
+ #ifdef __SWITCH__
+ VkImageUsageFlags RDoom_DepthUsage(VkImageUsageFlags usage);
+ #endif
+@@ -362,6 +363,10 @@ VulkanDescriptorSet* VkMaterial::GetDescriptorSet(const FMaterialState& state)
+ 	}
+ 
+ 	int numLayers = NumLayers();
++#ifdef __SWITCH__
++	if (translation == 0)
++		fb->GetRenderPassManager()->TextureFirstUsed(base, GetScaleFlags());
++#endif
+ 
+ 	auto descriptor = fb->GetDescriptorSetManager()->AllocateTextureDescriptorSet(max(numLayers, SHADER_MIN_REQUIRED_TEXTURE_LAYERS));
+ 
+diff --git a/src/rendering/hwrenderer/hw_precache.cpp b/src/rendering/hwrenderer/hw_precache.cpp
+index 22b2ff7e9..1b797d96d 100644
+--- a/src/rendering/hwrenderer/hw_precache.cpp
++++ b/src/rendering/hwrenderer/hw_precache.cpp
+@@ -331,6 +331,11 @@ void hw_PrecacheTexture(uint8_t *texhitlist, TMap<PClassActor*, bool> &actorhitl
+ 	delete[] spritelist;
+ 	delete[] modellist;
+ 
++	// after the unused textures were released: the effects this game spawned
++	// before (explosion fire and smoke, gore...) are uploaded behind the
++	// loading screen instead of the first time they appear
++	screen->PrecacheUsedTextures();
++
+ 	// Switch port: decode the sprites of everything in the level in the background
+ 	{
+ 		TMap<PClassActor*, bool>::Iterator pit(actorhitlist);
+-- 
+2.56.0
+

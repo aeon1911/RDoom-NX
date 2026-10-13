@@ -1,0 +1,28 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="480" height="270" viewBox="0 0 480 270">
+<defs>
+  <radialGradient id="g" cx="0.78" cy="0.35" r="0.9">
+    <stop offset="0" stop-color="#ff9a1a" stop-opacity="0.75"/>
+    <stop offset="0.45" stop-color="#ff9a1a" stop-opacity="0.12"/>
+    <stop offset="1" stop-color="#ff9a1a" stop-opacity="0"/>
+  </radialGradient>
+  <linearGradient id="fade" x1="0" y1="0" x2="0" y2="1">
+    <stop offset="0.35" stop-color="#000" stop-opacity="0"/>
+    <stop offset="1" stop-color="#000" stop-opacity="0.85"/>
+  </linearGradient>
+  <filter id="b2"><feGaussianBlur stdDeviation="2"/></filter>
+  <filter id="tex" x="0" y="0" width="100%" height="100%">
+    <feTurbulence type="fractalNoise" baseFrequency="0.012 0.03" numOctaves="4" seed="97"/>
+    <feColorMatrix type="matrix" values="0 0 0 0 0  0 0 0 0 0  0 0 0 0 0  0 0 0 1.2 -0.4"/>
+  </filter>
+</defs>
+<rect width="480" height="270" fill="#140b02"/>
+<rect width="480" height="270" fill="url(#g)"/>
+<rect width="480" height="270" filter="url(#tex)" opacity="0.7"/>
+<g><circle cx="360" cy="110" r="40" fill="none" stroke="#ffd27a" stroke-width="2" opacity="0.70"/>
+<circle cx="360" cy="110" r="70" fill="none" stroke="#ffd27a" stroke-width="6" opacity="0.55"/>
+<circle cx="360" cy="110" r="100" fill="none" stroke="#ffd27a" stroke-width="2" opacity="0.40"/>
+<circle cx="360" cy="110" r="130" fill="none" stroke="#ffd27a" stroke-width="2" opacity="0.25"/>
+<circle cx="360" cy="110" r="22" fill="#ff9a1a" opacity="0.9" filter="url(#b2)"/></g>
+<rect width="480" height="270" fill="url(#fade)"/>
+<rect x="0" y="0" width="6" height="270" fill="#ff9a1a"/>
+</svg>

@@ -1,0 +1,108 @@
+From bda37a838651a7cb779bfc395372c3d54d9a0524 Mon Sep 17 00:00:00 2001
+From: RDoom <171243930+aeon1911@users.noreply.github.com>
+Date: Tue, 13 Oct 2026 15:37:15 -0300
+Subject: [PATCH 46/46] Switch: writer thread on core 2 at game priority; one
+ pipeline warm list for all games
+
+HW test of 4020ab81e (Freedoom 2 85 s, DOOM2 20 s): the stabilizer now gives
+detail back (levels 0-1 in calm stretches, 20-26 lights) and explosions have
+0-5 frames over 35 ms per 5 s. Two stalls remained: a 40-65 ms frame every
+10 s although the session line no longer logged from the game thread, and
+100-150 ms "save" stalls. Both are the game thread taking a lock the
+background writer holds for microseconds: the writer ran at the lowest
+priority on the game's core, and when preempted with the lock it waited
+behind every other thread there.
+
+- The writer thread runs on core 2 with the game's priority (it sleeps in
+  SD card calls almost all the time).
+- The pipeline warm list is shared by all games (rdoom-pipelines-all.bin;
+  the per-game list is the fallback): DOOM2 + Brutal Doom, a new combination,
+  created its pipelines in play, 50-145 ms each.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ src/common/platform/posix/nx/rdoom_nx.cpp     | 10 ++++++++--
+ .../vulkan/renderer/vk_renderpass.cpp         | 20 +++++++++++++++++--
+ .../rendering/vulkan/renderer/vk_renderpass.h |  1 +
+ 3 files changed, 27 insertions(+), 4 deletions(-)
+
+diff --git a/src/common/platform/posix/nx/rdoom_nx.cpp b/src/common/platform/posix/nx/rdoom_nx.cpp
+index ca451c3da..83686128a 100644
+--- a/src/common/platform/posix/nx/rdoom_nx.cpp
++++ b/src/common/platform/posix/nx/rdoom_nx.cpp
+@@ -563,8 +563,14 @@ static void StartFlushThread()
+ {
+ 	if (g_flushRun)
+ 		return;
+-	// lowest priority on the default core: it sleeps in SD card calls
+-	if (R_SUCCEEDED(threadCreate(&g_flushThread, FlushThreadMain, nullptr, nullptr, 0x10000, 0x3F, -2)))
++	// Core 2 with the game's priority. It used to have the lowest priority on
++	// the game's core: preempted while holding g_ioMutex (or a log lock) for a
++	// few microseconds, it then waited behind every other thread on that core
++	// while the game thread waited for the lock - 30-150 ms stalls on every
++	// session report line and warm list save (Switch Lite, 2026-10-13). It
++	// sleeps in SD card calls nearly all the time, so it takes no CPU from the
++	// sprite decoding worker that shares core 2.
++	if (R_SUCCEEDED(threadCreate(&g_flushThread, FlushThreadMain, nullptr, nullptr, 0x10000, 0x2C, 2)))
+ 	{
+ 		g_flushRun = true;
+ 		if (R_FAILED(threadStart(&g_flushThread)))
+diff --git a/src/common/rendering/vulkan/renderer/vk_renderpass.cpp b/src/common/rendering/vulkan/renderer/vk_renderpass.cpp
+index a7c0b60c9..9281deb36 100644
+--- a/src/common/rendering/vulkan/renderer/vk_renderpass.cpp
++++ b/src/common/rendering/vulkan/renderer/vk_renderpass.cpp
+@@ -153,13 +153,29 @@ FString VkRenderPassManager::WarmFilename(const char *kind, const char *ext)
+ 	return path;
+ }
+ 
++FString VkRenderPassManager::GlobalWarmFilename()
++{
++	const std::string id = "global";
++	auto it = mWarmPaths.find(id);
++	if (it != mWarmPaths.end())
++		return it->second;
++	FString path = M_GetCachePath(true);
++	path += "/rdoom-pipelines-all.bin";
++	mWarmPaths[id] = path;
++	return path;
++}
++
+ void VkRenderPassManager::LoadWarmList()
+ {
+ 	if (mWarmLoaded)
+ 		return;
+ 	mWarmLoaded = true;
+ 	FileReader fr;
+-	if (!fr.OpenFile(WarmFilename().GetChars()))
++	// One pipeline list for every game (a pipeline depends on vertex format,
++	// blend and depth state, hardly on the mod): a new mod combination used to
++	// create its pipelines in the middle of play, 50-145 ms each on the Switch.
++	// The per-game list of older builds is the fallback for the first start.
++	if (!fr.OpenFile(GlobalWarmFilename().GetChars()) && !fr.OpenFile(WarmFilename().GetChars()))
+ 		return;
+ 	uint32_t header[3] = {};	// magic, entry size, count
+ 	if (fr.Read(header, sizeof(header)) != (FileReader::Size)sizeof(header) || header[0] != 0x4c504452 || header[1] != sizeof(WarmEntry) || header[2] > 400)
+@@ -354,7 +370,7 @@ void VkRenderPassManager::SaveCacheWhenIdle()
+ 		uint32_t header[3] = { 0x4c504452, (uint32_t)sizeof(WarmEntry), (uint32_t)mWarm.size() };
+ 		memcpy(out.data(), header, sizeof(header));
+ 		memcpy(out.data() + 12, mWarm.data(), mWarm.size() * sizeof(WarmEntry));
+-		RDoom_WriteFileAsync(WarmFilename().GetChars(), out.data(), out.size());
++		RDoom_WriteFileAsync(GlobalWarmFilename().GetChars(), out.data(), out.size());
+ 	}
+ #endif
+ }
+diff --git a/src/common/rendering/vulkan/renderer/vk_renderpass.h b/src/common/rendering/vulkan/renderer/vk_renderpass.h
+index 256194213..72d29a3ac 100644
+--- a/src/common/rendering/vulkan/renderer/vk_renderpass.h
++++ b/src/common/rendering/vulkan/renderer/vk_renderpass.h
+@@ -202,6 +202,7 @@ private:
+ 	std::vector<WarmEntry> mWarm;
+ 	bool mWarmLoaded = false, mWarmDirty = false, mWarming = false;
+ 	FString WarmFilename(const char *kind = "pipelines", const char *ext = "bin");
++	FString GlobalWarmFilename();
+ 	std::map<std::string, FString> mWarmPaths;	// computed once: the loaded files don't change
+ 	std::mutex mCacheMutex;
+ 	void LoadWarmList();
+-- 
+2.56.0
+

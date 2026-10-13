@@ -1,0 +1,1293 @@
+From a22b13eb75743cf48bd0fdedfbc57cfe4a61217e Mon Sep 17 00:00:00 2001
+From: RDoom <171243930+aeon1911@users.noreply.github.com>
+Date: Tue, 13 Oct 2026 10:54:04 -0300
+Subject: [PATCH 38/46] Switch Vulkan: decode new sprites in the background,
+ save warm list at once
+
+- vk_asynctex: sprite pictures that are not on the GPU yet are decoded on
+  the nx_jobs worker (core 2); the game thread copies finished ones to the
+  GPU within a budget and leaves the sprite out until then. Actor classes
+  are prefetched when they first appear (rd_vk_async_textures).
+- hw_nxprefetch: the border trim of a new sprite (a full decode on the game
+  or render thread) runs on the worker too (rd_async_sprites); class
+  prefetches go through a queue pumped 0.75 ms per frame.
+- nx_jobs: URGENT priority for sounds, which LoadSound may block on.
+- texture warm list saved one second after a new entry; the background
+  writer writes queued files within 0.25 s (short sessions lost the list).
+- perf.log: player think, spawns, StartSound, skipped sprites, and a note
+  for every state action that takes 5 ms or more (with script file:line);
+  session report counts upload overflow waits and blit upload failures.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ src/CMakeLists.txt                            |   1 +
+ src/common/audio/sound/s_sound.cpp            |   3 +-
+ src/common/engine/nx_jobs.cpp                 |  13 +-
+ src/common/engine/nx_jobs.h                   |   5 +-
+ src/common/engine/nx_perf.cpp                 |  20 +-
+ src/common/engine/nx_perf.h                   |   7 +
+ src/common/platform/posix/nx/rdoom_nx.cpp     |  19 +-
+ .../vulkan/renderer/vk_renderpass.cpp         |  30 +-
+ .../rendering/vulkan/renderer/vk_renderpass.h |   1 +
+ .../vulkan/system/vk_renderdevice.cpp         |   4 +
+ .../rendering/vulkan/textures/vk_asynctex.cpp | 402 ++++++++++++++++++
+ .../rendering/vulkan/textures/vk_asynctex.h   |  12 +
+ .../vulkan/textures/vk_hwtexture.cpp          |  18 +-
+ .../rendering/vulkan/textures/vk_hwtexture.h  |   4 +
+ .../rendering/vulkan/textures/vk_nxupload.cpp |   8 +
+ src/common/textures/gametexture.cpp           |  10 +-
+ src/common/textures/gametexture.h             |   4 +-
+ src/gamedata/info.cpp                         |  17 +
+ src/playsim/p_mobj.cpp                        |   8 +
+ src/playsim/p_user.cpp                        |   2 +
+ src/rendering/hwrenderer/hw_nxprefetch.cpp    | 166 +++++++-
+ src/rendering/hwrenderer/hw_precache.cpp      |   2 +
+ src/rendering/hwrenderer/scene/hw_sprites.cpp |   5 +-
+ 23 files changed, 723 insertions(+), 38 deletions(-)
+ create mode 100644 src/common/rendering/vulkan/textures/vk_asynctex.cpp
+ create mode 100644 src/common/rendering/vulkan/textures/vk_asynctex.h
+
+diff --git a/src/CMakeLists.txt b/src/CMakeLists.txt
+index 8435609be..cf1badf35 100644
+--- a/src/CMakeLists.txt
++++ b/src/CMakeLists.txt
+@@ -776,6 +776,7 @@ set (VULKAN_SOURCES
+ 	common/rendering/vulkan/shaders/vk_ppshader.cpp
+ 	common/rendering/vulkan/textures/vk_samplers.cpp
+ 	common/rendering/vulkan/textures/vk_hwtexture.cpp
++	common/rendering/vulkan/textures/vk_asynctex.cpp
+ 	common/rendering/vulkan/textures/vk_nxupload.cpp
+ 	common/rendering/vulkan/textures/vk_pptexture.cpp
+ 	common/rendering/vulkan/textures/vk_imagetransition.cpp
+diff --git a/src/common/audio/sound/s_sound.cpp b/src/common/audio/sound/s_sound.cpp
+index 28f5a8344..7aab25fdf 100644
+--- a/src/common/audio/sound/s_sound.cpp
++++ b/src/common/audio/sound/s_sound.cpp
+@@ -164,7 +164,7 @@ void SoundEngine::NXQueueLoad(sfxinfo_t *sfx)
+ 		}
+ 		job->result = h;
+ 		job->done = true;
+-	}, NXJOB_NOW);
++	}, NXJOB_URGENT);	// LoadSound blocks on it: ahead of the sprite pictures
+ }
+ 
+ void SoundEngine::NXApplyLoads(bool wait, int onlyindex)
+@@ -616,6 +616,7 @@ FSoundChan *SoundEngine::StartSound(int type, const void *source,
+ 	const FVector3 *pt, int channel, EChanFlags flags, FSoundID sound_id, float volume, float attenuation,
+ 	FRolloffInfo *forcedrolloff, float spitch, float startTime)
+ {
++	NXPERF_SCOPE(sndcall_ms, &nxperf.sndcalls);	// perf.log: whole StartSound calls
+ 	sfxinfo_t *sfx;
+ 	EChanFlags chanflags = flags;
+ 	int basepriority;
+diff --git a/src/common/engine/nx_jobs.cpp b/src/common/engine/nx_jobs.cpp
+index 85d610347..df4c02bdd 100644
+--- a/src/common/engine/nx_jobs.cpp
++++ b/src/common/engine/nx_jobs.cpp
+@@ -38,9 +38,10 @@ namespace
+ 	{
+ 		std::mutex mutex;
+ 		std::condition_variable work, idle;
+-		// things needed right now go first, then likely-needed-soon, then prefetching
+-		std::deque<std::function<void()>> now, high, low;
+-		bool empty() const { return now.empty() && high.empty() && low.empty(); }
++		// what the game thread may wait for goes first (sounds), then things needed
++		// right now (sprite pictures), then likely-needed-soon, then prefetching
++		std::deque<std::function<void()>> urgent, now, high, low;
++		bool empty() const { return urgent.empty() && now.empty() && high.empty() && low.empty(); }
+ 		int running = 0;
+ 		int threads = 0;
+ 		bool started = false;
+@@ -67,7 +68,7 @@ namespace
+ 				std::unique_lock<std::mutex> lock(p.mutex);
+ 				p.work.wait(lock, [&p] { return !p.empty() || p.quit; });
+ 				if (p.quit) return;
+-				auto &q = !p.now.empty() ? p.now : !p.high.empty() ? p.high : p.low;
++				auto &q = !p.urgent.empty() ? p.urgent : !p.now.empty() ? p.now : !p.high.empty() ? p.high : p.low;
+ 				job = std::move(q.front());
+ 				q.pop_front();
+ 				p.running++;
+@@ -109,6 +110,7 @@ namespace
+ 			std::lock_guard<std::mutex> lock(p.mutex);
+ 			if (p.quit) return;
+ 			p.quit = true;
++			p.urgent.clear();
+ 			p.now.clear();
+ 			p.high.clear();
+ 			p.low.clear();
+@@ -177,7 +179,8 @@ void NXJobs_Push(std::function<void()> job, int priority)
+ 			try { job(); } catch (...) {}
+ 			return;
+ 		}
+-		if (priority >= NXJOB_NOW) p.now.push_back(std::move(job));
++		if (priority >= NXJOB_URGENT) p.urgent.push_back(std::move(job));
++		else if (priority == NXJOB_NOW) p.now.push_back(std::move(job));
+ 		else if (priority == NXJOB_HIGH) p.high.push_back(std::move(job));
+ 		else p.low.push_back(std::move(job));
+ 	}
+diff --git a/src/common/engine/nx_jobs.h b/src/common/engine/nx_jobs.h
+index d43f1b5ce..03866358f 100644
+--- a/src/common/engine/nx_jobs.h
++++ b/src/common/engine/nx_jobs.h
+@@ -4,8 +4,9 @@
+ // game doesn't stall every time something new appears or makes a noise.
+ #include <functional>
+ 
+-// priorities: something is waiting for it right now / likely needed soon / prefetching
+-enum { NXJOB_LOW = 0, NXJOB_HIGH = 1, NXJOB_NOW = 2 };
++// priorities: the game thread may block on it (sounds) / something is waiting
++// for it right now / likely needed soon / prefetching
++enum { NXJOB_LOW = 0, NXJOB_HIGH = 1, NXJOB_NOW = 2, NXJOB_URGENT = 3 };
+ void NXJobs_Push(std::function<void()> job, int priority);
+ // waits until every queued and running job has finished
+ void NXJobs_WaitAll();
+diff --git a/src/common/engine/nx_perf.cpp b/src/common/engine/nx_perf.cpp
+index 7b9cae20d..ee7d89ffd 100644
+--- a/src/common/engine/nx_perf.cpp
++++ b/src/common/engine/nx_perf.cpp
+@@ -9,6 +9,7 @@
+ #include <stdio.h>
+ #include <time.h>
+ #include "nx_perf.h"
++#include <stdarg.h>
+ #include "c_cvars.h"
+ #include "i_time.h"
+ #include "fs_files.h"
+@@ -110,6 +111,18 @@ double NXPerf_LastTicMS()
+ 	return lastTicMS;
+ }
+ 
++void NXPerf_Note(const char *fmt, ...)
++{
++	if (!perfFile)
++		return;
++	va_list ap;
++	va_start(ap, fmt);
++	fprintf(perfFile, "#   note %.2f: ", startTime < 0 ? 0.0 : (NXPerf_NowMS() - startTime) / 1000.0);
++	vfprintf(perfFile, fmt, ap);
++	fputc('\n', perfFile);
++	va_end(ap);
++}
++
+ void NXPerf_FlushFile()
+ {
+ 	if (perfFile)
+@@ -208,19 +221,20 @@ void NXPerf_EndFrame()
+ 					// written to the card by the background writer (NXPerf_FlushFile)
+ 					setvbuf(perfFile, nullptr, _IOFBF, 64 * 1024);
+ 					WriteSettings(perfFile);
+-					fprintf(perfFile, "# time(s) frame(ms) | tics tic(ms) think(ms) | display(ms): scene bsp hud update gpuwait swap | items transl | shaders n/ms | textures n/ms/kpix | sounds n/ms | sndupdate(ms) sndstart n/ms | io misses/KB | async tex up/wait/budget/pre snd | draws | lights used/all up/same | stab\n");
++					fprintf(perfFile, "# time(s) frame(ms) | tics tic(ms) think(ms) | display(ms): scene bsp hud update gpuwait swap | items transl | shaders n/ms | textures n/ms/kpix | sounds n/ms | sndupdate(ms) sndstart n/ms | io misses/KB | async tex up/wait/budget/pre snd | draws | lights used/all up/same | stab | player(ms) spawn n/ms skipped | startsound n/ms\n");
+ 				}
+ 			}
+ 			if (perfFile)
+ 			{
+-				fprintf(perfFile, "%8.2f %7.1f | %d %7.1f %6.1f | %7.1f: %5.1f %5.1f %5.1f %5.1f %5.1f %4.1f | %d %d | %d/%.1f | %d/%.1f/%lld | %d/%.1f | %.1f %d/%.1f | %llu/%llu | %d/%d/%d/%d %d | %d | %d/%d %d/%d | %d\n",
++				fprintf(perfFile, "%8.2f %7.1f | %d %7.1f %6.1f | %7.1f: %5.1f %5.1f %5.1f %5.1f %5.1f %4.1f | %d %d | %d/%.1f | %d/%.1f/%lld | %d/%.1f | %.1f %d/%.1f | %llu/%llu | %d/%d/%d/%d %d | %d | %d/%d %d/%d | %d | %.1f %d/%.1f %d | %d/%.1f\n",
+ 					(now - startTime) / 1000.0, frame, nxperf.tics, nxperf.tic_ms, nxperf.think_ms, nxperf.display_ms,
+ 					nxperf.scene_ms, nxperf.bsp_ms, nxperf.hud_ms, nxperf.update_ms, nxperf.gpuwait_ms, nxperf.swap_ms, nxperf.drawitems, nxperf.transitems,
+ 					nxperf.shaders, nxperf.shader_ms, nxperf.textures, nxperf.tex_ms, (long long)(nxperf.texpixels / 1000),
+ 					nxperf.sounds, nxperf.sound_ms, nxperf.sndupd_ms, nxperf.sndstarts, nxperf.sndstart_ms,
+ 					(unsigned long long)dmiss, (unsigned long long)(dbytes >> 10),
+ 					nxperf.tex_async, nxperf.tex_wait, nxperf.tex_budget, nxperf.tex_preupload, nxperf.snd_async,
+-					nxperf.draws, nxperf.dynlights, nxperf.dynlightsall, nxperf.lightuploads, nxperf.lightskips, nxGovLevel);
++					nxperf.draws, nxperf.dynlights, nxperf.dynlightsall, nxperf.lightuploads, nxperf.lightskips, nxGovLevel,
++					nxperf.player_ms, nxperf.spawns, nxperf.spawn_ms, nxperf.spriteskips, nxperf.sndcalls, nxperf.sndcall_ms);
+ 				linesWritten++;
+ 			}
+ 		}
+diff --git a/src/common/engine/nx_perf.h b/src/common/engine/nx_perf.h
+index 55e444f5b..f0e038032 100644
+--- a/src/common/engine/nx_perf.h
++++ b/src/common/engine/nx_perf.h
+@@ -20,6 +20,11 @@ struct NXPerfCounters
+ 	double net_ms = 0;		// building/processing input commands
+ 	double input_ms = 0;	// input events
+ 	double think_ms = 0;	// actors and other thinkers (part of tic_ms)
++	double player_ms = 0;	// P_PlayerThink: movement and weapon actions (part of tic_ms, not of think_ms)
++	double spawn_ms = 0;	// spawning actors, outermost calls only (inside think_ms/player_ms)
++	int spawns = 0;
++	double sndcall_ms = 0;	// whole SoundEngine::StartSound calls (lookup, async load queueing, start)
++	int sndcalls = 0;
+ 	double sndstart_ms = 0;	// starting sounds in the sound system (mostly part of tic_ms)
+ 	double client_ms = 0;	// client-side logic per tic: menus, UI event handlers, HUD tick, client-side thinkers
+ 	double glsync_ms = 0;	// game thread waiting for the GL driver thread in the middle of a frame
+@@ -53,6 +58,8 @@ extern NXPerfCounters nxperf;
+ double NXPerf_NowMS();
+ void NXPerf_EndFrame();
+ void NXPerf_FlushFile();	// background writer (Switch)
++// a "#   note:" line in perf.log (rare events worth naming, e.g. a slow script action)
++void NXPerf_Note(const char *fmt, ...);
+ // last completed frame, the simulation time inside it, and the average cost of one tic (0 if none ran)
+ double NXPerf_LastFrameMS();
+ double NXPerf_LastSimMS();
+diff --git a/src/common/platform/posix/nx/rdoom_nx.cpp b/src/common/platform/posix/nx/rdoom_nx.cpp
+index 19c07e6fc..77558ed92 100644
+--- a/src/common/platform/posix/nx/rdoom_nx.cpp
++++ b/src/common/platform/posix/nx/rdoom_nx.cpp
+@@ -371,8 +371,8 @@ static std::vector<std::pair<std::string, std::string>> g_session;
+ // every new pipeline, the session report every 600 frames, sounds printing
+ // decoder notes to stderr). Logs are now fully buffered and this low-priority
+ // thread flushes them, rewrites engine-session.txt when it changed and writes
+-// queued files (the pipeline cache) every two seconds. Quitting with HOME
+-// loses at most the last two seconds of log.
++// queued files (the pipeline cache, warm lists) within 0.25 s. Quitting with
++// HOME loses at most the last two seconds of log.
+ 
+ static std::mutex g_ioMutex;	// g_session, g_sessionDirty, g_fileQueue
+ static bool g_sessionDirty = false;
+@@ -433,10 +433,19 @@ static void FlushOnce()
+ 
+ static void FlushThreadMain(void *)
+ {
+-	while (g_flushRun)
++	// logs every two seconds; queued files (pipeline cache, warm lists) within
++	// a quarter of a second, so quitting with HOME right after they change
++	// does not lose them
++	for (unsigned tick = 1; g_flushRun; tick++)
+ 	{
+-		svcSleepThread(2000000000ULL);
+-		FlushOnce();
++		svcSleepThread(250000000ULL);
++		bool files;
++		{
++			std::lock_guard<std::mutex> lock(g_ioMutex);
++			files = !g_fileQueue.empty();
++		}
++		if (files || (tick % 8) == 0)
++			FlushOnce();
+ 	}
+ }
+ 
+diff --git a/src/common/rendering/vulkan/renderer/vk_renderpass.cpp b/src/common/rendering/vulkan/renderer/vk_renderpass.cpp
+index 402b12620..0ecf95b9f 100644
+--- a/src/common/rendering/vulkan/renderer/vk_renderpass.cpp
++++ b/src/common/rendering/vulkan/renderer/vk_renderpass.cpp
+@@ -237,8 +237,7 @@ void VkRenderPassManager::TextureFirstUsed(FGameTexture *tex, int scaleFlags)
+ 	{
+ 		mTexList.push_back({ name, useType, scaleFlags });
+ 		mTexDirty = true;
+-		mUnsavedPipelines++;	// the saver below also writes this list
+-		mLastPipelineMs = I_msTime();
++		mLastTexMs = I_msTime();
+ 	}
+ #endif
+ }
+@@ -274,7 +273,24 @@ void VkRenderPassManager::PrecacheListedTextures()
+ void VkRenderPassManager::SaveCacheWhenIdle()
+ {
+ #ifdef __SWITCH__
+-	if (mUnsavedPipelines == 0 || VulkanDeviceWasLost || I_msTime() - mLastPipelineMs < 3000)
++	if (VulkanDeviceWasLost)
++		return;
++	const uint64_t now = I_msTime();
++	// The texture list goes to the card one second after the last new
++	// picture (the write runs on the background writer): sessions are often
++	// short, start, blow up the barrels, quit, and the list must survive that.
++	if (mTexDirty && now - mLastTexMs >= 1000)
++	{
++		mTexDirty = false;
++		FString out;
++		for (auto &t : mTexList)
++			out.AppendFormat("%d %d %s\n", t.UseType, t.ScaleFlags, t.Name.GetChars());
++		RDoom_WriteFileAsync(WarmFilename("textures", "txt").GetChars(), out.GetChars(), out.Len());
++		FString n;
++		n.Format("%d textures", (int)mTexList.size());
++		RDoom_SessionSet("vulkan_texture_list_saved", n.GetChars());
++	}
++	if (mUnsavedPipelines == 0 || now - mLastPipelineMs < 3000)
+ 		return;
+ 	mUnsavedPipelines = 0;
+ 	try
+@@ -288,14 +304,6 @@ void VkRenderPassManager::SaveCacheWhenIdle()
+ 	catch (...)
+ 	{
+ 	}
+-	if (mTexDirty)
+-	{
+-		mTexDirty = false;
+-		FString out;
+-		for (auto &t : mTexList)
+-			out.AppendFormat("%d %d %s\n", t.UseType, t.ScaleFlags, t.Name.GetChars());
+-		RDoom_WriteFileAsync(WarmFilename("textures", "txt").GetChars(), out.GetChars(), out.Len());
+-	}
+ 	if (mWarmDirty)
+ 	{
+ 		mWarmDirty = false;
+diff --git a/src/common/rendering/vulkan/renderer/vk_renderpass.h b/src/common/rendering/vulkan/renderer/vk_renderpass.h
+index 86ec5a0dd..34962ec22 100644
+--- a/src/common/rendering/vulkan/renderer/vk_renderpass.h
++++ b/src/common/rendering/vulkan/renderer/vk_renderpass.h
+@@ -200,6 +200,7 @@ private:
+ 	struct TextureUse { FString Name; int UseType, ScaleFlags; };
+ 	std::vector<TextureUse> mTexList;
+ 	bool mTexLoaded = false, mTexDirty = false, mTexWarming = false;
++	uint64_t mLastTexMs = 0;
+ 	void LoadTextureList();
+ 
+ 	VulkanRenderDevice* fb = nullptr;
+diff --git a/src/common/rendering/vulkan/system/vk_renderdevice.cpp b/src/common/rendering/vulkan/system/vk_renderdevice.cpp
+index e9a41562c..8f13f370e 100644
+--- a/src/common/rendering/vulkan/system/vk_renderdevice.cpp
++++ b/src/common/rendering/vulkan/system/vk_renderdevice.cpp
+@@ -60,6 +60,7 @@
+ #include "vulkan/textures/vk_renderbuffers.h"
+ #include "vulkan/textures/vk_samplers.h"
+ #include "vulkan/textures/vk_texture.h"
++#include "vulkan/textures/vk_asynctex.h"
+ 
+ FString JitCaptureStackTrace(int framesToSkip, bool includeNativeFrames, int maxFrames = -1);
+ 
+@@ -129,6 +130,7 @@ VulkanRenderDevice::VulkanRenderDevice(void *hMonitor, bool fullscreen, std::sha
+ 
+ VulkanRenderDevice::~VulkanRenderDevice()
+ {
++	VkAsyncTex_Shutdown();	// no worker may still decode into textures that go away below
+ 	// make sure the GPU is no longer using any objects before RAII tears them down
+ 	if (vkDeviceWaitIdle(device->device) == VK_ERROR_DEVICE_LOST && !VulkanDeviceWasLost)
+ 	{
+@@ -209,6 +211,7 @@ void VulkanRenderDevice::InitializeState()
+ #else
+ 	mRenderState.reset(new VkRenderState(this));
+ #endif
++	VkAsyncTex_Install(this);
+ }
+ 
+ void VulkanRenderDevice::Update()
+@@ -590,6 +593,7 @@ void VulkanRenderDevice::BeginFrame()
+ 	mSaveBuffers->BeginFrame(SAVEPICWIDTH, SAVEPICHEIGHT, SAVEPICWIDTH, SAVEPICHEIGHT);
+ 	mRenderState->BeginFrame();
+ 	mDescriptorSetManager->BeginFrame();
++	VkAsyncTex_NewFrame();
+ }
+ 
+ void VulkanRenderDevice::InitLightmap(int LMTextureSize, int LMTextureCount, TArray<uint16_t>& LMTextureData)
+diff --git a/src/common/rendering/vulkan/textures/vk_asynctex.cpp b/src/common/rendering/vulkan/textures/vk_asynctex.cpp
+new file mode 100644
+index 000000000..b9dabceeb
+--- /dev/null
++++ b/src/common/rendering/vulkan/textures/vk_asynctex.cpp
+@@ -0,0 +1,402 @@
++/*
++** vk_asynctex.cpp
++** Sprite pictures decoded in the background for the Vulkan backend (Switch).
++**
++** A sprite picture that is not on the GPU yet used to be read from the
++** archive, decoded and uploaded in the middle of the frame that first shows
++** it. The first explosion of a session in Brutal Doom brings dozens of them
++** (fire, smoke, debris, gore), which cost 100-200 ms of a single frame on the
++** Switch. Here the decoding runs on the nx_jobs worker (core 2); the game
++** thread only copies finished pictures to the GPU, a few per frame, and
++** leaves a sprite out of the frame until its picture is there (one or two
++** frames for something that was not prefetched).
++**
++** Pictures of actor classes are queued ahead of time when the class first
++** shows up in a level (hw_nxprefetch.cpp), so most are ready before they
++** are needed. Translated sprites, indexed and upscaled textures and HUD
++** graphics keep the normal synchronous path.
++**
++** Copyright 2026 RDoom contributors. GPLv3 (same as UZDoom).
++*/
++
++#include "vk_asynctex.h"
++
++#ifdef __SWITCH__
++
++#include <atomic>
++#include <deque>
++#include <memory>
++#include <mutex>
++#include <unordered_map>
++#include "vk_hwtexture.h"
++#include "vulkan/system/vk_renderdevice.h"
++#include "c_cvars.h"
++#include "hw_material.h"
++#include "nx_jobs.h"
++#include "nx_perf.h"
++#include "textures.h"
++
++CVAR(Bool, rd_vk_async_textures, true, CVAR_ARCHIVE | CVAR_GLOBALCONFIG)
++// game thread time per frame for copying finished pictures to the GPU
++CVAR(Float, rd_vk_async_upload_ms, 2.f, CVAR_ARCHIVE | CVAR_GLOBALCONFIG)
++
++extern thread_local bool nx_asyncworker;
++extern void (*NXPrefetchSpriteHook)(FGameTexture *gtex, int priority);
++extern int (*NXSpriteReadyHook)(FGameTexture *gtex);
++extern bool (*NXSpriteDrawableHook)(FGameTexture *gtex, int translation, int scaleflags);
++
++namespace
++{
++	struct Key
++	{
++		FTexture *tex;
++		int flags;
++		bool operator==(const Key &o) const { return tex == o.tex && flags == o.flags; }
++	};
++
++	struct KeyHash
++	{
++		size_t operator()(const Key &k) const { return std::hash<void *>()(k.tex) ^ (size_t(k.flags) * 0x9E3779B97F4A7C15ull); }
++	};
++
++	struct Job
++	{
++		std::atomic<bool> started{ false }, done{ false }, bumped{ false };
++		FTextureBuffer result;
++		int64_t bytes = 0;
++		uint64_t lastRequest = 0;
++		int priority = NXJOB_LOW;
++		// prefetched sprite: uploaded at the start of a frame, before it is needed
++		FGameTexture *gtex = nullptr;
++		int scaleFlags = 0;
++		bool queued = false;	// in readyQueue
++	};
++
++	VulkanRenderDevice *device = nullptr;
++	std::mutex jobMutex;	// jobs, readyQueue, Job::gtex/queued
++	std::unordered_map<Key, std::shared_ptr<Job>, KeyHash> jobs;
++	std::deque<Key> readyQueue;
++	std::atomic<int> generation{ 0 };
++	std::atomic<int64_t> pendingBytes{ 0 };	// decoded, waiting for the upload
++	const int64_t PrefetchCap = 96ll << 20;	// prefetches stop above this
++	const int64_t PreuploadCap = 192ll << 20;	// prefetched pictures sent ahead per level
++	int64_t preuploaded = 0;
++	uint64_t frame = 0;
++	int uploadsThisFrame = 0;
++	double uploadMsThisFrame = 0;
++	// first frames of a level: everything synchronous, so the first view is complete
++	const int WarmupFrames = 3;
++	int warmup = WarmupFrames;
++
++	bool Active()
++	{
++		return device != nullptr && rd_vk_async_textures && NXJobs_Enabled();
++	}
++
++	bool Eligible(FTexture *tex, int flags)
++	{
++		if (flags & (CTF_Indexed | CTF_Upscale | CTF_CheckOnly))
++			return false;
++		return tex != nullptr && !tex->isHardwareCanvas() && tex->GetImage() != nullptr;
++	}
++
++	void Run(const std::shared_ptr<Job> &job, FTexture *tex, int flags, int gen, bool capped)
++	{
++		if (job->started.exchange(true))
++			return;
++		if (gen != generation.load() || (capped && !job->bumped && pendingBytes.load() > PrefetchCap))
++		{
++			// level changed, or too much is waiting already: a real request queues it again
++			std::lock_guard<std::mutex> lock(jobMutex);
++			auto it = jobs.find(Key{ tex, flags });
++			if (it != jobs.end() && it->second == job)
++				jobs.erase(it);
++			return;
++		}
++		nx_asyncworker = true;
++		FTextureBuffer tb = tex->CreateTexBuffer(0, flags);
++		nx_asyncworker = false;
++		job->bytes = int64_t(tb.mWidth) * tb.mHeight * 4;
++		pendingBytes += job->bytes;
++		job->result = std::move(tb);
++		std::lock_guard<std::mutex> lock(jobMutex);
++		job->done = true;
++		if (job->gtex != nullptr && !job->queued)
++		{
++			job->queued = true;
++			readyQueue.push_back(Key{ tex, flags });
++		}
++	}
++
++	// call with jobMutex held
++	std::shared_ptr<Job> Start(const Key &key, int priority, FGameTexture *gtex, int scaleFlags)
++	{
++		auto job = std::make_shared<Job>();
++		job->lastRequest = frame;
++		job->priority = priority;
++		job->gtex = gtex;
++		job->scaleFlags = scaleFlags;
++		jobs.emplace(key, job);
++		const int gen = generation.load();
++		FTexture *tex = key.tex;
++		const int flags = key.flags;
++		const bool capped = priority < NXJOB_NOW;
++		NXJobs_Push([job, tex, flags, gen, capped]() { Run(job, tex, flags, gen, capped); }, priority);
++		return job;
++	}
++
++	// call with jobMutex held: a queued job is needed now, push it again at the top
++	void Bump(const Key &key, const std::shared_ptr<Job> &job)
++	{
++		if (job->started || job->bumped.exchange(true))
++			return;
++		job->priority = NXJOB_NOW;
++		const int gen = generation.load();
++		FTexture *tex = key.tex;
++		const int flags = key.flags;
++		NXJobs_Push([job, tex, flags, gen]() { Run(job, tex, flags, gen, false); }, NXJOB_NOW);
++	}
++
++	void Upload(VkHardwareTexture *hw, FTextureBuffer &tb)
++	{
++		const double start = NXPerf_NowMS();
++		hw->CreateFromBuffer(tb);
++		uploadMsThisFrame += NXPerf_NowMS() - start;
++		uploadsThisFrame++;
++		nxperf.tex_async++;
++	}
++
++	// 1 = on the GPU (uploaded now if it was decoded), 0 = not yet
++	int Request(VkHardwareTexture *hw, FTexture *tex, int flags, FGameTexture *gtex, int scaleFlags, bool force)
++	{
++		FTextureBuffer tb;
++		{
++			std::lock_guard<std::mutex> lock(jobMutex);
++			const Key key{ tex, flags };
++			auto it = jobs.find(key);
++			if (it == jobs.end())
++			{
++				Start(key, NXJOB_NOW, gtex, scaleFlags);
++				nxperf.tex_wait++;
++				return 0;
++			}
++			auto job = it->second;
++			job->lastRequest = frame;
++			if (!job->done)
++			{
++				if (job->gtex == nullptr)
++				{
++					job->gtex = gtex;
++					job->scaleFlags = scaleFlags;
++				}
++				Bump(key, job);
++				nxperf.tex_wait++;
++				return 0;
++			}
++			if (job->result.mBuffer != nullptr && !force && uploadsThisFrame >= 2 && uploadMsThisFrame >= rd_vk_async_upload_ms)
++			{
++				nxperf.tex_budget++;
++				return 0;
++			}
++			tb = std::move(job->result);
++			pendingBytes -= job->bytes;
++			jobs.erase(it);
++		}
++		if (tb.mBuffer == nullptr)
++			return 1;	// decoding failed: the normal path deals with it
++		Upload(hw, tb);
++		return 1;
++	}
++
++	// 1 = every layer is on the GPU, 0 = still decoding, -1 = just queued
++	int Layers(FGameTexture *gtex, int scaleFlags, bool force)
++	{
++		FMaterial *mat = FMaterial::ValidateTexture(gtex, scaleFlags, true);
++		if (mat == nullptr)
++			return 1;
++		int ready = 1;
++		MaterialLayerInfo *layer;
++		for (int i = 0; i < mat->NumLayers(); i++)
++		{
++			auto hw = static_cast<VkHardwareTexture *>(mat->GetLayer(i, 0, &layer));
++			if (hw == nullptr || hw->HasImage() || layer->layerTexture == nullptr)
++				continue;
++			const int flags = layer->scaleFlags | CTF_ProcessData;
++			if (!Eligible(layer->layerTexture, flags))
++				continue;
++			if (Request(hw, layer->layerTexture, flags, gtex, scaleFlags, force) == 0)
++				ready = 0;
++		}
++		return ready;
++	}
++
++	bool SpriteDrawable(FGameTexture *gtex, int translation, int scaleflags)
++	{
++		if (translation != 0 || warmup > 0 || gtex == nullptr || !gtex->isValid() || !Active())
++			return true;
++		if (Layers(gtex, scaleflags, false) > 0)
++			return true;
++		nxperf.spriteskips++;
++		return false;
++	}
++
++	// weapon frames: never wait for the upload budget, the HUD holds the previous frame meanwhile
++	int SpriteReady(FGameTexture *gtex)
++	{
++		if (warmup > 0 || gtex == nullptr || !gtex->isValid() || !Active())
++			return 1;
++		return Layers(gtex, CTF_Expand, true);
++	}
++
++	void PrefetchSprite(FGameTexture *gtex, int priority)
++	{
++		if (gtex == nullptr || !gtex->isValid() || !Active())
++			return;
++		if (priority < NXJOB_NOW && pendingBytes.load() > PrefetchCap)
++			return;
++		FMaterial *mat = FMaterial::ValidateTexture(gtex, CTF_Expand, true);
++		if (mat == nullptr)
++			return;
++		MaterialLayerInfo *layer;
++		for (int i = 0; i < mat->NumLayers(); i++)
++		{
++			auto hw = static_cast<VkHardwareTexture *>(mat->GetLayer(i, 0, &layer));
++			if (hw == nullptr || hw->HasImage() || layer->layerTexture == nullptr)
++				continue;
++			const int flags = layer->scaleFlags | CTF_ProcessData;
++			if (!Eligible(layer->layerTexture, flags))
++				continue;
++			std::lock_guard<std::mutex> lock(jobMutex);
++			const Key key{ layer->layerTexture, flags };
++			auto it = jobs.find(key);
++			if (it == jobs.end())
++				Start(key, priority, gtex, CTF_Expand);
++			else if (priority >= NXJOB_NOW && !it->second->done)
++				Bump(key, it->second);
++		}
++	}
++
++	// finished prefetches go to the GPU at the start of a frame, before anybody needs them
++	void PreUpload()
++	{
++		const double start = NXPerf_NowMS();
++		const double budget = rd_vk_async_upload_ms * 0.75;
++		int count = 0;
++		while (count < 12 && NXPerf_NowMS() - start < budget)
++		{
++			Key key;
++			FGameTexture *gtex;
++			int scaleFlags;
++			FTextureBuffer tb;
++			{
++				std::lock_guard<std::mutex> lock(jobMutex);
++				if (readyQueue.empty())
++					break;
++				key = readyQueue.front();
++				readyQueue.pop_front();
++				auto it = jobs.find(key);
++				if (it == jobs.end())
++					continue;
++				auto &job = it->second;
++				job->queued = false;
++				if (!job->done || job->result.mBuffer == nullptr || job->gtex == nullptr)
++					continue;
++				if (job->priority == NXJOB_LOW)
++				{
++					// level prefetch: the rest stays decoded until it is needed
++					if (preuploaded > PreuploadCap)
++						continue;
++					preuploaded += job->bytes;
++				}
++				gtex = job->gtex;
++				scaleFlags = job->scaleFlags;
++				tb = std::move(job->result);
++				pendingBytes -= job->bytes;
++				jobs.erase(it);
++			}
++			FMaterial *mat = FMaterial::ValidateTexture(gtex, scaleFlags, true);
++			if (mat == nullptr)
++				continue;
++			MaterialLayerInfo *layer;
++			for (int i = 0; i < mat->NumLayers(); i++)
++			{
++				auto hw = static_cast<VkHardwareTexture *>(mat->GetLayer(i, 0, &layer));
++				if (hw != nullptr && !hw->HasImage() && layer->layerTexture == key.tex && (layer->scaleFlags | CTF_ProcessData) == key.flags)
++				{
++					Upload(hw, tb);
++					nxperf.tex_preupload++;
++					count++;
++					break;
++				}
++			}
++		}
++	}
++}
++
++void VkAsyncTex_Install(VulkanRenderDevice *fb)
++{
++	device = fb;
++	NXPrefetchSpriteHook = PrefetchSprite;
++	NXSpriteReadyHook = SpriteReady;
++	NXSpriteDrawableHook = SpriteDrawable;
++}
++
++void VkAsyncTex_NewFrame()
++{
++	if (device == nullptr)
++		return;
++	frame++;
++	uploadsThisFrame = 0;
++	uploadMsThisFrame = 0;
++	if (warmup > 0)
++		warmup--;
++	else if (Active())
++		PreUpload();
++	// drop pictures nobody asked for in about 15 seconds
++	if ((frame & 63) == 0)
++	{
++		std::lock_guard<std::mutex> lock(jobMutex);
++		for (auto it = jobs.begin(); it != jobs.end();)
++		{
++			if (it->second->done && frame - it->second->lastRequest > 900)
++			{
++				pendingBytes -= it->second->bytes;
++				it = jobs.erase(it);
++			}
++			else
++				++it;
++		}
++	}
++}
++
++void VkAsyncTex_Flush()
++{
++	warmup = WarmupFrames;
++	generation++;
++	NXJobs_WaitAll();
++	std::lock_guard<std::mutex> lock(jobMutex);
++	jobs.clear();
++	readyQueue.clear();
++	preuploaded = 0;
++	pendingBytes = 0;
++}
++
++void VkAsyncTex_Shutdown()
++{
++	if (device == nullptr)
++		return;
++	NXPrefetchSpriteHook = nullptr;
++	NXSpriteReadyHook = nullptr;
++	NXSpriteDrawableHook = nullptr;
++	VkAsyncTex_Flush();
++	device = nullptr;
++}
++
++#else
++
++void VkAsyncTex_Install(VulkanRenderDevice *) {}
++void VkAsyncTex_NewFrame() {}
++void VkAsyncTex_Flush() {}
++void VkAsyncTex_Shutdown() {}
++
++#endif
+diff --git a/src/common/rendering/vulkan/textures/vk_asynctex.h b/src/common/rendering/vulkan/textures/vk_asynctex.h
+new file mode 100644
+index 000000000..a4b96d640
+--- /dev/null
++++ b/src/common/rendering/vulkan/textures/vk_asynctex.h
+@@ -0,0 +1,12 @@
++#pragma once
++// Sprite pictures decoded in the background for the Vulkan backend (Switch),
++// see vk_asynctex.cpp. Everything else is a no-op on other platforms.
++
++class VulkanRenderDevice;
++
++void VkAsyncTex_Install(VulkanRenderDevice *fb);
++// start of a frame: sends finished prefetches to the GPU
++void VkAsyncTex_NewFrame();
++// level precaching and shutdown: nothing may still be decoding after this returns
++void VkAsyncTex_Flush();
++void VkAsyncTex_Shutdown();
+diff --git a/src/common/rendering/vulkan/textures/vk_hwtexture.cpp b/src/common/rendering/vulkan/textures/vk_hwtexture.cpp
+index 83b7c991f..2019277f9 100644
+--- a/src/common/rendering/vulkan/textures/vk_hwtexture.cpp
++++ b/src/common/rendering/vulkan/textures/vk_hwtexture.cpp
+@@ -42,6 +42,9 @@ VkImageUsageFlags RDoom_DepthUsage(VkImageUsageFlags usage);
+ #endif
+ #include "vk_nxupload.h"
+ #include "nx_perf.h"
++#ifdef __SWITCH__
++#include "common/platform/posix/nx/rdoom_nx.h"
++#endif
+ 
+ VkHardwareTexture::VkHardwareTexture(VulkanRenderDevice* fb, int numchannels) : fb(fb)
+ {
+@@ -145,6 +148,12 @@ void VkHardwareTexture::CreateImage(FTexture *tex, int translation, int flags)
+ 	}
+ }
+ 
++void VkHardwareTexture::CreateFromBuffer(const FTextureBuffer &buffer)
++{
++	// the same as CreateImage for a non-indexed picture, minus the decoding
++	CreateTexture(buffer.mWidth, buffer.mHeight, 4, VK_FORMAT_B8G8R8A8_UNORM, buffer.mBuffer, true);
++}
++
+ void VkHardwareTexture::CreateTexture(int w, int h, int pixelsize, VkFormat format, const void *pixels, bool mipmap)
+ {
+ 	if (w <= 0 || h <= 0)
+@@ -202,10 +211,17 @@ void VkHardwareTexture::CreateTexture(int w, int h, int pixelsize, VkFormat form
+ 	// every overflow waits for the GPU to go idle (a visible hitch when a
+ 	// door opens on a new area or an explosion shows its frames the first time)
+ 	if (fb->GetCommands()->TransferDeleteList->TotalSize > 48 * 1024 * 1024)
++	{
++		static int overflows = 0;
++		FString n;
++		n.Format("%d", ++overflows);
++		RDoom_SessionSet("vulkan_upload_overflow_waits", n.GetChars());
++		fb->GetCommands()->WaitForCommands(false, true);
++	}
+ #else
+ 	if (fb->GetCommands()->TransferDeleteList->TotalSize > 64 * 1024 * 1024)
+-#endif
+ 		fb->GetCommands()->WaitForCommands(false, true);
++#endif
+ }
+ 
+ int VkHardwareTexture::GetMipLevels(int w, int h)
+diff --git a/src/common/rendering/vulkan/textures/vk_hwtexture.h b/src/common/rendering/vulkan/textures/vk_hwtexture.h
+index 0a24cece0..f0be2a284 100644
+--- a/src/common/rendering/vulkan/textures/vk_hwtexture.h
++++ b/src/common/rendering/vulkan/textures/vk_hwtexture.h
+@@ -64,6 +64,10 @@ public:
+ 	VkTextureImage *GetImage(FTexture *tex, int translation, int flags);
+ 	VkTextureImage *GetDepthStencil(FTexture *tex);
+ 
++	// Switch: picture decoded on a worker (vk_asynctex.cpp)
++	bool HasImage() const { return mImage.Image != nullptr; }
++	void CreateFromBuffer(const FTextureBuffer &buffer);
++
+ 	VulkanRenderDevice* fb = nullptr;
+ 	std::list<VkHardwareTexture*>::iterator it;
+ 
+diff --git a/src/common/rendering/vulkan/textures/vk_nxupload.cpp b/src/common/rendering/vulkan/textures/vk_nxupload.cpp
+index 5c16182e9..c55cd00f0 100644
+--- a/src/common/rendering/vulkan/textures/vk_nxupload.cpp
++++ b/src/common/rendering/vulkan/textures/vk_nxupload.cpp
+@@ -25,6 +25,7 @@
+ #include "vulkan/system/vk_renderdevice.h"
+ #include "vulkan/system/vk_commandbuffer.h"
+ #include "c_cvars.h"
++#include "common/platform/posix/nx/rdoom_nx.h"
+ 
+ CVAR(Bool, rd_vk_blitupload, true, 0)
+ 
+@@ -57,7 +58,14 @@ bool NX_UploadViaBlit(VulkanRenderDevice *fb, VulkanCommandBuffer *cmd, VkImage
+ 		.DebugName("NX_UploadViaBlit.linear")
+ 		.TryCreate(fb->device.get());
+ 	if (!src)
++	{
++		// the copy path that follows uses NVK's compute copy (black in Ryujinx)
++		static int failures = 0;
++		FString n;
++		n.Format("%d (last %dx%d)", ++failures, w, h);
++		RDoom_SessionSet("vulkan_blit_upload_failed", n.GetChars());
+ 		return false;
++	}
+ 
+ 	VkImageSubresource sub = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0 };
+ 	VkSubresourceLayout layout = {};
+diff --git a/src/common/textures/gametexture.cpp b/src/common/textures/gametexture.cpp
+index a5b9a59db..50d64488a 100644
+--- a/src/common/textures/gametexture.cpp
++++ b/src/common/textures/gametexture.cpp
+@@ -318,7 +318,7 @@ bool FGameTexture::ShouldExpandSprite()
+ //
+ //===========================================================================
+ 
+-void FGameTexture::SetupSpriteData()
++void FGameTexture::SetupSpriteData(const uint16_t *pretrim, bool pretrimResult)
+ {
+ 	// Since this is only needed for real sprites it gets allocated on demand.
+ 	// It also allocates from the image memory arena because it has the same lifetime and to reduce maintenance.
+@@ -333,7 +333,13 @@ void FGameTexture::SetupSpriteData()
+ 
+ 		if (i == 1 && ShouldExpandSprite())
+ 		{
+-			spi.mTrimResult = Base->TrimBorders(spi.trim) && !GetNoTrimming();	// get the trim size before adding the empty frame
++			if (pretrim)
++			{
++				memcpy(spi.trim, pretrim, sizeof(spi.trim));
++				spi.mTrimResult = pretrimResult && !GetNoTrimming();
++			}
++			else
++				spi.mTrimResult = Base->TrimBorders(spi.trim) && !GetNoTrimming();	// get the trim size before adding the empty frame
+ 			spi.spriteWidth += 2;
+ 			spi.spriteHeight += 2;
+ 		}
+diff --git a/src/common/textures/gametexture.h b/src/common/textures/gametexture.h
+index 6420d3e21..2f34200c0 100644
+--- a/src/common/textures/gametexture.h
++++ b/src/common/textures/gametexture.h
+@@ -167,7 +167,8 @@ public:
+ 	void CreateDefaultBrightmap();
+ 	void AddAutoMaterials();
+ 	bool ShouldExpandSprite();
+-	void SetupSpriteData();
++	// pretrim: border trim already computed by TrimBorders (Switch port: on a worker thread)
++	void SetupSpriteData(const uint16_t *pretrim = nullptr, bool pretrimResult = false);
+ 	void SetSpriteRect();
+ 
+ 	ETextureType GetUseType() const { return UseType; }
+@@ -341,6 +342,7 @@ public:
+ 	}
+ 
+ 	const SpritePositioningInfo& GetSpritePositioning(int which) { if (spi == nullptr) SetupSpriteData(); return spi[which]; }
++	bool HasSpriteData() const { return spi != nullptr; }
+ 	int GetAreas(FloatRect** pAreas) const;
+ 
+ 	bool GetTranslucency()
+diff --git a/src/gamedata/info.cpp b/src/gamedata/info.cpp
+index caa2a80d8..61b17617d 100644
+--- a/src/gamedata/info.cpp
++++ b/src/gamedata/info.cpp
+@@ -33,6 +33,8 @@
+ #include "g_levellocals.h"
+ #include "gi.h"
+ #include "info.h"
++#include "nx_perf.h"
++#include "vmintern.h"
+ #include "p_local.h"
+ #include "r_state.h"
+ #include "stats.h"
+@@ -150,6 +152,21 @@ bool FState::CallAction(AActor *self, AActor *stateowner, FStateParamInfo *info,
+ 	if (ActionFunc != nullptr)
+ 	{
+ 		ActionCycles.Clock();
++		// perf.log: actions that take a big part of a frame, with their name
++		struct NXSlowAction
++		{
++			FState *st; AActor *owner; double start = NXPerf_NowMS();
++			~NXSlowAction()
++			{
++				const double ms = NXPerf_NowMS() - start;
++				if (ms < 5.0)
++					return;
++				auto sf = dynamic_cast<VMScriptFunction *>(st->ActionFunc);
++				NXPerf_Note("slow action %.1f ms: %s (%s:%d) in %s", ms, st->ActionFunc->PrintableName ? st->ActionFunc->PrintableName : "?",
++					sf ? sf->SourceFileName.GetChars() : "native", sf && sf->CodeSize > 0 ? sf->PCToLine(sf->Code) : 0,
++					owner ? owner->GetClass()->TypeName.GetChars() : "?");
++			}
++		} nxSlowAction{ this, stateowner };
+ 
+ 		// If the function returns a state, store it at *stateret.
+ 		// If it doesn't return a state but stateret is non-nullptr, we need
+diff --git a/src/playsim/p_mobj.cpp b/src/playsim/p_mobj.cpp
+index 300d7c629..c089b3d8d 100644
+--- a/src/playsim/p_mobj.cpp
++++ b/src/playsim/p_mobj.cpp
+@@ -71,6 +71,7 @@
+ #include "shadowinlines.h"
+ #include "teaminfo.h"
+ #include "thingdef.h"
++#include "nx_perf.h"
+ 
+ // MACROS ------------------------------------------------------------------
+ 
+@@ -5594,6 +5595,13 @@ void ConstructActor(AActor *actor, const DVector3 &pos, bool SpawningMapThing)
+ 
+ AActor *AActor::StaticSpawn(FLevelLocals *Level, PClassActor *type, const DVector3 &pos, replace_t allowreplacement, bool SpawningMapThing)
+ {
++	// perf.log "spawn": outermost spawns only (BeginPlay/PostBeginPlay may spawn more)
++	static int nxSpawnDepth = 0;
++	struct NXSpawnTimer
++	{
++		double start = nxSpawnDepth++ == 0 ? NXPerf_NowMS() : -1;
++		~NXSpawnTimer() { if (--nxSpawnDepth == 0) { nxperf.spawn_ms += NXPerf_NowMS() - start; nxperf.spawns++; } }
++	} nxSpawnTimer;
+ 	if (type == NULL)
+ 	{
+ 		I_Error("Tried to spawn a class-less actor\n");
+diff --git a/src/playsim/p_user.cpp b/src/playsim/p_user.cpp
+index 23ba8dbdd..594d6f7b1 100644
+--- a/src/playsim/p_user.cpp
++++ b/src/playsim/p_user.cpp
+@@ -62,6 +62,7 @@
+ #include "serialize_obj.h" // IWYU pragma: keep
+ #include "serializer_doom.h"
+ #include "vm.h"
++#include "nx_perf.h"
+ 
+ extern int paused;
+ 
+@@ -1628,6 +1629,7 @@ FSerializer& FSafePosition::Serialize(FSerializer& arc, const char* name)
+ 
+ void P_PlayerThink (player_t *player)
+ {
++	NXPERF_SCOPE(player_ms, nullptr);
+ 	usercmd_t *cmd = &player->cmd;
+ 
+ 	if (player->mo == NULL)
+diff --git a/src/rendering/hwrenderer/hw_nxprefetch.cpp b/src/rendering/hwrenderer/hw_nxprefetch.cpp
+index 3340a16be..7e7b26f76 100644
+--- a/src/rendering/hwrenderer/hw_nxprefetch.cpp
++++ b/src/rendering/hwrenderer/hw_nxprefetch.cpp
+@@ -20,6 +20,13 @@
+ #include "p_pspr.h"
+ #include "c_cvars.h"
+ #include "printf.h"
++#include "nx_jobs.h"
++#include "nx_perf.h"
++#include <atomic>
++#include <deque>
++#include <memory>
++#include <mutex>
++#include <unordered_map>
+ EXTERN_CVAR(Int, nx_perflog)
+ 
+ // priority: 0 = prefetch, 1 = likely needed soon, 2 = needed now
+@@ -29,6 +36,7 @@ int (*NXSpriteReadyHook)(FGameTexture *gtex) = nullptr;
+ // for the upload budget): drawing it would only show a transparent placeholder
+ bool (*NXSpriteDrawableHook)(FGameTexture *gtex, int translation, int scaleflags) = nullptr;
+ static TMap<PClassActor *, bool> NXPrefetched;
++static std::deque<FGameTexture *> NXPendingHigh, NXPendingLow;	// see NXPrefetch_Pump
+ 
+ // last frame of each weapon layer that could be shown
+ struct NXHeldFrame
+@@ -41,19 +49,128 @@ static TMap<DPSprite *, NXHeldFrame> NXHeldFrames;
+ // state each weapon layer was in when its upcoming frames were last queued
+ static TMap<DPSprite *, FState *> NXLookahead;
+ 
++//==========================================================================
++//
++// Sprite border trimming in the background
++//
++// The first time a sprite is drawn, the renderer decodes its whole picture
++// just to find the empty border around it (FTexture::TrimBorders), on the
++// game thread, and then decodes it a second time for the upload. An
++// explosion in Brutal Doom brings dozens of new pictures at once: on the
++// Switch that was 100-150 ms of PNG decoding inside one frame. The trim is
++// now computed by a worker (nx_jobs) and the sprite is left out until its
++// numbers are ready, usually one or two frames later.
++//
++//==========================================================================
++
++#ifdef __SWITCH__
++CVAR(Bool, rd_async_sprites, true, CVAR_ARCHIVE | CVAR_GLOBALCONFIG)
++#else
++CVAR(Bool, rd_async_sprites, false, CVAR_ARCHIVE | CVAR_GLOBALCONFIG)
++#endif
++
++extern thread_local bool nx_asyncworker;
++
++namespace
++{
++	struct TrimJob
++	{
++		std::atomic<bool> started{ false }, done{ false }, bumped{ false };
++		uint16_t trim[4] = {};
++		bool result = false;
++	};
++	std::mutex trimMutex;
++	std::unordered_map<FGameTexture *, std::shared_ptr<TrimJob>> trimJobs;
++	// first frames of a level: everything synchronous, so the first view is complete
++	int trimWarmup = 3;
++
++	void RunTrim(const std::shared_ptr<TrimJob> &job, FTexture *tex)
++	{
++		if (job->started.exchange(true)) return;
++		nx_asyncworker = true;
++		job->result = tex->TrimBorders(job->trim);
++		nx_asyncworker = false;
++		job->done = true;
++	}
++
++	// call with trimMutex held
++	void QueueTrim(FGameTexture *gtex, int priority)
++	{
++		auto it = trimJobs.find(gtex);
++		if (it != trimJobs.end())
++		{
++			auto job = it->second;
++			if (priority >= NXJOB_NOW && !job->started && !job->bumped.exchange(true))
++			{
++				FTexture *tex = gtex->GetTexture();
++				NXJobs_Push([job, tex]() { RunTrim(job, tex); }, NXJOB_NOW);
++			}
++			return;
++		}
++		auto job = std::make_shared<TrimJob>();
++		trimJobs.emplace(gtex, job);
++		FTexture *tex = gtex->GetTexture();
++		NXJobs_Push([job, tex]() { RunTrim(job, tex); }, priority);
++	}
++
++	bool TrimAsync(FGameTexture *gtex)
++	{
++		// only the expanded sprite frame (index 1) needs the decoded picture
++		return rd_async_sprites && gtex->GetTexture() != nullptr && !gtex->GetTexture()->isHardwareCanvas() && gtex->ShouldExpandSprite() && NXJobs_Enabled();
++	}
++}
++
++// false: the sprite's positioning is still being computed, leave it out of this frame
++bool NXSpriteDataReady(FGameTexture *gtex)
++{
++	if (gtex == nullptr || gtex->HasSpriteData() || trimWarmup > 0 || !TrimAsync(gtex))
++		return true;
++	std::shared_ptr<TrimJob> job;
++	{
++		std::lock_guard<std::mutex> lock(trimMutex);
++		auto it = trimJobs.find(gtex);
++		if (it == trimJobs.end() || !it->second->done)
++		{
++			QueueTrim(gtex, NXJOB_NOW);
++			nxperf.spriteskips++;
++			return false;
++		}
++		job = it->second;
++		trimJobs.erase(it);
++	}
++	gtex->SetupSpriteData(job->trim, job->result);
++	return true;
++}
++
++static void PrefetchTrim(FGameTexture *gtex, int priority)
++{
++	if (gtex == nullptr || !gtex->isValid() || gtex->HasSpriteData() || !TrimAsync(gtex))
++		return;
++	std::lock_guard<std::mutex> lock(trimMutex);
++	QueueTrim(gtex, priority);
++}
++
+ void NXPrefetch_NewLevel()
+ {
+ 	NXPrefetched.Clear();
+ 	NXHeldFrames.Clear();
+ 	NXLookahead.Clear();
++	// textures may go away with the old level: nothing may still be trimming
++	NXPendingHigh.clear();
++	NXPendingLow.clear();
++	NXJobs_WaitAll();
++	std::lock_guard<std::mutex> lock(trimMutex);
++	trimJobs.clear();
++	trimWarmup = 3;
+ }
+ 
+ // If a weapon frame is still being decoded, keep showing the previous
+ // frame of that layer (instead of making the gun vanish for a moment).
+ FGameTexture *NXHoldWeaponFrame(DPSprite *psp, FGameTexture *tex, bool &mirror)
+ {
+-	if (NXSpriteReadyHook == nullptr || psp == nullptr || tex == nullptr) return tex;
+-	int state = NXSpriteReadyHook(tex);
++	if (psp == nullptr || tex == nullptr) return tex;
++	int state = NXSpriteReadyHook ? NXSpriteReadyHook(tex) : 1;
++	if (!NXSpriteDataReady(tex) && state > 0) state = 0;
+ 	if (state > 0)
+ 	{
+ 		if (NXHeldFrames.CountUsed() > 256) NXHeldFrames.Clear();
+@@ -71,6 +188,40 @@ FGameTexture *NXHoldWeaponFrame(DPSprite *psp, FGameTexture *tex, bool &mirror)
+ 	return tex;
+ }
+ 
++// Pictures to prefetch. Preparing one (material, queueing the decode) costs
++// tens of microseconds on the game thread, and a class can bring hundreds of
++// them - Brutal Doom spawning its casings, smoke and gibs for the first time
++// meant 50+ ms inside one tic. Only what the HUD needs right now is queued
++// at once; the rest goes through these lists at most PumpMs per frame.
++static const double PumpMs = 0.75;
++
++static void NXPrefetchNow(FGameTexture *gtex, int priority)
++{
++	PrefetchTrim(gtex, priority);
++	if (NXPrefetchSpriteHook) NXPrefetchSpriteHook(gtex, priority);
++}
++
++static void NXPrefetchTexture(FGameTexture *gtex, int priority)
++{
++	if (gtex == nullptr) return;
++	if (priority >= 2) NXPrefetchNow(gtex, priority);
++	else (priority == 1 ? NXPendingHigh : NXPendingLow).push_back(gtex);
++}
++
++static void NXPrefetch_Pump()
++{
++	const double start = NXPerf_NowMS();
++	while (!NXPendingHigh.empty() || !NXPendingLow.empty())
++	{
++		auto &q = !NXPendingHigh.empty() ? NXPendingHigh : NXPendingLow;
++		const int priority = &q == &NXPendingHigh ? 1 : 0;
++		FGameTexture *gtex = q.front();
++		q.pop_front();
++		NXPrefetchNow(gtex, priority);
++		if (NXPerf_NowMS() - start >= PumpMs) break;
++	}
++}
++
+ struct NXPrefetchList
+ {
+ 	TMap<int, bool> seen;
+@@ -96,7 +247,7 @@ struct NXPrefetchList
+ 			if (!id.isValid()) continue;
+ 			if (seen.CheckKey(id.GetIndex())) continue;
+ 			seen.Insert(id.GetIndex(), true);
+-			NXPrefetchSpriteHook(TexMan.GetGameTexture(id), priority);
++			NXPrefetchTexture(TexMan.GetGameTexture(id), priority);
+ 			count++;
+ 		}
+ 	}
+@@ -116,7 +267,7 @@ struct NXPrefetchList
+ 
+ void NXPrefetch_Class(PClassActor *cls, int maxtextures, bool urgent)
+ {
+-	if (NXPrefetchSpriteHook == nullptr || cls == nullptr) return;
++	if ((NXPrefetchSpriteHook == nullptr && !rd_async_sprites) || cls == nullptr) return;
+ 	if (NXPrefetched.CheckKey(cls)) return;
+ 	NXPrefetched.Insert(cls, true);
+ 
+@@ -142,7 +293,7 @@ void NXPrefetch_Class(PClassActor *cls, int maxtextures, bool urgent)
+ // in the order they're most likely to be needed.
+ static void NXPrefetch_Weapon(PClassActor *cls)
+ {
+-	if (NXPrefetchSpriteHook == nullptr || cls == nullptr) return;
++	if ((NXPrefetchSpriteHook == nullptr && !rd_async_sprites) || cls == nullptr) return;
+ 	if (NXPrefetched.CheckKey(cls)) return;
+ 	NXPrefetched.Insert(cls, true);
+ 
+@@ -163,7 +314,10 @@ static void NXPrefetch_Weapon(PClassActor *cls)
+ 
+ void NXPrefetch_Player(player_t *player)
+ {
+-	if (NXPrefetchSpriteHook == nullptr || player == nullptr) return;
++	// called once per rendered frame
++	if (trimWarmup > 0) trimWarmup--;
++	else NXPrefetch_Pump();
++	if ((NXPrefetchSpriteHook == nullptr && !rd_async_sprites) || player == nullptr) return;
+ 	if (player->ReadyWeapon) NXPrefetch_Weapon(player->ReadyWeapon->GetClass());
+ 	if (player->PendingWeapon && player->PendingWeapon != WP_NOCHANGE)
+ 		NXPrefetch_Weapon(static_cast<AActor *>(player->PendingWeapon)->GetClass());
+diff --git a/src/rendering/hwrenderer/hw_precache.cpp b/src/rendering/hwrenderer/hw_precache.cpp
+index 1b797d96d..85361aa7d 100644
+--- a/src/rendering/hwrenderer/hw_precache.cpp
++++ b/src/rendering/hwrenderer/hw_precache.cpp
+@@ -87,6 +87,7 @@ static void PrecacheSprite(FGameTexture *tex, SpriteHits &hits)
+ //==========================================================================
+ 
+ void GLES_AsyncTexFlush();
++void VkAsyncTex_Flush();
+ void NXPrefetch_NewLevel();
+ void NXPrefetch_Class(PClassActor *cls, int maxtextures, bool urgent);
+ 
+@@ -94,6 +95,7 @@ void hw_PrecacheTexture(uint8_t *texhitlist, TMap<PClassActor*, bool> &actorhitl
+ {
+ 	// nothing may be decoding textures in the background while precaching
+ 	GLES_AsyncTexFlush();
++	VkAsyncTex_Flush();
+ 	NXPrefetch_NewLevel();
+ 
+ 	TMap<FTexture*, bool> allTextures;
+diff --git a/src/rendering/hwrenderer/scene/hw_sprites.cpp b/src/rendering/hwrenderer/scene/hw_sprites.cpp
+index 58de972b7..161c70294 100644
+--- a/src/rendering/hwrenderer/scene/hw_sprites.cpp
++++ b/src/rendering/hwrenderer/scene/hw_sprites.cpp
+@@ -89,8 +89,10 @@ CUSTOM_CVAR(Int, gl_fuzztype, 8, CVAR_ARCHIVE)
+ 	if (self < 0 || self > 8) self = 0;
+ }
+ 
+-// Switch port (gles_asynctex.cpp): world sprite not on the GPU yet
++// Switch port (gles_asynctex.cpp, vk_asynctex.cpp): world sprite not on the GPU yet
+ extern bool (*NXSpriteDrawableHook)(FGameTexture *gtex, int translation, int scaleflags);
++// Switch port (hw_nxprefetch.cpp): sprite border trim still being computed
++bool NXSpriteDataReady(FGameTexture *gtex);
+ 
+ //==========================================================================
+ //
+@@ -1066,6 +1068,7 @@ void HWSprite::Process(HWDrawInfo *di, AActor* thing, sector_t * sector, area_t
+ 		int type = thing->renderflags & RF_SPRITETYPEMASK;
+ 		auto tex = TexMan.GetGameTexture(patch, false);
+ 		if (!tex || !tex->isValid()) return;
++		if (!NXSpriteDataReady(tex)) return;
+ 		auto& spi = tex->GetSpritePositioning(type == RF_FACESPRITE);
+ 
+ 		offx = (float)thing->GetSpriteOffset(false);
+-- 
+2.56.0
+

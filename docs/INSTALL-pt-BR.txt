@@ -1,0 +1,46 @@
+RDoom NX - instalacao
+=====================
+
+RDoom e um port nao oficial do UZDoom 5.0.3 para Nintendo Switch desbloqueado
+(Atmosphere), com Vulkan como renderizador principal e launcher proprio.
+
+1. Copie a pasta "switch" deste pacote para a RAIZ do cartao SD.
+   Resultado: sdmc:/switch/rdoom/RDoom.nro e os arquivos .pk3 ao lado dele.
+
+2. Coloque suas IWADs em  sdmc:/switch/rdoom/iwads/
+   (freedoom1.wad e freedoom2.wad sao livres; doom.wad, doom2.wad etc. voce
+   precisa ter. O pacote "-Freedoom" ja traz as do Freedoom.)
+
+3. Coloque mods e pacotes de mapas em  sdmc:/switch/rdoom/mods/
+   (.pk3 .wad .zip .pk7 .deh .bex; subpastas permitidas)
+
+4. Abra o RDoom pelo Homebrew Menu EM MODO TITULO: segure R ao abrir um
+   jogo instalado e escolha RDoom. No modo applet (album) ha pouca memoria e
+   mods grandes falham; o launcher avisa quando isso acontece.
+
+5. No launcher: escolha um perfil (L/R), confira IWAD/mods e pressione +.
+
+Controles do launcher
+  A selecionar   B voltar   L/R trocar perfil   + iniciar   - editar perfil
+  Lista de mods: A liga/desliga, Y move (direcional), X remove, + adiciona
+
+Pastas
+  iwads/ mods/            seus arquivos (o RDoom nunca os apaga)
+  profiles/               perfis (.json), um por perfil
+  config/engine/          configuracao do motor de cada perfil
+  saves/<perfil>/         saves de cada perfil
+  logs/                   rdoom.log, engine-session.txt, crash.log
+  launcher/               arte do launcher
+  backup/ export/         copias de seguranca e perfis exportados
+
+Clocks
+  O RDoom usa somente os clocks de fabrica do console. Nao ha overclock, nao
+  ha opcoes de frequencia e nao ha dependencia de sys-clk.
+
+Problemas
+  - "Pendente de instalacao": falta a IWAD ou o mod que o perfil usa.
+  - Vulkan nao iniciou: veja logs/engine-session.txt; o perfil pode usar
+    OpenGL ou OpenGL ES (Editar perfil > Renderizador).
+  - Travou: logs/crash.log tem o endereco do erro.
+
+Licencas em switch/rdoom/licenses/. Codigo-fonte: repositorio do RDoom.

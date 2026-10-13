@@ -1,0 +1,780 @@
+From bb71e5ce38ec1d76c38d339842d9e17427619b5a Mon Sep 17 00:00:00 2001
+From: RDoom <171243930+aeon1911@users.noreply.github.com>
+Date: Sun, 11 Oct 2026 10:03:19 -0300
+Subject: [PATCH 15/46] RDoom: built-in launcher, fixed SD home, Mesa 26 SDK
+ linkage, session report.
+
+- RDoom.nro shows the RDoom launcher (../launcher) before the engine starts and
+  passes the chosen profile's command line; on hardware quitting returns to it.
+- Data lives in sdmc:/switch/rdoom; logs/engine.log, boot.log and
+  engine-session.txt record start-up, renderer and Vulkan steps.
+- Links the Mesa 26.2.4 Horizon SDK (NVK + EGL/GL/GLES) instead of switch-mesa
+  20.1 and libdrm_nouveau; keeps symbols in uzdoom.elf, patches CHKFEAT/GCS in
+  the stripped NRO copy (scripts/patch_chkfeat.py).
+- Optional RDOOM_VK_TRACE diagnostic build logs Vulkan commands per submit.
+- Loading screen rebranded; the separate nxlauncher NRO is no longer built.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ CMakeLists.txt                                |  11 +-
+ src/CMakeLists.txt                            |  57 +++-
+ src/common/platform/posix/nx/i_nxsystem.cpp   |  45 +--
+ .../platform/posix/nx/nx_loadscreen.cpp       |  16 +-
+ src/common/platform/posix/nx/nx_vktrace.cpp   |  60 ++++
+ src/common/platform/posix/nx/rdoom_nx.cpp     | 297 ++++++++++++++++++
+ src/common/platform/posix/nx/rdoom_nx.h       |  20 ++
+ .../platform/posix/nx/rdoom_version.h.in      |   8 +
+ tools/CMakeLists.txt                          |   5 +-
+ 9 files changed, 468 insertions(+), 51 deletions(-)
+ create mode 100644 src/common/platform/posix/nx/nx_vktrace.cpp
+ create mode 100644 src/common/platform/posix/nx/rdoom_nx.cpp
+ create mode 100644 src/common/platform/posix/nx/rdoom_nx.h
+ create mode 100644 src/common/platform/posix/nx/rdoom_version.h.in
+
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index 969ecabb4..7c2b135f6 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -72,8 +72,11 @@ if( NINTENDO_SWITCH )
+ 	# our gcc complains about the use of alloca, stricmp, etc without including the appropriate headers
+ 	# unless we just do this
+ 	set( CMAKE_CXX_EXTENSIONS ON )
+-	# used in both gzdoom and launcher
+-	set( SWITCH_APP_VERSION "uz5.0.3-nx4.13" )
++	set( RDOOM_VERSION "1.0.0" )
++	set( SWITCH_APP_VERSION "${RDOOM_VERSION}" )
++	# RDoom launcher sources (outside this tree so the engine stays a patch series)
++	set( RDOOM_LAUNCHER_DIR "${CMAKE_SOURCE_DIR}/../launcher" CACHE PATH "RDoom launcher source directory" )
++	set( RDOOM_ICON "${CMAKE_SOURCE_DIR}/../assets/build/icon_256.jpg" CACHE FILEPATH "256x256 JPEG icon for the NRO" )
+ endif()
+ 
+ # Recursive function to place PK3 archive source files into a hierarchy of source file in the IDE
+@@ -301,8 +304,8 @@ option (NO_DISCORDRPC "Disable Discord RPC support" OFF)
+ 
+ if( NINTENDO_SWITCH )
+ 	set( NO_DISCORDRPC ON )
+-	# Vulkan is optional. The launcher selects it; if the device fails to
+-	# come up, the existing GLES renderer still starts the game.
++	# Vulkan (Mesa NVK) is RDoom's primary renderer; OpenGL / OpenGL ES stay
++	# available as explicit choices in the launcher.
+ 	if( HAVE_VULKAN )
+ 		add_compile_definitions( VK_USE_PLATFORM_VI_NN=1 )
+ 	endif()
+diff --git a/src/CMakeLists.txt b/src/CMakeLists.txt
+index 05ba338b5..6b01b8708 100644
+--- a/src/CMakeLists.txt
++++ b/src/CMakeLists.txt
+@@ -266,7 +266,9 @@ if( DEM_CMAKE_COMPILER_IS_GNUCXX_COMPATIBLE )
+ 		set( CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} -ljemalloc")
+ 	endif()
+ 
+-	if( NOT NO_STRIP )
++	# Switch: keep the symbols in uzdoom.elf for crash reports; the NRO is
++	# made from a separately stripped copy (see the POST_BUILD step below).
++	if( NOT NO_STRIP AND NOT NINTENDO_SWITCH )
+ 		set (CMAKE_EXE_LINKER_FLAGS_RELEASE "${CMAKE_EXE_LINKER_FLAGS_RELEASE} -s" )
+ 		set (CMAKE_EXE_LINKER_FLAGS_MINSIZEREL "${CMAKE_EXE_LINKER_FLAGS_MINSIZEREL} -s" )
+ 	endif()
+@@ -435,7 +437,10 @@ set( PLAT_NX_SOURCES
+ 	common/platform/posix/nx/st_start.cpp
+ 	common/platform/posix/nx/i_specialpaths.cpp
+ 	common/platform/posix/nx/nx_loadscreen.cpp
+-	common/platform/posix/nx/nx_glthread.cpp )
++	common/platform/posix/nx/nx_glthread.cpp
++	common/platform/posix/nx/nx_tls_bridge.c
++	common/platform/posix/nx/nx_nvcompat.c
++	common/platform/posix/nx/rdoom_nx.cpp )
+ set( PLAT_OSX_SOURCES
+ 	common/platform/posix/osx/iwadpicker_cocoa.mm
+ 	common/platform/posix/osx/i_specialpaths.mm
+@@ -1326,18 +1331,25 @@ list( REMOVE_ITEM GAME_NONPCH_SOURCES ${PCH_SOURCES} )
+ 
+ if( NINTENDO_SWITCH )
+ 	list( REMOVE_ITEM PROJECT_LIBRARIES dl )
+-	set( PROJECT_LIBRARIES ${PROJECT_LIBRARIES} EGL glapi drm_nouveau )
++	# One Mesa for every renderer: the Mesa 26.2.4 Horizon SDK (docker/Dockerfile)
++	# provides loaderless NVK (libvulkan.a) and EGL/GL/GLES over the same
++	# Horizon GPU backend. libEGL embeds Zink, so it needs libvulkan too.
++	set( PROJECT_LIBRARIES ${PROJECT_LIBRARIES} EGL GLESv2 glapi )
+ 	if( HAVE_VULKAN )
+-		# Mesa NVK is loaderless: libvulkan.a is the driver. expat/zstd/elf/z
+-		# are the archives the Switch Vulkan SDK exports next to it.
+-		set( PROJECT_LIBRARIES ${PROJECT_LIBRARIES} vulkan expat zstd z )
++		set( PROJECT_LIBRARIES ${PROJECT_LIBRARIES} vulkan )
+ 	endif()
++	set( PROJECT_LIBRARIES ${PROJECT_LIBRARIES} expat zstd z )
+ 	# static ZMusic pulls in libsndfile (+ codecs) and mpg123
+ 	set( ZMUSIC_LIBRARIES ${ZMUSIC_LIBRARIES} sndfile FLAC opus vorbisenc vorbis ogg mpg123 m )
+-	# nx/deps/libvulkan.a is the Horizon NVK built with -mtp=soft.
+-	# Mesa 26.2.4 in portlibs uses tpidr_el0 (libnx never sets that
+-	# register) and must not be linked ahead of this archive.
+-	link_directories( ${CMAKE_SOURCE_DIR}/nx/deps/switch $ENV{DEVKITPRO}/portlibs/switch/lib )
++	link_directories( $ENV{DEVKITPRO}/portlibs/switch/lib )
++
++	# the RDoom launcher, linked into the same NRO
++	add_subdirectory( ${RDOOM_LAUNCHER_DIR} ${CMAKE_BINARY_DIR}/rdoom_launcher )
++	string( TIMESTAMP RDOOM_BUILD_DATE "%Y-%m-%d" UTC )
++	execute_process( COMMAND git -C ${CMAKE_SOURCE_DIR} describe --always --dirty --tags
++		OUTPUT_VARIABLE RDOOM_GIT_DESCRIBE OUTPUT_STRIP_TRAILING_WHITESPACE ERROR_QUIET )
++	configure_file( ${CMAKE_CURRENT_SOURCE_DIR}/common/platform/posix/nx/rdoom_version.h.in
++		${CMAKE_BINARY_DIR}/rdoom_version.h )
+ endif()
+ 
+ add_executable( zdoom MACOSX_BUNDLE ${GAME_SOURCES} )
+@@ -1391,11 +1403,20 @@ endif()
+ 
+ if( NINTENDO_SWITCH )
+ 	# everything is static on Switch, so let the linker resolve the circular deps
+-	target_link_libraries( zdoom -Wl,--start-group ${PROJECT_LIBRARIES} lzma ${ZMUSIC_LIBRARIES} absl::base absl::flat_hash_map absl::strings absl::hash nx -Wl,--end-group )
++	target_link_libraries( zdoom -Wl,--start-group rdoom_launcher_ui rdoom_launcher_core ${PROJECT_LIBRARIES} lzma ${ZMUSIC_LIBRARIES} absl::base absl::flat_hash_map absl::strings absl::hash nx -Wl,--end-group )
++	# nx_tls_bridge.c: TPIDR_EL0 for the Rust code in the Mesa SDK.
++	# nx_nvcompat.c: emulator quirk in fixed GPU VA reservations.
++	target_link_options( zdoom PRIVATE "-Wl,--wrap=threadCreate"
++		"-Wl,--wrap=nvioctlNvhostAsGpu_AllocSpace" "-Wl,--wrap=nvioctlNvhostAsGpu_FreeSpace" "-Wl,--wrap=nvioctlNvhostAsGpu_InitializeEx"
++		"-pthread" )
++	option( RDOOM_VK_TRACE "Log recorded Vulkan commands per submit (diagnostic)" OFF )
++	if( RDOOM_VK_TRACE )
++		target_sources( zdoom PRIVATE common/platform/posix/nx/nx_vktrace.cpp )
++		target_link_options( zdoom PRIVATE "-Wl,--wrap=vkCmdFillBuffer" "-Wl,--wrap=vkCmdUpdateBuffer" "-Wl,--wrap=vkCmdCopyBuffer" "-Wl,--wrap=vkCmdCopyBufferToImage" "-Wl,--wrap=vkCmdCopyImageToBuffer" "-Wl,--wrap=vkCmdCopyImage" "-Wl,--wrap=vkCmdBlitImage" "-Wl,--wrap=vkCmdClearColorImage" "-Wl,--wrap=vkCmdClearDepthStencilImage" "-Wl,--wrap=vkCmdClearAttachments" "-Wl,--wrap=vkCmdResetQueryPool" "-Wl,--wrap=vkCmdDispatch" "-Wl,--wrap=vkCmdResolveImage" "-Wl,--wrap=vkCmdDraw" "-Wl,--wrap=vkCmdDrawIndexed" "-Wl,--wrap=vkCmdBeginRenderPass" "-Wl,--wrap=vkCmdPipelineBarrier" "-Wl,--wrap=vkQueueSubmit" )
++	endif()
+ 	if( HAVE_VULKAN )
+-		# Mesa and newlib both define a few libc helpers. The ICD entry points
+-		# must stay linked even though volk does not load them on Switch.
+-		target_link_options( zdoom PRIVATE "-Wl,--allow-multiple-definition" "-Wl,-u,vk_icdGetInstanceProcAddr" "-Wl,-u,vk_icdNegotiateLoaderICDInterfaceVersion" "-pthread" )
++		# volk does not load the ICD entry points on Switch; keep them linked
++		target_link_options( zdoom PRIVATE "-Wl,-u,vk_icdGetInstanceProcAddr" "-Wl,-u,vk_icdNegotiateLoaderICDInterfaceVersion" )
+ 	endif()
+ 	# Mesa glthread support (nx_glthread.cpp): count driver-thread syncs, big stack for the driver thread
+ 	target_link_options( zdoom PRIVATE "-Wl,--wrap=_mesa_glthread_finish_before" "-Wl,--wrap=pthread_create" "-Wl,--wrap=nwindowDequeueBuffer" "-Wl,--wrap=nwindowQueueBuffer" "-Wl,--wrap=_util_queue_fence_wait" )
+@@ -1521,9 +1542,11 @@ endif()
+ 
+ if( NINTENDO_SWITCH )
+ 	add_custom_command( TARGET zdoom POST_BUILD
+-		COMMAND nacptool --create "UZDoom" "fgsfds, UZDoom team" "${SWITCH_APP_VERSION}" ${CMAKE_BINARY_DIR}/gzdoom.nacp
+-		COMMAND ${CMAKE_STRIP} -o ${CMAKE_BINARY_DIR}/gzdoom_stripped.elf $<TARGET_FILE:zdoom>
+-		COMMAND elf2nro ${CMAKE_BINARY_DIR}/gzdoom_stripped.elf ${CMAKE_BINARY_DIR}/gzdoom.nro --icon=${CMAKE_SOURCE_DIR}/nx/gzdoom.jpg --nacp=${CMAKE_BINARY_DIR}/gzdoom.nacp )
++		COMMAND nacptool --create "RDoom" "RDoom - UZDoom port" "${SWITCH_APP_VERSION}" ${CMAKE_BINARY_DIR}/RDoom.nacp
++		COMMAND ${CMAKE_STRIP} -o ${CMAKE_BINARY_DIR}/RDoom_stripped.elf $<TARGET_FILE:zdoom>
++		# CHKFEAT is a NOP on the Switch's CPU; make that explicit for emulators
++		COMMAND python3 ${CMAKE_SOURCE_DIR}/../scripts/patch_chkfeat.py ${CMAKE_BINARY_DIR}/RDoom_stripped.elf
++		COMMAND elf2nro ${CMAKE_BINARY_DIR}/RDoom_stripped.elf ${CMAKE_BINARY_DIR}/RDoom.nro --icon=${RDOOM_ICON} --nacp=${CMAKE_BINARY_DIR}/RDoom.nacp )
+ endif()
+ 
+ add_custom_command(TARGET zdoom POST_BUILD
+diff --git a/src/common/platform/posix/nx/i_nxsystem.cpp b/src/common/platform/posix/nx/i_nxsystem.cpp
+index 5547bd8fc..d20de916d 100644
+--- a/src/common/platform/posix/nx/i_nxsystem.cpp
++++ b/src/common/platform/posix/nx/i_nxsystem.cpp
+@@ -36,6 +36,9 @@
+ #include <unistd.h>
+ #include <switch.h>
+ #include "nx_loadscreen.h"
++#include "nx_nvcompat.h"
++#include "nx_tls_bridge.h"
++#include "rdoom_nx.h"
+ 
+ void NX_AudioAfterLoadScreen();
+ void NX_StartHangWatch();
+@@ -46,12 +49,8 @@ static int nxlink_sock = -1;
+ 
+ extern "C" void userAppInit(void)
+ {
+-	FILE *f = fopen("boot.log", "w");
+-	if (f)
+-	{
+-		fputs("uz5.0.3-nx4.13 userAppInit\n", f);
+-		fclose(f);
+-	}
++	// Rust code inside the Mesa SDK reads TPIDR_EL0 (see nx_tls_bridge.c)
++	NX_TlsBridgeInit();
+ 	socketInitializeDefault();
+ #ifdef _DEBUG
+ 	nxlink_sock = nxlinkStdio();
+@@ -100,7 +99,7 @@ void I_NXShowFatalError(const char *title, const char *message)
+ 
+ 	printf("\x1b[31;1m%s\x1b[0m\n\n", title);
+ 	printf("%s\n\n", message);
+-	printf("\x1b[33mThis message was also saved to error.log in the gzdoom folder.\x1b[0m\n\n");
++	printf("\x1b[33mThis message was also saved to switch/rdoom/logs/error.log.\x1b[0m\n\n");
+ 	printf("Press + to exit.\n");
+ 	consoleUpdate(NULL);
+ 
+@@ -161,7 +160,7 @@ static void CrashPrintf(const char *fmt, ...)
+ 
+ static void CrashFlush()
+ {
+-	int fd = open("crash.log", O_WRONLY | O_CREAT | O_TRUNC, 0644);
++	int fd = open("logs/crash.log", O_WRONLY | O_CREAT | O_TRUNC, 0644);
+ 	if (fd >= 0)
+ 	{
+ 		write(fd, crashbuf, crashlen);
+@@ -204,7 +203,7 @@ static void CrashStackScan(u64 sp)
+ extern "C" void __libnx_exception_handler(ThreadExceptionDump *ctx)
+ {
+ 	crashlen = 0;
+-	CrashPrintf("UZDoom Switch crash report\nCPU exception, error_desc=0x%x esr=0x%x far=0x%lx\n",
++	CrashPrintf("RDoom (UZDoom 5.0.3) crash report\nCPU exception, error_desc=0x%x esr=0x%x far=0x%lx\n",
+ 		ctx->error_desc, ctx->esr, (unsigned long)ctx->far.x);
+ 	CrashPrintf("module base: 0x%lx\n", (unsigned long)ModBase());
+ 	CrashPrintf("pc: 0x%lx (+0x%lx)\nlr: 0x%lx (+0x%lx)\nsp: 0x%lx fp: 0x%lx\n",
+@@ -235,7 +234,7 @@ extern "C" void __libnx_exception_handler(ThreadExceptionDump *ctx)
+ static void I_NXTerminate()
+ {
+ 	crashlen = 0;
+-	CrashPrintf("UZDoom Switch crash report\nstd::terminate called\n");
++	CrashPrintf("RDoom (UZDoom 5.0.3) crash report\nstd::terminate called\n");
+ 	CrashPrintf("module base: 0x%lx\n", (unsigned long)ModBase());
+ 	if (auto eptr = std::current_exception())
+ 	{
+@@ -291,7 +290,9 @@ static void *NXMainThread(void *p)
+ 	// on core 0 can never hold it up when it wakes from waiting on the GPU
+ 	svcSetThreadPriority(CUR_THREAD_HANDLE, 0x2C);
+ 	std::set_terminate(I_NXTerminate);
++	RDoom_Crumb("engine: main thread running");
+ 	a->ret = a->fn(a->argc, a->argv);
++	RDoom_Crumb("engine: main returned");
+ 	return nullptr;
+ }
+ 
+@@ -299,6 +300,7 @@ static void NXAtExit()
+ {
+ 	NXLS_Stop();
+ 	NXLS_SetBoost(false);
++	RDoom_NXAtExit();
+ }
+ 
+ // The launcher passes @temp/nxargs.txt instead of the full command line.
+@@ -369,18 +371,21 @@ static void NXExpandResponseFiles(int &argc, char **&argv)
+ 
+ int I_NXRunWithBigStack(int (*fn)(int, char **), int argc, char **argv)
+ {
+-	FILE *bf = fopen("boot.log", "a");
+-	if (bf)
+-	{
+-		fprintf(bf, "main argc=%d\n", argc);
+-		for (int i = 0; i < argc && i < 6; i++)
+-			fprintf(bf, " arg %s\n", argv[i] ? argv[i] : "(null)");
+-		fclose(bf);
+-	}
++	// global constructors have run by now (userAppInit is too early for this)
++	RDoom_NXEarlyInit();
+ 	std::set_terminate(I_NXTerminate);
+ 	FindModuleRange();
+-	NX_StartHangWatch();
++	// before any GPU use: emulators may answer fixed GPU VA reservations
++	// differently from the console (see nx_nvcompat.c)
++	NX_NvCompatInit();
+ 	NXExpandResponseFiles(argc, argv);
++	if (!RDoom_NXRunLauncher(argc, argv, argc, argv))
++	{
++		RDoom_NXAtExit();
++		return 0;
++	}
++	RDoom_Crumb("engine: hang watch");
++	NX_StartHangWatch();
+ 
+ 	// switches that are only meant for this port and must not reach the engine
+ 	bool boost = false, loadscreen = true;
+@@ -395,11 +400,13 @@ int I_NXRunWithBigStack(int (*fn)(int, char **), int argc, char **argv)
+ 	argc = n;
+ 	argv[argc] = nullptr;
+ 
++	RDoom_Crumb("engine: args filtered");
+ 	atexit(NXAtExit);
+ 	if (boost) NXLS_SetBoost(true);
+ 	if (loadscreen) NXLS_Start(argc, argv);
+ 	else NX_AudioAfterLoadScreen();
+ 
++	RDoom_Crumb("engine: loading screen started");
+ 	NXMainArgs args = { fn, argc, argv, 0 };
+ 	pthread_attr_t attr;
+ 	pthread_attr_init(&attr);
+diff --git a/src/common/platform/posix/nx/nx_loadscreen.cpp b/src/common/platform/posix/nx/nx_loadscreen.cpp
+index bcc5a8bf4..7c67acde3 100644
+--- a/src/common/platform/posix/nx/nx_loadscreen.cpp
++++ b/src/common/platform/posix/nx/nx_loadscreen.cpp
+@@ -328,7 +328,7 @@ const float DefaultFrac[MS_COUNT] = { 0.f, 0.01f, 0.12f, 0.14f, 0.24f, 0.88f, 0.
+ 
+ const char *const StageText[MS_COUNT] =
+ {
+-	"Iniciando o UZDoom",
++	"Iniciando o RDoom (UZDoom 5.0.3)",
+ 	"Abrindo arquivos do jogo e mods",
+ 	"Iniciando áudio",
+ 	"Carregando texturas e sprites",
+@@ -349,7 +349,7 @@ struct FileItem
+ };
+ 
+ std::mutex mtx;
+-std::string gTitle = "UZDoom";
++std::string gTitle = "RDoom";
+ std::string gSubtitle;
+ std::string gDetail;
+ std::vector<FileItem> gFiles;
+@@ -505,7 +505,7 @@ void PrepareBackground()
+ 	gBackground.assign(SW * SH, 0);
+ 	// a picture prepared by the launcher (already darkened / blurred)
+ 	bool loaded = false;
+-	FILE *f = fopen("temp/loadbg.rgba", "rb");
++	FILE *f = fopen("cache/loadbg.rgba", "rb");
+ 	if (f)
+ 	{
+ 		size_t n = fread(gBackground.data(), 4, SW * SH, f);
+@@ -604,9 +604,9 @@ void RenderFrame(uint32_t *dst, int stride, float dt)
+ 
+ 	// header
+ 	const uint32_t accent = 0xFF4A1C, accent2 = 0xFFB020;
+-	c.Text(fTitle, 76, 64, 44, "UZDOOM", 0xFFFFFF);
+-	float tw = c.TextWidth(fTitle, 76, "UZDOOM");
+-	c.Text(fTitle, 34, 64 + tw + 14, 78, "NINTENDO SWITCH", accent);
++	c.Text(fTitle, 76, 64, 44, "RDOOM", 0xFFFFFF);
++	float tw = c.TextWidth(fTitle, 76, "RDOOM");
++	c.Text(fTitle, 34, 64 + tw + 14, 78, "UZDOOM 5.0.3 \xE2\x80\xA2 NINTENDO SWITCH", accent);
+ 	c.RoundRect(64, 128, 86, 5, 2.5f, accent, 255, accent2);
+ 	{
+ 		// port credit
+@@ -743,7 +743,7 @@ void DrawThread(void *)
+ void ReadLoadInfo()
+ {
+ 	// written by the launcher: first line = profile name
+-	FILE *f = fopen("temp/loadinfo.txt", "r");
++	FILE *f = fopen("cache/loadinfo.txt", "r");
+ 	if (!f) return;
+ 	char line[512];
+ 	if (fgets(line, sizeof(line), f))
+@@ -762,7 +762,7 @@ std::string BaseName(const std::string &p)
+ 
+ double FileMB(const std::string &path)
+ {
+-	static const char *const dirs[] = { "", "iwads/", "pwads/", nullptr };
++	static const char *const dirs[] = { "", "iwads/", "mods/", nullptr };
+ 	struct stat st;
+ 	for (int i = 0; dirs[i]; i++)
+ 	{
+diff --git a/src/common/platform/posix/nx/nx_vktrace.cpp b/src/common/platform/posix/nx/nx_vktrace.cpp
+new file mode 100644
+index 000000000..0ad2dadf0
+--- /dev/null
++++ b/src/common/platform/posix/nx/nx_vktrace.cpp
+@@ -0,0 +1,60 @@
++/* Diagnostic: counts the Vulkan commands the engine records and logs them at
++ * each vkQueueSubmit (boot.log). Built only with -DRDOOM_VK_TRACE=ON. */
++#ifdef __SWITCH__
++#include <vulkan/vulkan.h>
++#include <stdio.h>
++#include <string.h>
++void RDoom_Crumb(const char *what);
++extern "C" {
++static unsigned counts[17];
++static const char *names[17] = { "vkCmdFillBuffer", "vkCmdUpdateBuffer", "vkCmdCopyBuffer", "vkCmdCopyBufferToImage", "vkCmdCopyImageToBuffer", "vkCmdCopyImage", "vkCmdBlitImage", "vkCmdClearColorImage", "vkCmdClearDepthStencilImage", "vkCmdClearAttachments", "vkCmdResetQueryPool", "vkCmdDispatch", "vkCmdResolveImage", "vkCmdDraw", "vkCmdDrawIndexed", "vkCmdBeginRenderPass", "vkCmdPipelineBarrier" };
++static unsigned submits;
++void __real_vkCmdFillBuffer(VkCommandBuffer c, VkBuffer b, VkDeviceSize o, VkDeviceSize s, uint32_t d);
++void __wrap_vkCmdFillBuffer(VkCommandBuffer c, VkBuffer b, VkDeviceSize o, VkDeviceSize s, uint32_t d) { counts[0]++; __real_vkCmdFillBuffer(c,b,o,s,d); }
++void __real_vkCmdUpdateBuffer(VkCommandBuffer c, VkBuffer b, VkDeviceSize o, VkDeviceSize s, const void *d);
++void __wrap_vkCmdUpdateBuffer(VkCommandBuffer c, VkBuffer b, VkDeviceSize o, VkDeviceSize s, const void *d) { counts[1]++; __real_vkCmdUpdateBuffer(c,b,o,s,d); }
++void __real_vkCmdCopyBuffer(VkCommandBuffer c, VkBuffer a, VkBuffer b, uint32_t n, const VkBufferCopy *r);
++void __wrap_vkCmdCopyBuffer(VkCommandBuffer c, VkBuffer a, VkBuffer b, uint32_t n, const VkBufferCopy *r) { counts[2]++; __real_vkCmdCopyBuffer(c,a,b,n,r); }
++void __real_vkCmdCopyBufferToImage(VkCommandBuffer c, VkBuffer a, VkImage b, VkImageLayout l, uint32_t n, const VkBufferImageCopy *r);
++void __wrap_vkCmdCopyBufferToImage(VkCommandBuffer c, VkBuffer a, VkImage b, VkImageLayout l, uint32_t n, const VkBufferImageCopy *r) { counts[3]++; __real_vkCmdCopyBufferToImage(c,a,b,l,n,r); }
++void __real_vkCmdCopyImageToBuffer(VkCommandBuffer c, VkImage a, VkImageLayout l, VkBuffer b, uint32_t n, const VkBufferImageCopy *r);
++void __wrap_vkCmdCopyImageToBuffer(VkCommandBuffer c, VkImage a, VkImageLayout l, VkBuffer b, uint32_t n, const VkBufferImageCopy *r) { counts[4]++; __real_vkCmdCopyImageToBuffer(c,a,l,b,n,r); }
++void __real_vkCmdCopyImage(VkCommandBuffer c, VkImage a, VkImageLayout la, VkImage b, VkImageLayout lb, uint32_t n, const VkImageCopy *r);
++void __wrap_vkCmdCopyImage(VkCommandBuffer c, VkImage a, VkImageLayout la, VkImage b, VkImageLayout lb, uint32_t n, const VkImageCopy *r) { counts[5]++; __real_vkCmdCopyImage(c,a,la,b,lb,n,r); }
++void __real_vkCmdBlitImage(VkCommandBuffer c, VkImage a, VkImageLayout la, VkImage b, VkImageLayout lb, uint32_t n, const VkImageBlit *r, VkFilter f);
++void __wrap_vkCmdBlitImage(VkCommandBuffer c, VkImage a, VkImageLayout la, VkImage b, VkImageLayout lb, uint32_t n, const VkImageBlit *r, VkFilter f) { counts[6]++; __real_vkCmdBlitImage(c,a,la,b,lb,n,r,f); }
++void __real_vkCmdClearColorImage(VkCommandBuffer c, VkImage i, VkImageLayout l, const VkClearColorValue *v, uint32_t n, const VkImageSubresourceRange *r);
++void __wrap_vkCmdClearColorImage(VkCommandBuffer c, VkImage i, VkImageLayout l, const VkClearColorValue *v, uint32_t n, const VkImageSubresourceRange *r) { counts[7]++; __real_vkCmdClearColorImage(c,i,l,v,n,r); }
++void __real_vkCmdClearDepthStencilImage(VkCommandBuffer c, VkImage i, VkImageLayout l, const VkClearDepthStencilValue *v, uint32_t n, const VkImageSubresourceRange *r);
++void __wrap_vkCmdClearDepthStencilImage(VkCommandBuffer c, VkImage i, VkImageLayout l, const VkClearDepthStencilValue *v, uint32_t n, const VkImageSubresourceRange *r) { counts[8]++; __real_vkCmdClearDepthStencilImage(c,i,l,v,n,r); }
++void __real_vkCmdClearAttachments(VkCommandBuffer c, uint32_t n, const VkClearAttachment *a, uint32_t m, const VkClearRect *r);
++void __wrap_vkCmdClearAttachments(VkCommandBuffer c, uint32_t n, const VkClearAttachment *a, uint32_t m, const VkClearRect *r) { counts[9]++; __real_vkCmdClearAttachments(c,n,a,m,r); }
++void __real_vkCmdResetQueryPool(VkCommandBuffer c, VkQueryPool p, uint32_t f, uint32_t n);
++void __wrap_vkCmdResetQueryPool(VkCommandBuffer c, VkQueryPool p, uint32_t f, uint32_t n) { counts[10]++; __real_vkCmdResetQueryPool(c,p,f,n); }
++void __real_vkCmdDispatch(VkCommandBuffer c, uint32_t x, uint32_t y, uint32_t z);
++void __wrap_vkCmdDispatch(VkCommandBuffer c, uint32_t x, uint32_t y, uint32_t z) { counts[11]++; __real_vkCmdDispatch(c,x,y,z); }
++void __real_vkCmdResolveImage(VkCommandBuffer c, VkImage a, VkImageLayout la, VkImage b, VkImageLayout lb, uint32_t n, const VkImageResolve *r);
++void __wrap_vkCmdResolveImage(VkCommandBuffer c, VkImage a, VkImageLayout la, VkImage b, VkImageLayout lb, uint32_t n, const VkImageResolve *r) { counts[12]++; __real_vkCmdResolveImage(c,a,la,b,lb,n,r); }
++void __real_vkCmdDraw(VkCommandBuffer c, uint32_t a, uint32_t b, uint32_t d, uint32_t e);
++void __wrap_vkCmdDraw(VkCommandBuffer c, uint32_t a, uint32_t b, uint32_t d, uint32_t e) { counts[13]++; __real_vkCmdDraw(c,a,b,d,e); }
++void __real_vkCmdDrawIndexed(VkCommandBuffer c, uint32_t a, uint32_t b, uint32_t d, int32_t e, uint32_t f);
++void __wrap_vkCmdDrawIndexed(VkCommandBuffer c, uint32_t a, uint32_t b, uint32_t d, int32_t e, uint32_t f) { counts[14]++; __real_vkCmdDrawIndexed(c,a,b,d,e,f); }
++void __real_vkCmdBeginRenderPass(VkCommandBuffer c, const VkRenderPassBeginInfo *i, VkSubpassContents s);
++void __wrap_vkCmdBeginRenderPass(VkCommandBuffer c, const VkRenderPassBeginInfo *i, VkSubpassContents s) { counts[15]++; __real_vkCmdBeginRenderPass(c,i,s); }
++void __real_vkCmdPipelineBarrier(VkCommandBuffer c, VkPipelineStageFlags s, VkPipelineStageFlags d, VkDependencyFlags f, uint32_t a, const VkMemoryBarrier *b, uint32_t e, const VkBufferMemoryBarrier *g, uint32_t h, const VkImageMemoryBarrier *i);
++void __wrap_vkCmdPipelineBarrier(VkCommandBuffer c, VkPipelineStageFlags s, VkPipelineStageFlags d, VkDependencyFlags f, uint32_t a, const VkMemoryBarrier *b, uint32_t e, const VkBufferMemoryBarrier *g, uint32_t h, const VkImageMemoryBarrier *i) { counts[16]++; __real_vkCmdPipelineBarrier(c,s,d,f,a,b,e,g,h,i); }
++VkResult __real_vkQueueSubmit(VkQueue q, uint32_t n, const VkSubmitInfo *s, VkFence f);
++VkResult __wrap_vkQueueSubmit(VkQueue q, uint32_t n, const VkSubmitInfo *s, VkFence f)
++{
++	char buf[1024];
++	int len = snprintf(buf, sizeof(buf), "vk submit #%u:", ++submits);
++	for (unsigned i = 0; i < sizeof(counts) / sizeof(counts[0]); i++)
++		if (counts[i] && len < (int)sizeof(buf) - 64)
++			len += snprintf(buf + len, sizeof(buf) - len, " %s=%u", names[i] + 5, counts[i]);
++	if (submits <= 40)
++		RDoom_Crumb(buf);
++	memset(counts, 0, sizeof(counts));
++	return __real_vkQueueSubmit(q, n, s, f);
++}
++}
++#endif
+diff --git a/src/common/platform/posix/nx/rdoom_nx.cpp b/src/common/platform/posix/nx/rdoom_nx.cpp
+new file mode 100644
+index 000000000..abb6f043a
+--- /dev/null
++++ b/src/common/platform/posix/nx/rdoom_nx.cpp
+@@ -0,0 +1,297 @@
++/*
++** rdoom_nx.cpp
++** RDoom on Horizon: the launcher's libnx platform (framebuffer, HID,
++** software keyboard), start-up/exit flow and the engine session report.
++**
++** Copyright 2026 RDoom contributors. GPLv3 (same as UZDoom).
++*/
++
++#include <stdio.h>
++#include <string.h>
++#include <sys/stat.h>
++#include <unistd.h>
++#include <string>
++#include <vector>
++#include <switch.h>
++
++#include "app.h"
++#include "fsutil.h"
++#include "log.h"
++#include "paths.h"
++#include "platform.h"
++#include "rdoom_nx.h"
++#include "nx_nvcompat.h"
++#include "rdoom_version.h"
++
++using namespace rdoom;
++
++namespace {
++
++class NxPlatform : public Platform
++{
++public:
++	NxPlatform()
++	{
++		framebufferCreate(&fb_, nwindowGetDefault(), 1280, 720, PIXEL_FORMAT_RGBA_8888, 2);
++		framebufferMakeLinear(&fb_);
++		padConfigureInput(8, HidNpadStyleSet_NpadStandard);
++		padInitializeAny(&pad_);
++		hidInitializeTouchScreen();
++		open_ = true;
++	}
++	~NxPlatform() override { Shutdown(); }
++
++	bool Poll(InputFrame &in) override
++	{
++		if (!appletMainLoop())
++			return false;
++		padUpdate(&pad_);
++		const u64 h = padGetButtons(&pad_);
++		uint32_t held = 0;
++		if (h & HidNpadButton_A) held |= BtnA;
++		if (h & HidNpadButton_B) held |= BtnB;
++		if (h & HidNpadButton_X) held |= BtnX;
++		if (h & HidNpadButton_Y) held |= BtnY;
++		if (h & HidNpadButton_L) held |= BtnL;
++		if (h & HidNpadButton_R) held |= BtnR;
++		if (h & HidNpadButton_ZL) held |= BtnZL;
++		if (h & HidNpadButton_ZR) held |= BtnZR;
++		if (h & HidNpadButton_Plus) held |= BtnPlus;
++		if (h & HidNpadButton_Minus) held |= BtnMinus;
++		if (h & (HidNpadButton_Up | HidNpadButton_StickLUp | HidNpadButton_StickRUp)) held |= BtnUp;
++		if (h & (HidNpadButton_Down | HidNpadButton_StickLDown | HidNpadButton_StickRDown)) held |= BtnDown;
++		if (h & (HidNpadButton_Left | HidNpadButton_StickLLeft | HidNpadButton_StickRLeft)) held |= BtnLeft;
++		if (h & (HidNpadButton_Right | HidNpadButton_StickLRight | HidNpadButton_StickRRight)) held |= BtnRight;
++		in.down = held & ~lastHeld_;
++		in.held = held;
++		in.repeat = repeat_.Update(held, in.down, NowMs());
++		lastHeld_ = held;
++		HidTouchScreenState ts = {};
++		in.touch = hidGetTouchScreenStates(&ts, 1) && ts.count > 0;
++		if (in.touch)
++		{
++			in.touchX = (int)ts.touches[0].x;
++			in.touchY = (int)ts.touches[0].y;
++		}
++		return true;
++	}
++
++	Canvas &BeginDraw() override
++	{
++		u32 stride = 0;
++		uint32_t *px = (uint32_t *)framebufferBegin(&fb_, &stride);
++		canvas_.Retarget(px, (int)(stride / 4));
++		return canvas_;
++	}
++
++	void EndDraw() override { framebufferEnd(&fb_); }
++
++	uint64_t NowMs() override { return armTicksToNs(armGetSystemTick()) / 1000000ULL; }
++
++	bool TextInput(const std::string &title, const std::string &initial, size_t maxLen, std::string &out) override
++	{
++		SwkbdConfig kbd;
++		if (R_FAILED(swkbdCreate(&kbd, 0)))
++			return false;
++		swkbdConfigMakePresetDefault(&kbd);
++		swkbdConfigSetHeaderText(&kbd, title.c_str());
++		swkbdConfigSetGuideText(&kbd, title.c_str());
++		swkbdConfigSetInitialText(&kbd, initial.c_str());
++		swkbdConfigSetStringLenMax(&kbd, (u32)maxLen);
++		std::vector<char> buf(maxLen * 4 + 4, 0);
++		Result rc = swkbdShow(&kbd, buf.data(), buf.size());
++		swkbdClose(&kbd);
++		if (R_FAILED(rc))
++			return false;
++		out = buf.data();
++		return true;
++	}
++
++	SystemInfo Info() override
++	{
++		SystemInfo si;
++		const AppletType t = appletGetAppletType();
++		si.appletMode = !(t == AppletType_Application || t == AppletType_SystemApplication);
++		svcGetInfo(&si.memTotal, InfoType_TotalMemorySize, CUR_PROCESS_HANDLE, 0);
++		svcGetInfo(&si.memUsed, InfoType_UsedMemorySize, CUR_PROCESS_HANDLE, 0);
++		si.sdFree = rdoom::FreeSpace("sdmc:/");
++		si.docked = appletGetOperationMode() == AppletOperationMode_Console;
++		if (R_SUCCEEDED(setsysInitialize()))
++		{
++			SetSysFirmwareVersion fw;
++			if (R_SUCCEEDED(setsysGetFirmwareVersion(&fw)))
++				si.firmware = fw.display_version;
++			setsysExit();
++		}
++		if (NX_NvCompatActive())
++			si.emulator = "emulador detectado (compatibilidade nvhost-as ativa)";
++		return si;
++	}
++
++	void Shutdown() override
++	{
++		if (open_)
++		{
++			framebufferClose(&fb_);
++			open_ = false;
++		}
++	}
++
++private:
++	Framebuffer fb_ = {};
++	PadState pad_ = {};
++	Canvas canvas_{ nullptr, 1280, 720, 1280 };
++	RepeatTracker repeat_;
++	uint32_t lastHeld_ = 0;
++	bool open_ = false;
++};
++
++bool g_launcherUsedDisplay = false;
++bool g_fromLauncher = false;
++std::string g_nroPath;
++std::vector<std::string> g_args;
++std::vector<char *> g_argv;
++
++Paths RootPaths()
++{
++	Paths p;
++	p.root = RDOOM_SD_ROOT;
++	return p;
++}
++
++} // namespace
++
++#include <fcntl.h>
++
++void RDoom_Crumb(const char *what)
++{
++	// unbuffered, so the last step survives any crash
++	int fd = open(RDOOM_SD_ROOT "/logs/boot.log", O_WRONLY | O_CREAT | O_APPEND, 0644);
++	if (fd < 0)
++		return;
++	char buf[256];
++	int n = snprintf(buf, sizeof(buf), "[%8llu ms] %s\n", (unsigned long long)(armTicksToNs(armGetSystemTick()) / 1000000ULL), what);
++	write(fd, buf, n > 0 && n < (int)sizeof(buf) ? n : (int)sizeof(buf) - 1);
++	close(fd);
++}
++
++void RDoom_NXEarlyInit()
++{
++	unlink(RDOOM_SD_ROOT "/logs/boot.log");
++	RDoom_Crumb("early init");
++	// one fixed home, wherever the .nro was started from (hbloader, a
++	// forwarder or an emulator that loads the file directly)
++	MakeDirs(RDOOM_SD_ROOT);
++	chdir(RDOOM_SD_ROOT);
++	Paths p = RootPaths();
++	p.EnsureLayout();
++	LogOpen(PathJoin(p.Logs(), "rdoom.log"), true);
++	// engine console output (Printf -> stdout) and driver messages (stderr)
++	if (freopen(RDOOM_SD_ROOT "/logs/engine.log", "w", stdout))
++		setvbuf(stdout, nullptr, _IOLBF, 4096);
++	if (freopen(RDOOM_SD_ROOT "/logs/engine-stderr.log", "w", stderr))
++		setvbuf(stderr, nullptr, _IONBF, 0);
++	unlink(RDOOM_SD_ROOT "/logs/engine-session.txt");
++	RLOG_I("boot", "%s (%s, %s), engine %s", RDOOM_VERSION_STRING, RDOOM_BUILD_DATE, RDOOM_GIT_DESCRIBE, RDOOM_ENGINE_VERSION);
++	RLOG_I("boot", "clock policy: stock (RDoom never changes CPU/GPU/memory clocks)");
++}
++
++bool RDoom_NXLauncherUsedDisplay()
++{
++	return g_launcherUsedDisplay;
++}
++
++int RDoom_NXRunLauncher(int argc, char **argv, int &outArgc, char **&outArgv)
++{
++	g_nroPath = (argc > 0 && argv[0] && !strncmp(argv[0], "sdmc:", 5)) ? argv[0] : std::string(RDOOM_SD_ROOT "/RDoom.nro");
++	outArgc = argc;
++	outArgv = argv;
++	// engine arguments given directly (e.g. by a forwarder): skip the launcher
++	if (argc > 1)
++	{
++		RLOG_I("boot", "%d command-line arguments: launcher skipped", argc - 1);
++		return 1;
++	}
++	RLOG_I("boot", "nv compat: %s", NX_NvCompatStatus());
++
++	Paths paths = RootPaths();
++	AppInfo info;
++	info.version = RDOOM_VERSION_STRING;
++	info.engineVersion = RDOOM_ENGINE_VERSION;
++	info.gfxVersion = RDOOM_GFX_VERSION;
++	info.buildDate = RDOOM_BUILD_DATE;
++	info.enginePk3 = PathJoin(paths.root, "game_support.pk3");
++	info.lastSessionFile = PathJoin(paths.Logs(), "engine-session.txt");
++
++	LaunchPlan plan;
++	LauncherApp::Result res;
++	{
++		NxPlatform plat;
++		g_launcherUsedDisplay = true;
++		LauncherApp app(plat, paths, info);
++		res = app.Run(plan);
++		RDoom_Crumb("launcher: app returned");
++		plat.Shutdown();
++		RDoom_Crumb("launcher: framebuffer closed");
++	}
++	RDoom_Crumb(res == LauncherApp::Result::Launch ? "launcher: start game" : "launcher: exit");
++	if (res != LauncherApp::Result::Launch)
++	{
++		RLOG_I("boot", "launcher closed without starting a game");
++		return 0;
++	}
++	g_fromLauncher = true;
++	g_args = plan.argv;
++	g_argv.clear();
++	for (auto &a : g_args)
++		g_argv.push_back(const_cast<char *>(a.c_str()));
++	g_argv.push_back(nullptr);
++	outArgc = (int)g_args.size();
++	outArgv = g_argv.data();
++	return 1;
++}
++
++void RDoom_NXAtExit()
++{
++	// on hardware, quitting the game brings the launcher back
++	if (g_fromLauncher && envHasNextLoad())
++	{
++		std::string args = "\"" + g_nroPath + "\"";
++		envSetNextLoad(g_nroPath.c_str(), args.c_str());
++		RLOG_I("boot", "returning to the launcher (%s)", g_nroPath.c_str());
++	}
++	LogClose();
++}
++
++// ---------------------------------------------------------------------------
++// engine session report (shown in the launcher's diagnostics screen)
++// ---------------------------------------------------------------------------
++
++static std::vector<std::pair<std::string, std::string>> g_session;
++
++void RDoom_SessionSet(const char *key, const char *value)
++{
++	for (auto &kv : g_session)
++		if (kv.first == key)
++		{
++			kv.second = value;
++			goto write;
++		}
++	g_session.push_back({ key, value });
++write:
++	std::string out;
++	for (auto &kv : g_session)
++		out += kv.first + ": " + kv.second + "\n";
++	FILE *f = fopen(RDOOM_SD_ROOT "/logs/engine-session.txt", "w");
++	if (f)
++	{
++		fwrite(out.data(), 1, out.size(), f);
++		fclose(f);
++	}
++	RLOG_I("session", "%s: %s", key, value);
++}
++
++void RDoom_SessionLog(const char *category, const char *message)
++{
++	RLOG_I(category, "%s", message);
++}
+diff --git a/src/common/platform/posix/nx/rdoom_nx.h b/src/common/platform/posix/nx/rdoom_nx.h
+new file mode 100644
+index 000000000..50beb4a01
+--- /dev/null
++++ b/src/common/platform/posix/nx/rdoom_nx.h
+@@ -0,0 +1,20 @@
++#pragma once
++// RDoom start-up flow on Horizon (rdoom_nx.cpp).
++
++#define RDOOM_SD_ROOT "sdmc:/switch/rdoom"
++
++// Fixes the working directory, creates the SD layout and opens the log.
++void RDoom_NXEarlyInit();
++// Shows the launcher unless engine arguments were given. Returns 0 if the
++// user chose to exit, 1 to start the engine with outArgc/outArgv.
++int RDoom_NXRunLauncher(int argc, char **argv, int &outArgc, char **&outArgv);
++// True if the launcher drew on the default NWindow (its format must be reset
++// before a Vulkan swapchain or EGL surface is created on it).
++bool RDoom_NXLauncherUsedDisplay();
++void RDoom_NXAtExit();
++
++// "key: value" lines in logs/engine-session.txt (renderer, device, errors).
++void RDoom_SessionSet(const char *key, const char *value);
++void RDoom_SessionLog(const char *category, const char *message);
++// Appends one line to logs/boot.log with an unbuffered write (start-up steps).
++void RDoom_Crumb(const char *what);
+diff --git a/src/common/platform/posix/nx/rdoom_version.h.in b/src/common/platform/posix/nx/rdoom_version.h.in
+new file mode 100644
+index 000000000..2c9b060a3
+--- /dev/null
++++ b/src/common/platform/posix/nx/rdoom_version.h.in
+@@ -0,0 +1,8 @@
++#pragma once
++// Generated by CMake from rdoom_version.h.in.
++#define RDOOM_VERSION "@RDOOM_VERSION@"
++#define RDOOM_VERSION_STRING "RDoom @RDOOM_VERSION@"
++#define RDOOM_BUILD_DATE "@RDOOM_BUILD_DATE@"
++#define RDOOM_GIT_DESCRIBE "@RDOOM_GIT_DESCRIBE@"
++#define RDOOM_ENGINE_VERSION "UZDoom 5.0.3 (7910df71)"
++#define RDOOM_GFX_VERSION "Mesa 26.2.4 Horizon SDK: NVK (Vulkan) + EGL/OpenGL/OpenGL ES"
+diff --git a/tools/CMakeLists.txt b/tools/CMakeLists.txt
+index 60dd6e43e..3c37f7ca5 100644
+--- a/tools/CMakeLists.txt
++++ b/tools/CMakeLists.txt
+@@ -3,8 +3,7 @@ cmake_minimum_required( VERSION 3.16 )
+ add_subdirectory( re2c )
+ add_subdirectory( lemon )
+ add_subdirectory( zipdir )
+-if( NINTENDO_SWITCH )
+-  add_subdirectory( nxlauncher )
+-endif()
++# RDoom: the old separate launcher NRO (tools/nxlauncher) is replaced by the
++# launcher built into RDoom.nro (../launcher).
+ 
+ set( CROSS_EXPORTS ${CROSS_EXPORTS} PARENT_SCOPE )
+-- 
+2.56.0
+

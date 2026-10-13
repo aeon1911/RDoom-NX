@@ -1,0 +1,263 @@
+From cf3f1b92f156294f682bbe288f27bdf7b1005a3a Mon Sep 17 00:00:00 2001
+From: RDoom <171243930+aeon1911@users.noreply.github.com>
+Date: Sun, 11 Oct 2026 17:57:51 -0300
+Subject: [PATCH 22/46] Switch Vulkan: driver messages in the log, automatic
+ GPU workarounds, log rotation
+
+- ZVulkan listens to VK_EXT_debug_utils on Switch (no validation layer needed):
+  Mesa's channel-error / device-loss reports reach logs/engine-stderr.log.
+- After a lost GPU each following session applies one more workaround step
+  (NVK_DEBUG=no_compression, NVK_SWITCH_NO_UBO_CBUF=1,
+  NVK_SWITCH_MAPPED_COMPLETION=0, D32S8 depth via rd_vk_depth32) with
+  NVK_SWITCH_PERF_LOG=1 for detailed driver reports; the step is kept while it
+  works and starts over with a new build. A manual rdoom_debug.txt wins.
+- The previous session's logs move to logs/anterior/ at start-up.
+- Session report names the scene depth format.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ libraries/ZVulkan/src/vulkaninstance.cpp      | 37 ++++++++++++++++
+ src/common/platform/posix/nx/rdoom_nx.cpp     | 43 +++++++++++++++++++
+ src/common/platform/posix/nx/rdoom_nx.h       |  7 +++
+ src/common/platform/posix/sdl/sdlglvideo.cpp  | 21 +++++++++
+ .../vulkan/textures/vk_renderbuffers.cpp      | 23 ++++++++++
+ 5 files changed, 131 insertions(+)
+
+diff --git a/libraries/ZVulkan/src/vulkaninstance.cpp b/libraries/ZVulkan/src/vulkaninstance.cpp
+index 32b9afdf6..2733bbff4 100644
+--- a/libraries/ZVulkan/src/vulkaninstance.cpp
++++ b/libraries/ZVulkan/src/vulkaninstance.cpp
+@@ -5,6 +5,7 @@
+ #include <set>
+ #include <string>
+ #include <cstring>
++#include <cstdio>
+ 
+ bool VulkanDeviceWasLost = false;
+ void (*VulkanDeviceLostCallback)(const char *what) = nullptr;
+@@ -76,6 +77,18 @@ void VulkanInstance::CreateInstance()
+ 		}
+ 	}
+ 
++#if defined(__SWITCH__)
++	// No validation layer exists here, but Mesa reports GPU faults (channel
++	// errors, device loss) through VK_EXT_debug_utils: always listen to it.
++	bool driverMessages = false;
++	for (const auto& ext : AvailableExtensions)
++		if (!strcmp(ext.extensionName, VK_EXT_DEBUG_UTILS_EXTENSION_NAME))
++		{
++			EnabledExtensions.insert(VK_EXT_DEBUG_UTILS_EXTENSION_NAME);
++			driverMessages = !debugLayerFound;
++		}
++#endif
++
+ 	// Enable optional instance extensions we are interested in
+ 	for (const auto& ext : AvailableExtensions)
+ 	{
+@@ -143,6 +156,30 @@ void VulkanInstance::CreateInstance()
+ 		DebugLayerActive = true;
+ 	}
+ 
++#if defined(__SWITCH__)
++	if (driverMessages)
++	{
++		VkDebugUtilsMessengerCreateInfoEXT info = {};
++		info.sType = VK_STRUCTURE_TYPE_DEBUG_UTILS_MESSENGER_CREATE_INFO_EXT;
++		info.messageSeverity = VK_DEBUG_UTILS_MESSAGE_SEVERITY_VERBOSE_BIT_EXT | VK_DEBUG_UTILS_MESSAGE_SEVERITY_INFO_BIT_EXT |
++			VK_DEBUG_UTILS_MESSAGE_SEVERITY_WARNING_BIT_EXT | VK_DEBUG_UTILS_MESSAGE_SEVERITY_ERROR_BIT_EXT;
++		info.messageType = VK_DEBUG_UTILS_MESSAGE_TYPE_GENERAL_BIT_EXT | VK_DEBUG_UTILS_MESSAGE_TYPE_VALIDATION_BIT_EXT |
++			VK_DEBUG_UTILS_MESSAGE_TYPE_PERFORMANCE_BIT_EXT;
++		info.pfnUserCallback = [](VkDebugUtilsMessageSeverityFlagBitsEXT sev, VkDebugUtilsMessageTypeFlagsEXT, const VkDebugUtilsMessengerCallbackDataEXT* data, void*) -> VkBool32 {
++			// written unbuffered to the SD card: cap the chatter, never the errors
++			static int info, errors;
++			const bool isError = (sev & (VK_DEBUG_UTILS_MESSAGE_SEVERITY_ERROR_BIT_EXT | VK_DEBUG_UTILS_MESSAGE_SEVERITY_WARNING_BIT_EXT)) != 0;
++			if (isError ? errors++ < 1000 : info++ < 1500)
++				fprintf(stderr, "[vulkan %s] %s\n",
++					(sev & VK_DEBUG_UTILS_MESSAGE_SEVERITY_ERROR_BIT_EXT) ? "error" : (sev & VK_DEBUG_UTILS_MESSAGE_SEVERITY_WARNING_BIT_EXT) ? "warning" : "info",
++					data && data->pMessage ? data->pMessage : "");
++			return VK_FALSE;
++		};
++		if (vkCreateDebugUtilsMessengerEXT && vkCreateDebugUtilsMessengerEXT(Instance, &info, nullptr, &debugMessenger) != VK_SUCCESS)
++			debugMessenger = VK_NULL_HANDLE;
++	}
++#endif
++
+ 	PhysicalDevices = GetPhysicalDevices(Instance, ApiVersion);
+ }
+ 
+diff --git a/src/common/platform/posix/nx/rdoom_nx.cpp b/src/common/platform/posix/nx/rdoom_nx.cpp
+index 205c0034c..6167d931a 100644
+--- a/src/common/platform/posix/nx/rdoom_nx.cpp
++++ b/src/common/platform/posix/nx/rdoom_nx.cpp
+@@ -175,8 +175,32 @@ void RDoom_Crumb(const char *what)
+ 	close(fd);
+ }
+ 
++static bool g_prevGpuLost = false;
++static int g_gpuStep = 0;
++
++// Keeps the previous session's logs in logs/anterior/, so a test after a freeze
++// or a crash does not overwrite the evidence.
++static void RotateLogs()
++{
++	static const char *const files[] = {
++		"logs/rdoom.log", "logs/engine.log", "logs/engine-stderr.log", "logs/engine-session.txt",
++		"logs/error.log", "logs/boot.log", "logs/last-launch.txt", "perf.log", "phase.log" };
++	MakeDirs(RDOOM_SD_ROOT "/logs/anterior");
++	for (const char *f : files)
++	{
++		const std::string from = std::string(RDOOM_SD_ROOT "/") + f;
++		if (!FileExists(from))
++			continue;
++		const std::string to = std::string(RDOOM_SD_ROOT "/logs/anterior/") + PathFileName(f);
++		remove(to.c_str());
++		rename(from.c_str(), to.c_str());
++	}
++}
++
+ void RDoom_NXEarlyInit()
+ {
++	MakeDirs(RDOOM_SD_ROOT "/logs");
++	RotateLogs();
+ 	unlink(RDOOM_SD_ROOT "/logs/boot.log");
+ 	RDoom_Crumb("early init");
+ 	// one fixed home, wherever the .nro was started from (hbloader, a
+@@ -197,14 +221,33 @@ void RDoom_NXEarlyInit()
+ 
+ 	// The previous session lost the GPU: start the shader caches from scratch,
+ 	// so a pipeline or shader binary written around the failure is never reused.
++	// Workaround step (logs/gpu-workaround.txt: "<step> <build>"); a new build starts over.
++	{
++		std::string w;
++		char build[128] = "";
++		int step = 0;
++		if (ReadFile(RDOOM_SD_ROOT "/logs/gpu-workaround.txt", w) && sscanf(w.c_str(), "%d %127s", &step, build) == 2 &&
++			!strcmp(build, RDOOM_GIT_DESCRIBE))
++			g_gpuStep = step;
++	}
+ 	if (FileExists(RDOOM_SD_ROOT "/logs/gpu-lost.txt"))
+ 	{
++		g_prevGpuLost = true;
+ 		RLOG_W("boot", "previous session lost the GPU: clearing shader caches (%d files)", RDoom_ClearShaderCaches());
+ 		RemoveFile(RDOOM_SD_ROOT "/logs/gpu-lost-previous.txt");
+ 		rename(RDOOM_SD_ROOT "/logs/gpu-lost.txt", RDOOM_SD_ROOT "/logs/gpu-lost-previous.txt");
++		if (g_gpuStep < RDOOM_GPU_STEPS)
++			g_gpuStep++;
++		char buf[192];
++		snprintf(buf, sizeof(buf), "%d %s\n", g_gpuStep, RDOOM_GIT_DESCRIBE);
++		WriteFileAtomic(RDOOM_SD_ROOT "/logs/gpu-workaround.txt", buf);
++		RLOG_W("boot", "GPU workaround step is now %d", g_gpuStep);
+ 	}
+ }
+ 
++bool RDoom_PreviousSessionLostGpu() { return g_prevGpuLost; }
++int RDoom_GpuWorkaroundStep() { return g_gpuStep; }
++
+ int RDoom_ClearShaderCaches()
+ {
+ 	int n = 0;
+diff --git a/src/common/platform/posix/nx/rdoom_nx.h b/src/common/platform/posix/nx/rdoom_nx.h
+index 1a7e2be1f..96a557e9e 100644
+--- a/src/common/platform/posix/nx/rdoom_nx.h
++++ b/src/common/platform/posix/nx/rdoom_nx.h
+@@ -24,3 +24,10 @@ int RDoom_ClearShaderCaches();
+ // Marker logs/gpu-lost.txt (+ session line) after VK_ERROR_DEVICE_LOST; the next
+ // start-up clears the shader caches when it finds it.
+ void RDoom_VulkanDeviceLost(const char *what);
++
++// Automatic GPU workarounds: each session that follows a lost GPU moves one step
++// further (0 = none, up to RDOOM_GPU_STEPS); the step is kept while it works and
++// starts over with a new build. Applied by the video start-up (sdlglvideo.cpp).
++#define RDOOM_GPU_STEPS 4
++bool RDoom_PreviousSessionLostGpu();
++int RDoom_GpuWorkaroundStep();
+diff --git a/src/common/platform/posix/sdl/sdlglvideo.cpp b/src/common/platform/posix/sdl/sdlglvideo.cpp
+index eec7168f2..b773e6cad 100644
+--- a/src/common/platform/posix/sdl/sdlglvideo.cpp
++++ b/src/common/platform/posix/sdl/sdlglvideo.cpp
+@@ -43,6 +43,7 @@
+ #include <zvulkan/vulkandevice.h>
+ #include <zvulkan/vulkaninstance.h>
+ #include <ctype.h>
++#include <unistd.h>
+ #include <zvulkan/vulkansurface.h>
+ #endif
+ 
+@@ -465,6 +466,26 @@ DFrameBuffer *SDLVideo::CreateFrameBuffer ()
+ 	// (NVK_DEBUG=push_sync, NVK_SWITCH_NO_UBO_CBUF=1, ...), applied before the
+ 	// driver starts; lower-case names are engine CVARs (rd_vk_frameoverlap=0,
+ 	// r_dynlights=0, ...). Nothing changes when the file is absent.
++	// Automatic workarounds after a lost GPU (see rdoom_nx.h); a manual
++	// rdoom_debug.txt replaces them.
++	if (vid_preferbackend == BACKEND_VULKAN && RDoom_GpuWorkaroundStep() > 0 && access("rdoom_debug.txt", F_OK) != 0)
++	{
++		const int step = RDoom_GpuWorkaroundStep();
++		FString applied;
++		setenv("NVK_SWITCH_PERF_LOG", "1", 1);  // the driver then reports channel errors in detail
++		applied += "NVK_SWITCH_PERF_LOG=1";
++		if (step >= 1) { setenv("NVK_DEBUG", "no_compression", 1); applied += " NVK_DEBUG=no_compression"; }
++		if (step >= 2) { setenv("NVK_SWITCH_NO_UBO_CBUF", "1", 1); applied += " NVK_SWITCH_NO_UBO_CBUF=1"; }
++		if (step >= 3) { setenv("NVK_SWITCH_MAPPED_COMPLETION", "0", 1); applied += " NVK_SWITCH_MAPPED_COMPLETION=0"; }
++		if (step >= 4)
++		{
++			if (FBaseCVar *cv = FindCVar("rd_vk_depth32", nullptr)) { UCVarValue v; v.Bool = true; cv->SetGenericRep(v, CVAR_Bool); }
++			applied += " rd_vk_depth32=1";
++		}
++		FString d;
++		d.Format("step %d of %d%s: %s", step, RDOOM_GPU_STEPS, RDoom_PreviousSessionLostGpu() ? " (previous session lost the GPU)" : " (kept: no GPU loss since)", applied.GetChars());
++		RDoom_SessionSet("gpu_workaround", d.GetChars());
++	}
+ 	if (FILE *ef = fopen("rdoom_debug.txt", "r"))
+ 	{
+ 		char line[256];
+diff --git a/src/common/rendering/vulkan/textures/vk_renderbuffers.cpp b/src/common/rendering/vulkan/textures/vk_renderbuffers.cpp
+index c379ee527..3f84b3350 100644
+--- a/src/common/rendering/vulkan/textures/vk_renderbuffers.cpp
++++ b/src/common/rendering/vulkan/textures/vk_renderbuffers.cpp
+@@ -21,6 +21,16 @@
+ */
+ 
+ #include "vk_renderbuffers.h"
++#ifdef __SWITCH__
++#include "common/platform/posix/nx/rdoom_nx.h"
++#include "c_cvars.h"
++#endif
++
++#ifdef __SWITCH__
++// GPU-fault workaround switch: use D32_SFLOAT_S8_UINT for every depth buffer
++CVAR(Bool, rd_vk_depth32, false, 0)
++#endif
++
+ #include "vulkan/renderer/vk_postprocess.h"
+ #include "vulkan/textures/vk_texture.h"
+ #include "vulkan/textures/vk_framebuffer.h"
+@@ -86,6 +96,10 @@ void VkRenderBuffers::BeginFrame(int width, int height, int sceneWidth, int scen
+ 
+ void VkRenderBuffers::CreatePipelineDepthStencil(int width, int height)
+ {
++#ifdef __SWITCH__
++	if (rd_vk_depth32)
++		PipelineDepthStencilFormat = VK_FORMAT_D32_SFLOAT_S8_UINT;
++#endif
+ 	ImageBuilder builder;
+ 	builder.Size(width, height);
+ 	builder.Format(PipelineDepthStencilFormat);
+@@ -184,6 +198,15 @@ void VkRenderBuffers::CreateSceneColor(int width, int height, VkSampleCountFlagB
+ 
+ void VkRenderBuffers::CreateSceneDepthStencil(int width, int height, VkSampleCountFlagBits samples)
+ {
++#ifdef __SWITCH__
++	if (rd_vk_depth32)
++		SceneDepthStencilFormat = VK_FORMAT_D32_SFLOAT_S8_UINT;
++	{
++		FString d;
++		d.Format("%s, %dx%d, %d sample(s)", SceneDepthStencilFormat == VK_FORMAT_D32_SFLOAT_S8_UINT ? "D32_SFLOAT_S8" : "D24_UNORM_S8", width, height, (int)samples);
++		RDoom_SessionSet("vulkan_scene_depth", d.GetChars());
++	}
++#endif
+ 	ImageBuilder builder;
+ 	builder.Size(width, height);
+ 	builder.Samples(samples);
+-- 
+2.56.0
+

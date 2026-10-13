@@ -1,0 +1,218 @@
+From 16931ee102770abffdcccba7d2536980e0433925 Mon Sep 17 00:00:00 2001
+From: RDoom <171243930+aeon1911@users.noreply.github.com>
+Date: Sun, 11 Oct 2026 19:58:55 -0300
+Subject: [PATCH 26/46] Switch Vulkan: fans as indexed triangles and emulated
+ depth bias by default
+
+Hardware ladder (2026-10-11): with triangle fans drawn as indexed triangle
+lists the console enters levels (fans hung the GM20B on the first 3D draw);
+the next hang came with the first shot, on the first pipelines that use depth
+bias (bullet-hole decals). rd_vk_nofans is now on by default and depth bias is
+emulated by compressing the viewport depth range of biased draws
+(rd_vk_depthbias 0; 1 restores the native bias). Every new pipeline is logged
+with its full key in logs/boot.log; after a GPU loss the next session goes
+straight to trace mode, which now also logs 50 draws after each new pipeline.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ src/common/platform/posix/nx/rdoom_nx.cpp     |  2 +-
+ src/common/platform/posix/nx/rdoom_nx.h       |  5 +-
+ src/common/platform/posix/sdl/sdlglvideo.cpp  | 13 ++---
+ .../vulkan/renderer/vk_renderpass.cpp         | 11 +++-
+ .../vulkan/renderer/vk_renderstate.cpp        | 52 ++++++++++++++++++-
+ .../vulkan/renderer/vk_renderstate.h          |  1 +
+ 6 files changed, 66 insertions(+), 18 deletions(-)
+
+diff --git a/src/common/platform/posix/nx/rdoom_nx.cpp b/src/common/platform/posix/nx/rdoom_nx.cpp
+index 6167d931a..2690ed8f1 100644
+--- a/src/common/platform/posix/nx/rdoom_nx.cpp
++++ b/src/common/platform/posix/nx/rdoom_nx.cpp
+@@ -169,7 +169,7 @@ void RDoom_Crumb(const char *what)
+ 	int fd = open(RDOOM_SD_ROOT "/logs/boot.log", O_WRONLY | O_CREAT | O_APPEND, 0644);
+ 	if (fd < 0)
+ 		return;
+-	char buf[256];
++	char buf[768];
+ 	int n = snprintf(buf, sizeof(buf), "[%8llu ms] %s\n", (unsigned long long)(armTicksToNs(armGetSystemTick()) / 1000000ULL), what);
+ 	write(fd, buf, n > 0 && n < (int)sizeof(buf) ? n : (int)sizeof(buf) - 1);
+ 	close(fd);
+diff --git a/src/common/platform/posix/nx/rdoom_nx.h b/src/common/platform/posix/nx/rdoom_nx.h
+index 1717f8fe5..ce3cd3130 100644
+--- a/src/common/platform/posix/nx/rdoom_nx.h
++++ b/src/common/platform/posix/nx/rdoom_nx.h
+@@ -26,9 +26,8 @@ int RDoom_ClearShaderCaches();
+ void RDoom_VulkanDeviceLost(const char *what);
+ 
+ // Automatic GPU workarounds: each session that follows a lost GPU moves one step
+-// further (0 = none, 1 = fans as triangles, 2 = + no depth/stencil writes,
+-// 3 = + no depth/stencil tests, 4 = draw trace); the step is kept while it works and
++// further (0 = none, 1 = draw trace); the step is kept while it works and
+ // starts over with a new build. Applied by the video start-up (sdlglvideo.cpp).
+-#define RDOOM_GPU_STEPS 4
++#define RDOOM_GPU_STEPS 1
+ bool RDoom_PreviousSessionLostGpu();
+ int RDoom_GpuWorkaroundStep();
+diff --git a/src/common/platform/posix/sdl/sdlglvideo.cpp b/src/common/platform/posix/sdl/sdlglvideo.cpp
+index 832497214..67246e20c 100644
+--- a/src/common/platform/posix/sdl/sdlglvideo.cpp
++++ b/src/common/platform/posix/sdl/sdlglvideo.cpp
+@@ -478,17 +478,10 @@ DFrameBuffer *SDLVideo::CreateFrameBuffer ()
+ 			if (FBaseCVar *cv = FindCVar(name, nullptr)) { UCVarValue v; v.String = value; cv->SetGenericRep(v, CVAR_String); }
+ 			applied.AppendFormat(" %s=%s", name, value);
+ 		};
+-		// one hypothesis per step for the hang on the first 3D draw (ZCULL is
+-		// already off by default; driver workarounds did not help, 2026-10-11)
+-		if (step >= 1 && step <= 3)
+-			setcvar("rd_vk_nofans", "1");
+-		if (step == 2)
+-			setcvar("rd_vk_zstate", "1");
+-		if (step == 3)
+-			setcvar("rd_vk_zstate", "2");
+-		if (step >= 4)
++		// fans and depth bias are worked around by default now (hardware tests
++		// 2026-10-11); a further loss goes straight to trace mode
++		if (step >= 1)
+ 		{
+-			// trace mode: every draw submitted and waited for, one log line per 3D draw
+ 			setenv("NVK_DEBUG", "push_sync", 1);
+ 			applied += " NVK_DEBUG=push_sync (trace mode)";
+ 			setcvar("vk_submit_size", "1");
+diff --git a/src/common/rendering/vulkan/renderer/vk_renderpass.cpp b/src/common/rendering/vulkan/renderer/vk_renderpass.cpp
+index 493624589..0bbe64e35 100644
+--- a/src/common/rendering/vulkan/renderer/vk_renderpass.cpp
++++ b/src/common/rendering/vulkan/renderer/vk_renderpass.cpp
+@@ -361,10 +361,17 @@ std::unique_ptr<VulkanPipeline> VkRenderPassSetup::CreatePipeline(const VkPipeli
+ 		FString d, attrs;
+ 		for (auto &a : vfmt.Attrs)
+ 			attrs.AppendFormat(" L%d:b%d:f%d", a.location, a.binding, a.format);
+-		d.Format("#%u: vertexformat %d (%d bindings, stride %d,%s), effect %d, special %d, alphatest %d, draw %d, layers %d, samples %d, buffers %d",
++		d.Format("#%u: vertexformat %d (%d bindings, stride %d,%s), effect %d, special %d, alphatest %d, draw %d, layers %d, samples %d, buffers %d, "
++			"blend op %d src %d dst %d flags 0x%x, depth test %d write %d func %d clamp %d bias %d, stencil %d op %d, colormask 0x%x, cull %d",
+ 			++created, key.VertexFormat, vfmt.NumBindingPoints, (int)vfmt.Stride, attrs.GetChars(), key.EffectState, key.SpecialEffect,
+-			key.AlphaTest, key.DrawType, key.NumTextureLayers, PassKey.Samples, PassKey.DrawBuffers);
++			key.AlphaTest, key.DrawType, key.NumTextureLayers, PassKey.Samples, PassKey.DrawBuffers,
++			key.RenderStyle.BlendOp, key.RenderStyle.SrcAlpha, key.RenderStyle.DestAlpha, key.RenderStyle.Flags,
++			key.DepthTest, key.DepthWrite, key.DepthFunc, key.DepthClamp, key.DepthBias, key.StencilTest, key.StencilPassOp, key.ColorMask, key.CullMode);
+ 		RDoom_SessionSet("vulkan_last_new_pipeline", d.GetChars());
++		FString c = "new pipeline " + d;
++		RDoom_Crumb(c.GetChars());
++		extern int rd_vk_drawlog_burst;
++		rd_vk_drawlog_burst = 50;
+ 	}
+ #endif
+ 	return builder.Create(fb->device.get());
+diff --git a/src/common/rendering/vulkan/renderer/vk_renderstate.cpp b/src/common/rendering/vulkan/renderer/vk_renderstate.cpp
+index b11c9a8dc..7837f0b3e 100644
+--- a/src/common/rendering/vulkan/renderer/vk_renderstate.cpp
++++ b/src/common/rendering/vulkan/renderer/vk_renderstate.cpp
+@@ -63,8 +63,15 @@ CVAR(Int, rd_vk_drawlog, 0, 0)
+ // experiments for the GPU hang on the first 3D draw (hardware only):
+ // rd_vk_nofans 1 = triangle fans drawn as indexed triangle lists
+ // rd_vk_zstate 1 = no depth/stencil writes, 2 = no depth/stencil tests at all
+-CVAR(Bool, rd_vk_nofans, false, 0)
++// Hardware results 2026-10-11: triangle fans and depth bias both hang the
++// GM20B under NVK (fifo idle timeout); lists and plain states do not.
++CVAR(Bool, rd_vk_nofans, true, 0)
+ CVAR(Int, rd_vk_zstate, 0, 0)
++// rd_vk_depthbias 0: depth bias emulated by compressing the viewport depth
++// range for biased draws ([0,1-eps] closer, [eps,1] farther); 1: native bias
++CVAR(Bool, rd_vk_depthbias, false, 0)
++CVAR(Float, rd_vk_depthbias_eps, 1.0f / 8192.0f, 0)
++int rd_vk_drawlog_burst = 0;
+ int rd_vk_drawlog_started = 0;
+ extern int nx_levelframes;
+ void RDoom_Crumb(const char *what);
+@@ -73,8 +80,15 @@ static void LogDraw(const VkPipelineKey &key, FMaterial *mat, const char *kind,
+ {
+ 	static int logged;
+ 	// 3D draws (depth or stencil in use), also during the screen wipe into a level
+-	if (rd_vk_drawlog <= 0 || logged >= 3000 || (!key.DepthTest && !key.StencilTest && !logged))
++	if (rd_vk_drawlog <= 0 || (!key.DepthTest && !key.StencilTest && !logged))
+ 		return;
++	// the first 3000 draws from the first 3D draw on, then 50 after every new pipeline
++	if (logged >= 3000)
++	{
++		if (rd_vk_drawlog_burst <= 0 || logged >= 20000)
++			return;
++		rd_vk_drawlog_burst--;
++	}
+ 	logged++;
+ 	extern int rd_vk_drawlog_started;
+ 	rd_vk_drawlog_started = 1;
+@@ -259,6 +273,13 @@ void VkRenderState::Apply(int dt)
+ 
+ void VkRenderState::ApplyDepthBias()
+ {
++#ifdef __SWITCH__
++	if (!rd_vk_depthbias)
++	{
++		mBias.mChanged = false;  // emulated in ApplyViewport
++		return;
++	}
++#endif
+ 	if (mBias.mChanged)
+ 	{
+ 		mCommandBuffer->setDepthBias(mBias.mUnits, 0.0f, mBias.mFactor);
+@@ -278,6 +299,10 @@ void VkRenderState::ApplyRenderPass(int dt)
+ 	pipelineKey.DepthFunc = mDepthFunc;
+ 	pipelineKey.DepthClamp = mDepthClamp;
+ 	pipelineKey.DepthBias = !(mBias.mFactor == 0 && mBias.mUnits == 0);
++#ifdef __SWITCH__
++	if (!rd_vk_depthbias)
++		pipelineKey.DepthBias = 0;
++#endif
+ 	pipelineKey.StencilTest = mStencilTest;
+ 	pipelineKey.StencilPassOp = mStencilOp;
+ 	pipelineKey.ColorMask = mColorMask;
+@@ -362,6 +387,18 @@ void VkRenderState::ApplyScissor()
+ 
+ void VkRenderState::ApplyViewport()
+ {
++#ifdef __SWITCH__
++	{
++		int sign = 0;
++		if (!rd_vk_depthbias && !(mBias.mFactor == 0 && mBias.mUnits == 0))
++			sign = (mBias.mUnits < 0 || (mBias.mUnits == 0 && mBias.mFactor < 0)) ? -1 : 1;
++		if (sign != mEmuBiasSign)
++		{
++			mEmuBiasSign = sign;
++			mViewportChanged = true;
++		}
++	}
++#endif
+ 	if (mViewportChanged)
+ 	{
+ 		VkViewport viewport;
+@@ -381,6 +418,17 @@ void VkRenderState::ApplyViewport()
+ 		}
+ 		viewport.minDepth = mViewportDepthMin;
+ 		viewport.maxDepth = mViewportDepthMax;
++#ifdef __SWITCH__
++		if (mEmuBiasSign)
++		{
++			const float range = mViewportDepthMax - mViewportDepthMin;
++			const float eps = clamp<float>(rd_vk_depthbias_eps, 0.0f, 0.01f) * range;
++			if (mEmuBiasSign < 0)
++				viewport.maxDepth -= eps;	// biased toward the camera (decals, wall sprites)
++			else
++				viewport.minDepth += eps;	// biased away from it
++		}
++#endif
+ 		mCommandBuffer->setViewport(0, 1, &viewport);
+ 		mViewportChanged = false;
+ 	}
+diff --git a/src/common/rendering/vulkan/renderer/vk_renderstate.h b/src/common/rendering/vulkan/renderer/vk_renderstate.h
+index 37015661e..0f84ab674 100644
+--- a/src/common/rendering/vulkan/renderer/vk_renderstate.h
++++ b/src/common/rendering/vulkan/renderer/vk_renderstate.h
+@@ -102,6 +102,7 @@ protected:
+ 	float mViewportDepthMin = 0.0f, mViewportDepthMax = 1.0f;
+ 	bool mScissorChanged = true;
+ 	bool mViewportChanged = true;
++	int mEmuBiasSign = 0;	// Switch: depth bias emulated through the viewport depth range (-1 closer, +1 farther)
+ 
+ 	bool mDepthTest = false;
+ 	bool mDepthWrite = false;
+-- 
+2.56.0
+
