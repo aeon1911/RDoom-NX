@@ -1,0 +1,147 @@
+From ec2a43adbf20f02871b7217f02cb72404a6e6760 Mon Sep 17 00:00:00 2001
+From: RDoom <171243930+aeon1911@users.noreply.github.com>
+Date: Tue, 13 Oct 2026 20:23:38 -0300
+Subject: [PATCH 51/51] Switch: quicker dynamic resolution at map start;
+ packaged pipeline list
+
+- dynamic resolution: plain mean of the first GPU samples after a change and
+  decisions after 8 of them (was 30), drops sized for the 3D view to fit;
+  the Lexicon hub spent its first seconds at 22 fps stepping down from 100%
+  (console test of 74c08b37a)
+- the warm-up list is merged with ./rdoom-pipelines-seed.bin from the
+  package: every console test after an update started without cache/
+  (pipeline cache, warm list, texture list) and created ~30 pipelines in
+  the middle of play, 20+ ms each
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ .../vulkan/renderer/vk_renderpass.cpp         | 49 ++++++++++++++++---
+ .../vulkan/system/vk_renderdevice.cpp         | 29 +++++------
+ 2 files changed, 56 insertions(+), 22 deletions(-)
+
+diff --git a/src/common/rendering/vulkan/renderer/vk_renderpass.cpp b/src/common/rendering/vulkan/renderer/vk_renderpass.cpp
+index a6984f02b..59f1e935e 100644
+--- a/src/common/rendering/vulkan/renderer/vk_renderpass.cpp
++++ b/src/common/rendering/vulkan/renderer/vk_renderpass.cpp
+@@ -175,14 +175,47 @@ void VkRenderPassManager::LoadWarmList()
+ 	// blend and depth state, hardly on the mod): a new mod combination used to
+ 	// create its pipelines in the middle of play, 50-145 ms each on the Switch.
+ 	// The per-game list of older builds is the fallback for the first start.
+-	if (!fr.OpenFile(GlobalWarmFilename().GetChars()) && !fr.OpenFile(WarmFilename().GetChars()))
+-		return;
+-	uint32_t header[3] = {};	// magic, entry size, count
+-	if (fr.Read(header, sizeof(header)) != (FileReader::Size)sizeof(header) || header[0] != 0x4c504452 || header[1] != sizeof(WarmEntry) || header[2] > 400)
+-		return;
+-	mWarm.resize(header[2]);
+-	if (fr.Read(mWarm.data(), mWarm.size() * sizeof(WarmEntry)) != (FileReader::Size)(mWarm.size() * sizeof(WarmEntry)))
+-		mWarm.clear();
++	auto readList = [](FileReader &fr, std::vector<WarmEntry> &out)
++	{
++		uint32_t header[3] = {};	// magic, entry size, count
++		if (fr.Read(header, sizeof(header)) != (FileReader::Size)sizeof(header) || header[0] != 0x4c504452 || header[1] != sizeof(WarmEntry) || header[2] > 400)
++			return;
++		out.resize(header[2]);
++		if (fr.Read(out.data(), out.size() * sizeof(WarmEntry)) != (FileReader::Size)(out.size() * sizeof(WarmEntry)))
++			out.clear();
++	};
++	if (fr.OpenFile(GlobalWarmFilename().GetChars()) || fr.OpenFile(WarmFilename().GetChars()))
++		readList(fr, mWarm);
++	// The package carries a list of the pipelines the usual games need
++	// (collected in test sessions): a fresh install, or an SD card whose
++	// cache/ folder went away with an update, created 30 of them in the
++	// middle of play, 20+ ms each (console tests of 2026-10-13).
++	FileReader seedFile;
++	std::vector<WarmEntry> seed;
++	if (seedFile.OpenFile("./rdoom-pipelines-seed.bin"))
++		readList(seedFile, seed);
++	int added = 0;
++	for (auto &e : seed)
++	{
++		bool known = false;
++		for (auto &w : mWarm)
++			if (!memcmp(&w, &e, sizeof(e)))
++			{
++				known = true;
++				break;
++			}
++		if (!known && mWarm.size() < 400)
++		{
++			mWarm.push_back(e);
++			added++;
++		}
++	}
++	if (added)
++	{
++		FString n;
++		n.Format("%d from the package's list", added);
++		RDoom_SessionSet("vulkan_pipeline_seed", n.GetChars());
++	}
+ }
+ 
+ void VkRenderPassManager::WarmupPipelines()
+diff --git a/src/common/rendering/vulkan/system/vk_renderdevice.cpp b/src/common/rendering/vulkan/system/vk_renderdevice.cpp
+index e7054402c..de97667e6 100644
+--- a/src/common/rendering/vulkan/system/vk_renderdevice.cpp
++++ b/src/common/rendering/vulkan/system/vk_renderdevice.cpp
+@@ -358,13 +358,10 @@ void VulkanRenderDevice::UpdateDynamicResolution()
+ 	double gpuFrame, gpuScene;
+ 	if (mCommands->TakeGpuFrameTime(gpuFrame, gpuScene) && gpuFrame > 0.5)
+ 	{
+-		if (mDynGpuSamples == 0)
+-		{
+-			mDynGpuFrame = gpuFrame;
+-			mDynGpuScene = gpuScene;
+-		}
+-		mDynGpuFrame += (gpuFrame - mDynGpuFrame) * 0.1;
+-		mDynGpuScene += (gpuScene - mDynGpuScene) * 0.1;
++		// plain mean of the first samples after a change, then a running average
++		const double k = mDynGpuSamples < 10 ? 1.0 / (mDynGpuSamples + 1) : 0.1;
++		mDynGpuFrame += (gpuFrame - mDynGpuFrame) * k;
++		mDynGpuScene += (gpuScene - mDynGpuScene) * k;
+ 		mDynGpuSamples = min(mDynGpuSamples + 1, 1000);
+ 		mDynGpuSeen = true;
+ 	}
+@@ -372,9 +369,11 @@ void VulkanRenderDevice::UpdateDynamicResolution()
+ 	// used again: they ran while the average settled after each change (20
+ 	// frames) and, with the CPU over budget (slaughter map, 1000+ monsters,
+ 	// 20 ms frames), dropped every rise right back to 60% (2026-10-13 test).
+-	if (mDynGpuSeen && mDynGpuSamples < 30)
++	// 8 samples at the new scale: with 30 the Lexicon hub (GPU 18-23 ms at
++	// full scale) spent its first seconds at 22 fps stepping down from 100%
++	if (mDynGpuSeen && mDynGpuSamples < 8)
+ 		return;
+-	if (mDynGpuSamples >= 30)
++	if (mDynGpuSamples >= 8)
+ 	{
+ 		// the 3D view grows with its pixel count; the rest of the frame does not
+ 		auto predict = [&](float scale) { return mDynGpuFrame + mDynGpuScene * ((scale * scale) / (mDynScale * mDynScale) - 1.0); };
+@@ -385,11 +384,13 @@ void VulkanRenderDevice::UpdateDynamicResolution()
+ 				mDynCeiling = mDynScale - 0.05f;
+ 				mDynCeilingFrames = 1200;
+ 			}
+-			float s = mDynScale * (float)sqrt(budget * 0.85 / mDynGpuFrame);
+-			s = max(s, mDynScale * 0.8f);
+-			mDynScale = clamp(floorf(s * 20.0f) / 20.0f, minScale, 1.0f);
++			// what the 3D view may cost to fit 85% of the frame
++			const double sceneBudget = budget * 0.85 - (mDynGpuFrame - mDynGpuScene);
++			float s = sceneBudget > 0.5 ? mDynScale * (float)sqrt(sceneBudget / max(mDynGpuScene, 0.5)) : minScale;
++			s = max(s, mDynScale * 0.6f);
++			mDynScale = clamp(floorf(s * 20.0f) / 20.0f, minScale, mDynScale - 0.05f);
+ 			mDynCalmFrames = 0;
+-			mDynGpuSamples = 10;	// the average restarts at the new scale (20 more frames)
++			mDynGpuSamples = 0;	// the average restarts at the new scale
+ 		}
+ 		else if (mDynScale < 1.0f && predict(min(1.0f, mDynScale + 0.05f)) < budget * 0.85)
+ 		{
+@@ -404,7 +405,7 @@ void VulkanRenderDevice::UpdateDynamicResolution()
+ 				else
+ 					return;
+ 				mDynFramesSinceRise = 0;
+-				mDynGpuSamples = 10;
++				mDynGpuSamples = 0;
+ 			}
+ 		}
+ 		else
+-- 
+2.56.0
+

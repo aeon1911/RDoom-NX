@@ -22,6 +22,8 @@ for pk3 in uzdoom.pk3 game_support.pk3 game_widescreen_gfx.pk3 brightmaps.pk3 li
 	cp "$B/$pk3" "$SD/"
 done
 cp -r "$B/soundfonts" "$B/fm_banks" "$SD/"
+# pipelines the usual games need, created at level load instead of in play
+[ -f "$ROOT/assets/rdoom-pipelines-seed.bin" ] && cp "$ROOT/assets/rdoom-pipelines-seed.bin" "$SD/"
 
 # launcher artwork (loaded from the SD card, not embedded in the NRO)
 for f in bg_main.jpg bg_inner.jpg splash.jpg logo_300.png logo_400.png logo_620.png \

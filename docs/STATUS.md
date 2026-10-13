@@ -1,7 +1,7 @@
 # RDoom NX — estado em 2026-10-13
 
-Pacote atual: `dist/RDoom.nro` sha256 `216e8de466a15268fc2340494bebc0a91a52cec3698a85f26567f9c4e095b1c2`
-(motor `5.0.3-50-g74c08b37a`), zips e `SHA256SUMS.txt` em `dist/`.
+Pacote atual: `dist/RDoom.nro` sha256 `44119cb6699e7ef6cd9c2d6a1be395ed449262865f914ac168c659ca6c41fe47`
+(motor `5.0.3-51-gec2a43adb`), zips e `SHA256SUMS.txt` em `dist/`.
 
 ## Feito e verificado
 
@@ -222,6 +222,15 @@ Pacote atual: `dist/RDoom.nro` sha256 `216e8de466a15268fc2340494bebc0a91a52cec36
   vistos a regra antiga nunca mais roda (a escala espera a média), a média recomeça a cada mapa; perf.log
   mostra também a escala máxima da janela. A primeira sessão começou sem cache de pipelines (pacote
   reinstalado): pipelines criados em jogo só nessa vez. Logs em `evidence/hw/2026-10-13-dyngpu`.
+- **Teste do 74c08b37a (2026-10-13, slaughter do Lexicon + Brutal):** a vista agora sobe a 100% (GPU 9–15 ms).
+  As quedas que restam são da CPU: 1700–2100 atores, tic de 16–25 ms; os imps do Brutal custam 5–11 ms por tic
+  (cada um cria dois atores de hitbox a cada 6 tics) e cada tiro de espingarda 7–15 ms (A_Refire refaz a
+  cadeia de 26 projéteis decorativos + 14 hitscans). O hub ficou lento nos primeiros segundos (escala descendo
+  de 100% em passos de 20 quadros). E de novo ~30 pipelines criados no meio do jogo: a cada atualização a
+  pasta `cache/` some do SD (sessões "anterior" sem cache algum). 5.0.3-51-gec2a43adb: decisões da resolução com 8
+  amostras e descida dimensionada; o pacote traz `rdoom-pipelines-seed.bin` (81 pipelines das sessões de
+  teste, `scripts/merge-pipelines.py`), juntado à lista do cartão — instalação nova no Ryujinx: 80 criados no
+  carregamento, nenhum em jogo (`evidence/ryujinx/142-seed-fresh`). Logs em `evidence/hw/2026-10-13-dynhold`.
 - **Publicado em 2026-10-13:** https://github.com/aeon1911/RDoom-NX (público) com o motor em
   https://github.com/aeon1911/RDoom-NX-engine (fork do UZDoom, branch `rdoom-nx`, submódulo `engine/`).
   Autor dos commits trocado para o e-mail privado do GitHub (os hashes do motor mudaram). Não publicados:
@@ -244,9 +253,15 @@ Pacote atual: `dist/RDoom.nro` sha256 `216e8de466a15268fc2340494bebc0a91a52cec36
 
 ## Pendente
 
-- **Resolver o `device lost` no Switch físico** (ver acima) e repetir os testes no console.
-- OpenGL de desktop no Ryujinx: vista 3D preta quando a sessão começa direto num mapa, até
-  alternar o automapa (GLES e Vulkan não têm o problema). Causa não isolada.
+- Teste no console do build atual: hub do Lexicon nos primeiros segundos, pipelines na primeira sessão
+  depois de atualizar.
+- Mapas com hordas (slaughter): CPU acima do quadro (tic 16–25 ms com ~2000 atores); medir colisão
+  entre monstros e os atores de hitbox do Brutal antes de otimizar.
+- Outros mods no console (Compendium, Trailblazer, Ashes, Aliens TC). Modo dock: não se aplica (Switch Lite).
+- OpenGL no console: vista preta. No Ryujinx (OpenGL de desktop) a vista 3D fica preta ao começar direto
+  num mapa até alternar o automapa.
 - WadFusion: regerar `doom_fusion.ipk3` com o WadFusion v1.6.1 (precisa dos WADs do usuário).
+- Release no GitHub (`.nro` + Freedoom, sem IWADs comerciais), CI e README em inglês.
+- Sessões longas (1–2 h): memória e estabilidade.
+- Depois: Project Brutality (mais pesado em scripts que o Brutal Doom).
 - Lightmaps ainda sobem por cópia (compute) no Vulkan; nenhum mod testado usa.
-- Arte por IA (indisponível neste ambiente; arte vetorial no lugar).
