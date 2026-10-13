@@ -1,7 +1,7 @@
 # RDoom NX — estado em 2026-10-13
 
-Pacote atual: `dist/RDoom.nro` sha256 `21675bd8d4874aa76ab2098b15ac4d0ddf7dab2f9f355509c86089db4b22e11b`
-(motor `5.0.3-48-g30e33a509`), zips e `SHA256SUMS.txt` em `dist/`.
+Pacote atual: `dist/RDoom.nro` sha256 `d8af446946c40f191911b5e5a55994ea4082cdb914666b577301cbf08aba11d1`
+(motor `5.0.3-49-g453febfd0`), zips e `SHA256SUMS.txt` em `dist/`.
 
 ## Feito e verificado
 
@@ -207,6 +207,14 @@ Pacote atual: `dist/RDoom.nro` sha256 `21675bd8d4874aa76ab2098b15ac4d0ddf7dab2f9
   a camada confere os próprios shaders e se desliga (linha `vulkan_half_effects` pede o pacote inteiro)
   em vez de parar o jogo; conferido no Ryujinx com um `uzdoom.pk3` sem o shader
   (`evidence/ryujinx/136-oldpk3`). Logs em `evidence/hw/2026-10-13-halffx`.
+- **Teste do 30e33a509 (2026-10-13, Lexicon + Brutal e Freedoom 2 + Lexicon + Brutal):** a camada de meia
+  resolução funciona no console (`vulkan_half_effects_depth: ok`); nas lutas ela recebe 4–13 efeitos por quadro
+  (1,2–1,9 tela de fumaça) e os mapas ficam em 55–60 fps, poucos frames > 35 ms. Mas a vista ficou em 60% e o
+  estabilizador no nível 6 o mapa inteiro, com a GPU em ~10 de 16,7 ms: com vsync o quadro oscila entre 16 e
+  18 ms e as regras de volta (45/60–300 quadros seguidos abaixo de 17,2–17,3 ms) nunca se cumpriam. 5.0.3-49-g453febfd0:
+  resolução dinâmica decide pelo tempo da GPU (sobe enquanto a próxima escala cabe em 85%, cai só com a GPU
+  acima de 90%); estabilizador ignora quadros até 20% acima do alvo. O hub do Lexicon roda a ~33 fps (GPU
+  presa, 3D 12,7 ms a 60%) — o autor pediu para deixar como está. Logs em `evidence/hw/2026-10-13-halffx2`.
 - **Publicado em 2026-10-13:** https://github.com/aeon1911/RDoom-NX (público) com o motor em
   https://github.com/aeon1911/RDoom-NX-engine (fork do UZDoom, branch `rdoom-nx`, submódulo `engine/`).
   Autor dos commits trocado para o e-mail privado do GitHub (os hashes do motor mudaram). Não publicados:
