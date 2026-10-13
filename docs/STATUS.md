@@ -1,7 +1,7 @@
 # RDoom NX — estado em 2026-10-13
 
-Pacote atual: `dist/RDoom.nro` sha256 `0d8c9a168d511cbcabdfeb7361b6f36c9ffe56fc69c533c97b4641d3f2114427`
-(motor `5.0.3-46-gb173c0a27`), zips e `SHA256SUMS.txt` em `dist/`.
+Pacote atual: `dist/RDoom.nro` sha256 `39d6fffd1f97f545bae432caf067142351ecd2517349721a2060f8c5ce1ce5dc`
+(motor `5.0.3-46-gbda37a838`), zips e `SHA256SUMS.txt` em `dist/`.
 
 ## Feito e verificado
 
@@ -184,9 +184,13 @@ Pacote atual: `dist/RDoom.nro` sha256 `0d8c9a168d511cbcabdfeb7361b6f36c9ffe56fc6
 - **Teste do 4020ab81e (2026-10-13):** estabilizador devolve detalhes (níveis 0–1 com 20–26 luzes nas partes
   calmas), explosões com 0–5 frames > 35 ms a cada 5 s. Restavam um frame de 40–65 ms a cada 10 s e "save"
   de 100–150 ms: a thread do jogo esperava um lock da thread de gravação, que rodava com prioridade mínima no
-  núcleo do jogo e ficava atrás das outras threads quando interrompida segurando o lock. Build 5.0.3-46-gb173c0a27: thread de
+  núcleo do jogo e ficava atrás das outras threads quando interrompida segurando o lock. Build 5.0.3-46-gbda37a838 (b173c0a27 antes da troca do e-mail dos commits): thread de
   gravação no núcleo 2 com a prioridade do jogo; uma lista de pipelines para todos os jogos
   (`rdoom-pipelines-all.bin`). Logs em `evidence/hw/2026-10-13-sesslog`.
+- **Publicado em 2026-10-13:** https://github.com/aeon1911/RDoom-NX (público) com o motor em
+  https://github.com/aeon1911/RDoom-NX-engine (fork do UZDoom, branch `rdoom-nx`, submódulo `engine/`).
+  Autor dos commits trocado para o e-mail privado do GitHub (os hashes do motor mudaram). Não publicados:
+  IWADs/mods, `test-env/`, `evidence/`, builds e SDKs baixados.
 - Ryujinx: o escurecimento de paredes/HUD acontece também sem workers (`evidence/ryujinx/105-biglist-noworkers`),
   só depende do número de texturas criadas — limitação do emulador. Para validar visual no Ryujinx usar
   `rd_sprite_prefetch 0` e lista vazia (`evidence/ryujinx/106-hold-nopf`).
