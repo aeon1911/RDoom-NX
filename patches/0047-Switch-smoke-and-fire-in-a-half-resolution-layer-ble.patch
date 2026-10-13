@@ -1,7 +1,7 @@
 From ced311a28d3115a80eb8983dceb2384d460fb403 Mon Sep 17 00:00:00 2001
 From: RDoom <171243930+aeon1911@users.noreply.github.com>
 Date: Tue, 13 Oct 2026 18:33:16 -0300
-Subject: [PATCH 47/47] Switch: smoke and fire in a half-resolution layer
+Subject: [PATCH 47/48] Switch: smoke and fire in a half-resolution layer
  blended over the scene
 
 Large translucent effect sprites (alpha or additive, NXIsPureEffect, at

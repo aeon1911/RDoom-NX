@@ -1,0 +1,69 @@
+From 30e33a50999e540abc1499e7e6df0bae02da0c51 Mon Sep 17 00:00:00 2001
+From: RDoom <171243930+aeon1911@users.noreply.github.com>
+Date: Tue, 13 Oct 2026 18:56:04 -0300
+Subject: [PATCH 48/48] Switch: half-resolution layer off, not fatal, when
+ uzdoom.pk3 lacks its shaders
+
+Console test: only the new RDoom.nro was copied to the SD card, the old
+uzdoom.pk3 had no shaders/pp/nxdepth.fp and every game ended at map start
+with "Unable to load 'shaders/pp/nxdepth.fp'" (fatal in the level-load
+warm-up). The layer now checks its shader lumps first and turns itself off
+with a session line asking for the whole package.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ .../vulkan/system/vk_renderdevice.cpp          | 18 ++++++++++++++++++
+ .../rendering/vulkan/system/vk_renderdevice.h  |  1 +
+ 2 files changed, 19 insertions(+)
+
+diff --git a/src/common/rendering/vulkan/system/vk_renderdevice.cpp b/src/common/rendering/vulkan/system/vk_renderdevice.cpp
+index e1cc28e3d..43a13b51e 100644
+--- a/src/common/rendering/vulkan/system/vk_renderdevice.cpp
++++ b/src/common/rendering/vulkan/system/vk_renderdevice.cpp
+@@ -36,6 +36,7 @@
+ #include "hw_clock.h"
+ #include "nx_perf.h"
+ #include "i_time.h"
++#include "filesystem.h"
+ #include "hw_lightbuffer.h"
+ #include "hw_skydome.h"
+ #include "hwrenderer/data/hw_viewpointbuffer.h"
+@@ -724,6 +725,23 @@ CVAR(Int, rd_halfeffects_debug, 0, 0)
+ 
+ bool VulkanRenderDevice::NXHalfEffectsAvailable()
+ {
++	// its shaders come with this build's uzdoom.pk3: an SD card with only the
++	// new RDoom.nro copied over must not end in a fatal error at map start
++	if (mNXFxDepthState == 0 && !mNXFxShadersChecked)
++	{
++		mNXFxShadersChecked = true;
++		for (const char *lump : { "shaders/pp/nxdepth.fp", "shaders/pp/upscale.fp" })
++		{
++			if (fileSystem.CheckNumForFullName(lump) < 0)
++			{
++				mNXFxDepthState = -1;
++				FString n;
++				n.Format("off (%s missing: uzdoom.pk3 older than RDoom.nro, copy the whole package)", lump);
++				RDoom_SessionSet("vulkan_half_effects", n.GetChars());
++				break;
++			}
++		}
++	}
+ 	return rd_vk_halfeffects && mNXFxDepthState >= 0 && mScreenBuffers && GetBuffers() == mScreenBuffers.get() && mScreenBuffers->NXFxSupported();
+ }
+ 
+diff --git a/src/common/rendering/vulkan/system/vk_renderdevice.h b/src/common/rendering/vulkan/system/vk_renderdevice.h
+index c1b79db2c..a1883be18 100644
+--- a/src/common/rendering/vulkan/system/vk_renderdevice.h
++++ b/src/common/rendering/vulkan/system/vk_renderdevice.h
+@@ -163,6 +163,7 @@ private:
+ 	bool mNXFxProbePending[2] = {};
+ 	int mNXFxDepthState = 0;	// 0 checking, 1 verified, -1 broken
+ 	int mNXFxZeroChecks = 0;
++	bool mNXFxShadersChecked = false;
+ #endif
+ 	std::unique_ptr<VkBufferManager> mBufferManager;
+ 	std::unique_ptr<VkSamplerManager> mSamplerManager;
+-- 
+2.56.0
+

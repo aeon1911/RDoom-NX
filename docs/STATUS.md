@@ -1,7 +1,7 @@
 # RDoom NX — estado em 2026-10-13
 
-Pacote atual: `dist/RDoom.nro` sha256 `bea9eeca7642dc6f8dd3f02d52fc621e5967615f0c60fcc20291b563a97cb429`
-(motor `5.0.3-47-gced311a28`), zips e `SHA256SUMS.txt` em `dist/`.
+Pacote atual: `dist/RDoom.nro` sha256 `21675bd8d4874aa76ab2098b15ac4d0ddf7dab2f9f355509c86089db4b22e11b`
+(motor `5.0.3-48-g30e33a509`), zips e `SHA256SUMS.txt` em `dist/`.
 
 ## Feito e verificado
 
@@ -202,6 +202,11 @@ Pacote atual: `dist/RDoom.nro` sha256 `bea9eeca7642dc6f8dd3f02d52fc621e5967615f0
   profundidade do NVK (`Invalid texture format 0x2512B`); camada, composição e mapeamento foram
   conferidos lá com os modos `rd_halfeffects_debug` 2–5 e 10 (`evidence/ryujinx/119`–`135`). perf.log
   mostra efeitos na camada e a área deles por quadro. **Teste no console pendente.**
+- **Teste do ced311a28 (2026-10-13):** nenhum jogo entrava no mapa — erro fatal "Unable to load
+  'shaders/pp/nxdepth.fp'": só o `RDoom.nro` novo foi copiado, o `uzdoom.pk3` do SD era o antigo. 30e33a509:
+  a camada confere os próprios shaders e se desliga (linha `vulkan_half_effects` pede o pacote inteiro)
+  em vez de parar o jogo; conferido no Ryujinx com um `uzdoom.pk3` sem o shader
+  (`evidence/ryujinx/136-oldpk3`). Logs em `evidence/hw/2026-10-13-halffx`.
 - **Publicado em 2026-10-13:** https://github.com/aeon1911/RDoom-NX (público) com o motor em
   https://github.com/aeon1911/RDoom-NX-engine (fork do UZDoom, branch `rdoom-nx`, submódulo `engine/`).
   Autor dos commits trocado para o e-mail privado do GitHub (os hashes do motor mudaram). Não publicados:
