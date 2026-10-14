@@ -15,23 +15,13 @@ namespace rdoom {
 
 const char *RendererId(Renderer r)
 {
-	switch (r)
-	{
-	case Renderer::Vulkan: return "vulkan";
-	case Renderer::OpenGL: return "opengl";
-	case Renderer::GLES: return "gles";
-	}
+	(void)r;
 	return "vulkan";
 }
 
 const char *RendererLabel(Renderer r)
 {
-	switch (r)
-	{
-	case Renderer::Vulkan: return "Vulkan";
-	case Renderer::OpenGL: return "OpenGL";
-	case Renderer::GLES: return "OpenGL ES";
-	}
+	(void)r;
 	return "Vulkan";
 }
 
@@ -39,9 +29,13 @@ bool ParseRenderer(const std::string &s, Renderer &out)
 {
 	std::string l = ToLower(s);
 	if (l == "vulkan") { out = Renderer::Vulkan; return true; }
-	if (l == "opengl" || l == "gl") { out = Renderer::OpenGL; return true; }
-	if (l == "gles" || l == "opengles") { out = Renderer::GLES; return true; }
 	return false;
+}
+
+bool IsRemovedRenderer(const std::string &s)
+{
+	std::string l = ToLower(s);
+	return l == "opengl" || l == "gl" || l == "gles" || l == "opengles";
 }
 
 int RendererEngineValue(Renderer r)
@@ -267,7 +261,8 @@ bool ProfileFromJson(const std::string &text, Profile &p, std::vector<std::strin
 		r.Get(v, "renderer", rend, "video");
 		if (!ParseRenderer(rend, p.video.renderer))
 		{
-			warnings.push_back("video.renderer '" + rend + "' unknown, Vulkan used");
+			warnings.push_back(IsRemovedRenderer(rend) ? "video.renderer '" + rend + "': OpenGL was removed from RDoom, Vulkan used"
+				: "video.renderer '" + rend + "' unknown, Vulkan used");
 			p.video.renderer = Renderer::Vulkan;
 		}
 		r.Get(v, "internal_scale", p.video.internalScale, "video");

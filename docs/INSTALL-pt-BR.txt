@@ -39,8 +39,11 @@ Clocks
 
 Problemas
   - "Pendente de instalacao": falta a IWAD ou o mod que o perfil usa.
-  - Vulkan nao iniciou: veja logs/engine-session.txt; o perfil pode usar
-    OpenGL ou OpenGL ES (Editar perfil > Renderizador).
+  - Vulkan nao iniciou: veja logs/engine-session.txt (o RDoom renderiza
+    so com Vulkan).
+  - Aviso de mods em conflito ao iniciar: dois mods declaram as mesmas
+    variaveis (CVARINFO) e o jogo pararia com erro. Se forem episodios ou
+    versoes do mesmo mod, ative so um.
   - Travou: logs/crash.log tem o endereco do erro.
 
 Licencas em switch/rdoom/licenses/. Codigo-fonte: repositorio do RDoom.

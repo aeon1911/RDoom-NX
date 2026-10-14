@@ -17,7 +17,7 @@ its owners; no Doom logo, character art or commercial game data is included.
 | UZDoom | tag 5.0.3, `7910df7102033fd7754a317f3254f24101135926` | GPL-3.0-or-later (engine), with code under BSD/MIT/zlib and others listed in `engine/docs/licenses/` | `engine/` |
 | GZDoom / ZDoom lineage | via UZDoom | GPL-3.0-or-later and the historic Doom source licence terms in UZDoom | `engine/` |
 | Earlier Switch port of GZDoom (fgsfds) — platform code, crash handler, loading screen base | via the user's UZDoom 5.0.3 Switch port | BSD-3-Clause style (file headers) / GPL-3.0 | `engine/src/common/platform/posix/nx/` |
-| Mesa (NVK Vulkan, Gallium NVC0, EGL, GL/GLES, NAK) — Horizon port | Mesa 26.2.4, danfromtico/mesa-switch `606441c90e459028a50fca352daebfc20211f890` (CI artifact 11484346771, sha256 `937cbda8…ca392`) | MIT (most of Mesa; see `MESA-MIT.txt`), some components Apache-2.0 / BSL-1.0 / SGI-B-2.0 (see the mesa-switch `licenses/` folder) | linked static |
+| Mesa (NVK Vulkan, NAK; EGL linked by SDL2, not used for rendering) — Horizon port | Mesa 26.2.4, danfromtico/mesa-switch `606441c90e459028a50fca352daebfc20211f890` (CI artifact 11484346771, sha256 `937cbda8…ca392`) | MIT (most of Mesa; see `MESA-MIT.txt`), some components Apache-2.0 / BSL-1.0 / SGI-B-2.0 (see the mesa-switch `licenses/` folder) | linked static |
 | Rust standard library (inside the Mesa SDK, used by NAK) | rustc nightly used by the SDK build | MIT OR Apache-2.0 | linked static |
 | libnx | 4.12.0 (devkitPro image `devkita64:20260219`) | ISC (`LIBNX-ISC.txt`) | linked static |
 | devkitA64 runtime (newlib, libgcc, libstdc++) | GCC 15.2.0 toolchain | newlib: BSD-style licences; libgcc/libstdc++: GPL-3.0 with the GCC Runtime Library Exception | linked static |

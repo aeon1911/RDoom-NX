@@ -83,4 +83,12 @@ std::string ExtractPalette(const std::string &path);
 bool DecodeDoomPicture(const std::string &lump, const std::string &palette768,
                        std::vector<uint8_t> &rgba, int &w, int &h);
 
+// CVARINFO: names (lower case) of the console variables a mod declares.
+std::vector<std::string> ParseCvarInfo(const std::string &text);
+std::vector<std::string> ModCvarNames(const std::string &path);
+// Two mods that declare the same cvar cannot be loaded together: UZDoom stops
+// with "cvar '...' already exists" (e.g. two episodes of Ashes). mods are
+// (display name, path) in load order; one line per pair of mods that clash.
+std::vector<std::string> FindCvarClashes(const std::vector<std::pair<std::string, std::string>> &mods);
+
 } // namespace rdoom

@@ -1,4 +1,5 @@
 #include "content.h"
+#include <algorithm>
 #include "fsutil.h"
 #include "log.h"
 
@@ -521,6 +522,129 @@ bool ExtractTitlePic(const std::string &path, const std::string &palette768, std
 	if (pal.size() < 768)
 		pal = ExtractPalette(path);
 	return DecodeDoomPicture(data, pal, rgba, w, h);
+}
+
+// ---------------------------------------------------------------------------
+// CVARINFO clashes
+// ---------------------------------------------------------------------------
+
+std::vector<std::string> ParseCvarInfo(const std::string &text)
+{
+	// strip // and /* */ comments and string literals
+	std::string t;
+	t.reserve(text.size());
+	for (size_t i = 0; i < text.size(); i++)
+	{
+		if (text[i] == '/' && i + 1 < text.size() && text[i + 1] == '/')
+		{
+			while (i < text.size() && text[i] != '\n')
+				i++;
+			t += '\n';
+		}
+		else if (text[i] == '/' && i + 1 < text.size() && text[i + 1] == '*')
+		{
+			i += 2;
+			while (i + 1 < text.size() && !(text[i] == '*' && text[i + 1] == '/'))
+				i++;
+			i++;
+			t += ' ';
+		}
+		else if (text[i] == '"')
+		{
+			i++;
+			while (i < text.size() && text[i] != '"')
+				i++;
+			t += " \"\" ";
+		}
+		else
+			t += text[i];
+	}
+	std::vector<std::string> names;
+	size_t start = 0;
+	while (start < t.size())
+	{
+		size_t end = t.find(';', start);
+		if (end == std::string::npos)
+			end = t.size();
+		// words of one declaration: [scope] [flags] type name [= value]
+		std::vector<std::string> words;
+		std::string w;
+		for (size_t i = start; i <= end && i <= t.size(); i++)
+		{
+			const char ch = i < end ? t[i] : ' ';
+			if (isspace((unsigned char)ch) || ch == '=')
+			{
+				if (!w.empty())
+					words.push_back(ToLower(w));
+				w.clear();
+				if (ch == '=')
+					break;
+			}
+			else
+				w += ch;
+		}
+		for (size_t k = 0; k + 1 < words.size(); k++)
+		{
+			const std::string &ty = words[k];
+			if (ty == "int" || ty == "float" || ty == "bool" || ty == "color" || ty == "string")
+			{
+				names.push_back(words[k + 1]);
+				break;
+			}
+		}
+		start = end + 1;
+	}
+	return names;
+}
+
+std::vector<std::string> ModCvarNames(const std::string &path)
+{
+	std::vector<std::string> names;
+	Archive a;
+	if (!a.Open(path))
+		return names;
+	for (const auto &e : a.Entries())
+	{
+		bool cvarinfo = false;
+		if (a.Type() == ArchiveType::Wad)
+			cvarinfo = e.name == "CVARINFO";
+		else if (e.name.find('/') == std::string::npos)
+		{
+			const std::string base = ToLower(e.name.substr(0, e.name.find('.')));
+			cvarinfo = base == "cvarinfo";
+		}
+		std::string text;
+		if (cvarinfo && a.Read(e, text, 1u << 20))
+			for (auto &n : ParseCvarInfo(text))
+				names.push_back(n);
+	}
+	return names;
+}
+
+std::vector<std::string> FindCvarClashes(const std::vector<std::pair<std::string, std::string>> &mods)
+{
+	std::vector<std::vector<std::string>> cvars;
+	for (const auto &m : mods)
+		cvars.push_back(ModCvarNames(m.second));
+	std::vector<std::string> out;
+	for (size_t i = 0; i < mods.size(); i++)
+		for (size_t j = i + 1; j < mods.size(); j++)
+		{
+			std::vector<std::string> both;
+			for (const auto &n : cvars[j])
+				if (std::find(cvars[i].begin(), cvars[i].end(), n) != cvars[i].end() &&
+				    std::find(both.begin(), both.end(), n) == both.end())
+					both.push_back(n);
+			if (both.empty())
+				continue;
+			std::string list;
+			for (size_t k = 0; k < both.size() && k < 3; k++)
+				list += (k ? ", " : "") + both[k];
+			if (both.size() > 3)
+				list += ", +" + std::to_string(both.size() - 3);
+			out.push_back(mods[i].first + " e " + mods[j].first + " declaram as mesmas variáveis (" + list + ")");
+		}
+	return out;
 }
 
 } // namespace rdoom

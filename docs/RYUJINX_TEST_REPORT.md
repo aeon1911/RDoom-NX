@@ -35,22 +35,11 @@ depois da execução e capturas.
 | Compendium v1a: HUBMAP (seletor) | ✅ | `35-vk-compendium/` |
 | Relatório de sessão completo (pedido/ativo, instância, superfície, dispositivo, swapchain, frames) | ✅ em todos os acima | `engine-session.txt` de cada pasta |
 
-### OpenGL e OpenGL ES (opções explícitas)
+### Build só com Vulkan (1.0.0)
 
-| Teste | Resultado | Evidência |
-|---|---|---|
-| OpenGL, FreeDoom 2 pelo título/menu: MAP01, andar, atirar | ✅ | `18-opengl-play/`, `38-gl-menu/` |
-| OpenGL, sessão iniciada **direto** no mapa (`warp` no perfil) | ⚠️ vista 3D preta (inclusive a barra de status) até alternar o automapa uma vez; depois, normal | `37-gl-visual/`, `39-gl-warp-debug/` |
-| OpenGL ES direto no mapa | ✅ | `41-gles-warp/` |
-| Seleção de renderizador sem fallback silencioso | ✅ `renderer_requested` = `renderer_active` em todos os testes | `engine-session.txt` |
-
-Sobre o problema do OpenGL direto no mapa: o jogo continua rodando (o
-`perf.log` mostra a cena sendo processada a 60 FPS), só a imagem final fica
-preta. Com `gl_debug_level 3` os erros do Mesa são os mesmos no caminho bom
-e no ruim, então não explicam a diferença. Não aparece no Vulkan nem no
-GLES. Não se sabe se acontece em hardware; até lá, quem usa OpenGL com
-`warp` pode alternar o automapa (botão −) uma vez. Medições de OpenGL feitas
-com a vista preta foram marcadas com `INVALID.txt` e refeitas.
+O RDoom renderiza só com Vulkan: o backend OpenGL/GLES do UZDoom não é
+compilado (`HAVE_OPENGL=OFF`, `HAVE_GLES2=OFF`). FreeDoom 2, novo jogo, MAP01,
+tiros: ✅ 60 fps, `renderer_active: vulkan` (`90-vk-only-sanity/`).
 
 ### WadFusion
 
@@ -82,6 +71,5 @@ desse ponto por causa do bridge de TLS e da compatibilidade de `ALLOC_SPACE`
 
 ## Desempenho
 
-Ver `PERFORMANCE.md`: sem limite de FPS, Vulkan 367,5 fps × OpenGL 169,6 fps
-(Freedoom 2) e 291,6 × 159,4 fps (Brutal Doom); no padrão, Vulkan com
-60,0 fps e desvio < 1 ms.
+Ver `PERFORMANCE.md`: sem limite de FPS, 367,5 fps (Freedoom 2) e 291,6 fps
+(Brutal Doom); no padrão, 60,0 fps e desvio < 1 ms.

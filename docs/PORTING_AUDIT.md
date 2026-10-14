@@ -8,7 +8,7 @@ verificar cada afirmação. Data: 2026-10-11.
 | Item | Valor | Verificação |
 |---|---|---|
 | Motor | UZDoom **5.0.3** (última estável), tag commit `7910df7102033fd7754a317f3254f24101135926` | `git -C engine log 7910df71 -1` |
-| Port de Switch anterior (do usuário) | `uz5.0.3-nx3.7` … `uz5.0.3-nx4.13` (OpenGL/GLES, tela de carregamento, crash handler) | commits `cfe330446`…`a5b622b9c` |
+| Port de Switch anterior (do usuário) | `uz5.0.3-nx3.7` … `uz5.0.3-nx4.13` (tela de carregamento, crash handler; o renderizador OpenGL/GLES não é compilado) | commits `cfe330446`…`a5b622b9c` |
 | Trabalho de Vulkan em andamento (não commitado no port anterior) | importado como está | commit `fd9999c71` |
 | Commits do RDoom | `d65b6d187` … `b28af9162` | `git -C engine log --oneline 7910df71..HEAD`, série em `patches/` |
 | Toolchain | devkitPro `devkita64` digest `sha256:1fc388c3…0282`, GCC 15.2.0, libnx 4.12.0 | `docker/Dockerfile` |
@@ -78,18 +78,12 @@ em relação ao UZDoom 5.0.3 (o commit `0284cce00` do port anterior restaurou
 |---|---|
 | Build reproduzível (Docker) | ✅ |
 | Testes de host (launcher, UI, sem overclock, pacote) | ✅ `scripts/test.sh` |
-| Ryujinx 1.3.3 com o NRO empacotado | ✅ Vulkan (padrão), OpenGL e GLES; ver `RYUJINX_TEST_REPORT.md` |
-| **Switch físico** | ⏳ **pendente** — nenhum resultado em hardware real ainda |
+| Ryujinx 1.3.3 com o NRO empacotado | ✅ Vulkan; ver `RYUJINX_TEST_REPORT.md` |
+| **Switch físico** (Lite, portátil) | ✅ Freedoom 2, Brutal Doom, Lexicon (+ slaughter), Compendium, Ashes 2063, Aliens Eradication TC, Trailblazer; ver `STATUS.md` |
 
 ## 6. Problemas em aberto
 
-1. Teste em Switch físico (Vulkan, OpenGL, GLES; modo portátil e dock;
-   modo título e applet).
-2. OpenGL (desktop GL, não GLES) no Ryujinx: começando a sessão direto num
-   mapa (`warp` no perfil), a vista 3D fica preta até alternar o automapa
-   uma vez. Pelo menu, ou com GLES/Vulkan, não acontece. Causa não isolada;
-   não se sabe se ocorre em hardware.
-3. WadFusion: o arquivo do usuário foi gerado para o UZDoom 4.14; precisa ser
+1. Sessões longas (1–2 h) no Switch físico.
+2. WadFusion: o arquivo do usuário foi gerado para o UZDoom 4.14; precisa ser
    regerado com o WadFusion v1.6.1 (ver `MOD_COMPATIBILITY.md`).
-4. Ryujinx não implementa `PRMT` imediato (afeta só o emulador).
-5. Arte gerada por IA: não disponível neste ambiente (arte vetorial no lugar).
+3. Ryujinx não implementa `PRMT` imediato (afeta só o emulador).

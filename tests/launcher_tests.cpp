@@ -161,6 +161,19 @@ static void InstallFixtures(const Paths &p)
 	WriteRaw(PathJoin(p.Mods(), "broken.pk3"), "PK\x03\x04garbage-without-directory");
 	WriteRaw(PathJoin(p.Mods(), "notes.txt"), "not a mod");
 	WriteRaw(PathJoin(p.Mods(), "fusion_copy.ipk3"), MakeZip({ { "iwadinfo.txt", "IWad { Name = \"WadFusion Test\" Game = \"Doom\" MustContain = \"MAP01\" }" } }));
+	// CVARINFO clashes (two Ashes episodes loaded together stop UZDoom)
+	{
+		CHECK_EQ(ParseCvarInfo("// c\nserver int hud_vertical = 0;\nuser noarchive bool Foo_Bar=true; /* x; */ nosave string s = \"a;b\";").size(), (size_t)3);
+		const std::string a = PathJoin(p.Mods(), "clash-a.wad"), b = PathJoin(p.Mods(), "clash-b.pk3"), c = PathJoin(p.Mods(), "clash-c.wad");
+		WriteRaw(a, MakeWad(false, { { "CVARINFO", "server int hud_vertical = 0;\nuser bool a_only = true;" } }));
+		WriteRaw(b, MakeZip({ { "cvarinfo.txt", "server int HUD_Vertical = 1;" } }));
+		WriteRaw(c, MakeWad(false, { { "CVARINFO", "user float c_only = 1.0;" } }));
+		auto clashes = FindCvarClashes({ { "A", a }, { "B", b }, { "C", c } });
+		CHECK_EQ(clashes.size(), (size_t)1);
+		CHECK(!clashes.empty() && clashes[0].find("hud_vertical") != std::string::npos);
+		CHECK(FindCvarClashes({ { "A", a }, { "C", c } }).empty());
+		RemoveFile(a); RemoveFile(b); RemoveFile(c);
+	}
 	WriteRaw(PathJoin(p.Iwads(), "doom_fusion.ipk3"), MakeZip({ { "iwadinfo.txt", "IWad { Name = \"WadFusion Test\" Game = \"Doom\" MustContain = \"MAP01\" }" }, { "maps/map01.wad", "PWAD" } }));
 }
 
@@ -335,6 +348,7 @@ static void TestCorruptAndMigration()
 	WriteRaw(p.ProfileFile("bad"), "{ \"name\": \"x\", ");                 // truncated JSON
 	WriteRaw(p.ProfileFile("legacy"), "{ \"name\": \"Old\", \"iwad\": \"doom2.wad\", \"mods\": [\"a.pk3\"] }");
 	WriteRaw(p.ProfileFile("wrongtypes"), "{ \"version\": 1, \"name\": 5, \"video\": { \"renderer\": \"metal\", \"fps_limit\": 999 }, \"cvars\": { \"ok_var\": \"1\", \"evil\": \"1; quit\" } }");
+	WriteRaw(p.ProfileFile("oldgl"), "{ \"version\": 1, \"name\": \"Old GL\", \"video\": { \"renderer\": \"opengl\" } }");
 	ProfileStore s(p, "test");
 	s.Load();
 	CHECK_EQ(s.Problems().size(), (size_t)1);       // only the truncated file
@@ -350,6 +364,8 @@ static void TestCorruptAndMigration()
 	const Profile *wt = s.Find("wrongtypes");
 	CHECK(wt && wt->video.renderer == Renderer::Vulkan && wt->video.fpsLimit == 60);
 	CHECK(wt && wt->cvars.count("ok_var") == 1 && wt->cvars.count("evil") == 0);
+	const Profile *oldgl = s.Find("oldgl");	// OpenGL was removed: such profiles load as Vulkan
+	CHECK(oldgl && oldgl->video.renderer == Renderer::Vulkan);
 
 	// launcher.json recovery
 	WriteRaw(p.LauncherConfigFile(), "not json");
@@ -456,11 +472,12 @@ static void TestResolveAndLaunch()
 	// engine ini: renderer written before start, other content preserved
 	std::string err;
 	WriteRaw(p.EngineConfigFile("launch-test"), "[GlobalSettings]\nvid_vsync=true\n\n[Doom.Player]\nname=Player\n");
-	lp.video.renderer = Renderer::OpenGL;
+	// an engine ini left on OpenGL by an early build goes back to Vulkan
+	WriteRaw(p.EngineConfigFile("launch-test"), "[GlobalSettings]\nvid_preferbackend=0\nvid_vsync=true\n\n[Doom.Player]\nname=Player\n");
 	CHECK(PrepareEngineIni(lp, p, err));
 	std::string ini;
 	ReadFile(p.EngineConfigFile("launch-test"), ini);
-	CHECK_EQ(IniGet(ini, "GlobalSettings", "vid_preferbackend"), std::string("0"));
+	CHECK_EQ(IniGet(ini, "GlobalSettings", "vid_preferbackend"), std::string("1"));
 	CHECK_EQ(IniGet(ini, "GlobalSettings", "vid_vsync"), std::string("true"));
 	CHECK_EQ(IniGet(ini, "Doom.Player", "name"), std::string("Player"));
 	lp.video.renderer = Renderer::Vulkan;

@@ -17,10 +17,13 @@ namespace rdoom {
 
 constexpr int kProfileFormatVersion = 1;
 
-enum class Renderer { Vulkan = 1, OpenGL = 0, GLES = 2 };
-const char *RendererId(Renderer r);        // "vulkan", "opengl", "gles"
-const char *RendererLabel(Renderer r);     // "Vulkan", "OpenGL", "OpenGL ES"
+// RDoom renders with Vulkan (Mesa NVK) only. Profiles written by early
+// builds may still say "opengl" or "gles": they load as Vulkan.
+enum class Renderer { Vulkan = 1 };
+const char *RendererId(Renderer r);        // "vulkan"
+const char *RendererLabel(Renderer r);     // "Vulkan"
 bool ParseRenderer(const std::string &s, Renderer &out);
+bool IsRemovedRenderer(const std::string &s);	// "opengl", "gles", ...
 int RendererEngineValue(Renderer r);       // vid_preferbackend value
 
 struct ModRef

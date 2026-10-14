@@ -71,13 +71,13 @@ run 'cmake -S engine -B build/native -G Ninja -DCMAKE_BUILD_TYPE=Release >/dev/n
      ninja -C build/native -j"$JOBS" zipdir re2c lemon' > "$LOG_DIR/native.log" 2>&1 || { tail -40 "$LOG_DIR/native.log"; die "host tools failed"; }
 
 # 6-7. engine + launcher for the Switch ---------------------------------------------
-step "Building RDoom.nro (UZDoom 5.0.3 + RDoom launcher, Vulkan/GL/GLES)"
+step "Building RDoom.nro (UZDoom 5.0.3 + RDoom launcher, Vulkan)"
 run 'export PORTLIBS_PREFIX=$DEVKITPRO/portlibs/switch
      if [ ! -f build/nx/build.ninja ]; then
        cmake -S engine -B build/nx -G Ninja \
          -DCMAKE_TOOLCHAIN_FILE=$DEVKITPRO/cmake/Switch.cmake \
          -DCMAKE_BUILD_TYPE=Release -DNINTENDO_SWITCH=ON \
-         -DHAVE_VULKAN=ON -DHAVE_GLES2=ON -DNO_STRIP=OFF \
+         -DHAVE_VULKAN=ON -DHAVE_OPENGL=OFF -DHAVE_GLES2=OFF -DNO_STRIP=OFF \
          -DDYN_OPENAL=OFF -DDYN_SNDFILE=OFF -DDYN_MPG123=OFF \
          -DIMPORT_EXECUTABLES=/src/build/native/ImportExecutables.cmake \
          -DSNDFILE_INCLUDE_DIR=$PORTLIBS_PREFIX/include \

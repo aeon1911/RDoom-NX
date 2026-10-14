@@ -1,0 +1,3106 @@
+From 499d2922b571d78721306f6092aa354db249ef14 Mon Sep 17 00:00:00 2001
+From: RDoom <171243930+aeon1911@users.noreply.github.com>
+Date: Wed, 14 Oct 2026 12:31:15 -0300
+Subject: [PATCH 56/56] Vulkan only: OpenGL/GLES backends not built on the
+ Switch
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+HAVE_OPENGL option (off in RDoom's build) drops the OpenGL backend and its
+EGL/GL link; hw_noopengl.cpp keeps the few pieces the rest of the engine
+uses. The Switch forces vid_preferbackend to Vulkan, a Vulkan failure is
+fatal with a pointer to the session report. Loading screen credit:
+Renan (Æon). Engine README rewritten for RDoom NX; legacy nx/ folder of the
+earlier port removed.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ CMakeLists.txt                                |  13 +-
+ README.md                                     |  75 +-
+ nx/LEIA-ME.txt                                | 285 -------
+ nx/build/README.md                            |  50 --
+ nx/build/build-libsndfile.sh                  |  20 -
+ nx/build/build-switch.sh                      |  46 -
+ nx/build/package.sh                           |  14 -
+ .../toolchain-from-source/build-portlibs.sh   | 102 ---
+ .../toolchain-from-source/build-toolchain.sh  |  73 --
+ .../toolchain-from-source/fetch-sources.sh    |  43 -
+ nx/gzdoom-4.5-reference.ini                   | 794 ------------------
+ nx/gzdoom.jpg                                 | Bin 53627 -> 0 bytes
+ nx/shadervariants.txt                         |  19 -
+ nx/uzdoom.ini                                 |  53 --
+ src/CMakeLists.txt                            |  51 +-
+ src/common/engine/nx_perf.cpp                 |   4 +-
+ .../platform/posix/nx/nx_loadscreen.cpp       |   2 +-
+ .../platform/posix/nx/rdoom_version.h.in      |   2 +-
+ src/common/platform/posix/sdl/sdlglvideo.cpp  |  23 +-
+ .../rendering/hwrenderer/hw_noopengl.cpp      |  32 +
+ src/rendering/hwrenderer/hw_precache.cpp      |   4 +
+ 21 files changed, 124 insertions(+), 1581 deletions(-)
+ delete mode 100644 nx/LEIA-ME.txt
+ delete mode 100644 nx/build/README.md
+ delete mode 100755 nx/build/build-libsndfile.sh
+ delete mode 100755 nx/build/build-switch.sh
+ delete mode 100755 nx/build/package.sh
+ delete mode 100755 nx/build/toolchain-from-source/build-portlibs.sh
+ delete mode 100755 nx/build/toolchain-from-source/build-toolchain.sh
+ delete mode 100755 nx/build/toolchain-from-source/fetch-sources.sh
+ delete mode 100644 nx/gzdoom-4.5-reference.ini
+ delete mode 100644 nx/gzdoom.jpg
+ delete mode 100644 nx/shadervariants.txt
+ delete mode 100644 nx/uzdoom.ini
+ create mode 100644 src/common/rendering/hwrenderer/hw_noopengl.cpp
+
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index 7c2b135f6..f50d26190 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -295,6 +295,7 @@ if( ${TARGET_ARCHITECTURE} MATCHES "x86_64" )
+ endif()
+ 
+ option (HAVE_VULKAN "Enable Vulkan support" ON)
++option (HAVE_OPENGL "Enable the OpenGL backend" ON)
+ if( APPLE )
+ 	option (HAVE_GLES2 "Enable GLES2 support" OFF)
+ else()
+@@ -304,8 +305,8 @@ option (NO_DISCORDRPC "Disable Discord RPC support" OFF)
+ 
+ if( NINTENDO_SWITCH )
+ 	set( NO_DISCORDRPC ON )
+-	# Vulkan (Mesa NVK) is RDoom's primary renderer; OpenGL / OpenGL ES stay
+-	# available as explicit choices in the launcher.
++	# RDoom renders with Vulkan (Mesa NVK) only: scripts/build.sh turns
++	# HAVE_OPENGL and HAVE_GLES2 off.
+ 	if( HAVE_VULKAN )
+ 		add_compile_definitions( VK_USE_PLATFORM_VI_NN=1 )
+ 	endif()
+@@ -325,6 +326,10 @@ if( MSVC )
+ 		set( ALL_C_FLAGS "${ALL_C_FLAGS} /DHAVE_VULKAN" )
+ 	endif()
+ 
++	if ( HAVE_OPENGL )
++		set( ALL_C_FLAGS "${ALL_C_FLAGS} /DHAVE_OPENGL" )
++	endif()
++
+ 	if ( HAVE_GLES2 )
+ 		set( ALL_C_FLAGS "${ALL_C_FLAGS} /DHAVE_GLES2" )
+ 	endif()
+@@ -367,6 +372,10 @@ else()
+ 		set( ALL_C_FLAGS "${ALL_C_FLAGS} -DHAVE_VULKAN" )
+ 	endif()
+ 
++	if ( HAVE_OPENGL )
++		set( ALL_C_FLAGS "${ALL_C_FLAGS} -DHAVE_OPENGL" )
++	endif()
++
+ 	if ( HAVE_GLES2 )
+ 		set( ALL_C_FLAGS "${ALL_C_FLAGS} -DHAVE_GLES2" )
+ 	endif()
+diff --git a/README.md b/README.md
+index 7578e6a48..de7334811 100644
+--- a/README.md
++++ b/README.md
+@@ -1,61 +1,28 @@
+-# UZDoom para Nintendo Switch
++# RDoom NX — engine
+ 
+-Port do [UZDoom](https://github.com/UZDoom/UZDoom) 5.0.3 para o Nintendo Switch
+-desbloqueado (Atmosphère / Homebrew Menu), com launcher próprio. Roda qualquer mod
+-que rode no UZDoom 5.0.3 do PC: Brutal Doom, Project Brutality, Lexicon,
+-Trailblazer, Samsara, WadFusion...
++This is the engine of [RDoom NX](https://github.com/aeon1911/RDoom-NX): **UZDoom
++5.0.3** with the patches that port it to the Nintendo Switch (Atmosphère
++homebrew `.nro`), rendered with **Vulkan** through Mesa NVK. Branch
++`rdoom-nx`; the same series is exported as `patches/` in the main repository.
+ 
+-Port, launcher e otimizações para Switch: **Renan** (Telegram @aeon1911).
+-Baseado no trabalho de fgsfds (port de GZDoom para Switch e launcher original),
+-Thorhax (GZDoom-NX-2026), da equipe UZDoom/GZDoom/ZDoom e do devkitPro.
++Made by **Renan (Æon)**. Build, install, tested mods and donations: see the
++[main repository](https://github.com/aeon1911/RDoom-NX).
+ 
+-## O que é diferente do UZDoom do PC
++What the port adds on top of UZDoom 5.0.3:
+ 
+-Os arquivos do motor (`uzdoom.pk3`, `game_support.pk3`, `brightmaps.pk3`,
+-`lights.pk3`, `game_widescreen_gfx.pk3`) são exatamente os do UZDoom 5.0.3
+-oficial: nenhum mod é alterado. As mudanças são só para o Switch:
++- Vulkan on the Switch (loaderless Mesa NVK, NAK thread-pointer bridge,
++  workarounds for the Tegra X1), Vulkan only: the OpenGL/GLES backend is not
++  built (`HAVE_OPENGL=OFF`, `HAVE_GLES2=OFF`).
++- Per-frame performance work for handheld play at stock clocks: GPU-timed
++  dynamic resolution, a half-resolution layer for smoke and fire, background
++  sprite decoding, pipelines and textures prepared at level load, a pooled
++  allocator for game objects, SD writes off the game thread.
++- Switch platform layer (`src/common/platform/posix/nx/`): SD layout, logs,
++  crash report, loading screen and the entry point of the RDoom launcher.
+ 
+-- cache de leitura do cartão SD (abertura de mods grandes muito mais rápida);
+-- imagens e sons preparados em outro núcleo, prefetch de sprites e mipmaps feitos
+-  na CPU (sem travadas quando aparecem sprites novos);
+-- shaders pré-preparados, tela de carregamento com tempo restante;
+-- 30 FPS travado de verdade (VSync a cada 2 atualizações) e estabilizador de FPS
+-  (reduz só detalhes visuais - luzes dinâmicas distantes, efeitos longe - quando
+-  uma cena fica pesada demais);
+-- luzes dinâmicas com orçamento (as mais próximas iluminam, as outras somem com fade);
+-- threads do jogo, do áudio e dos workers distribuídos nos 3 núcleos livres;
+-- `perf.log`, `crash.log` e `hang.log` no cartão para diagnóstico;
+-- nenhuma mudança de clock (CPU/GPU sempre nos valores normais do console).
++Stock clocks only: no overclocking code.
+ 
+-## Instalação
++Built by `scripts/build.sh` in the main repository (Docker, devkitA64, libnx,
++Mesa 26.2.4 Horizon SDK).
+ 
+-Veja [`nx/LEIA-ME.txt`](nx/LEIA-ME.txt): copie `switch/` para a raiz do cartão,
+-IWADs em `sd:/switch/gzdoom/iwads/`, mods em `sd:/switch/gzdoom/pwads/` e abra o
+-`gzdoom_launcher.nro` pelo Homebrew Menu em modo título (segure R ao abrir um jogo).
+-
+-## Compilar
+-
+-Veja [`nx/build/README.md`](nx/build/README.md).
+-
+-## Código
+-
+-- `src/common/platform/posix/nx/`: sistema do Switch (threads, crash log, tela de
+-  carregamento, glthread experimental)
+-- `tools/nxlauncher/`: launcher
+-- `src/common/engine/nx_*`: workers, perf.log e estabilizador de FPS
+-- `src/common/rendering/gles/gles_asynctex.*`, `src/rendering/hwrenderer/hw_nx*`:
+-  texturas em segundo plano, prefetch e orçamento de luzes
+-
+-O README original do UZDoom está em [`docs/README-UZDoom.md`](docs/README-UZDoom.md).
+-
+-## Licença
+-
+-GPLv3, como o UZDoom (veja `LICENSE`). Fontes do launcher (Bebas Neue, Poppins):
+-SIL Open Font License.
+-
+----
+-
+-*English:* Nintendo Switch (homebrew) port of UZDoom 5.0.3 with its own launcher.
+-Engine resources are identical to upstream 5.0.3, so any mod that runs on UZDoom
+-5.0.3 works; the changes are Switch-specific loading, threading and frame-rate
+-stability work. Build instructions in `nx/build/README.md`.
++License: GPL-3.0, like UZDoom (see `LICENSE` and `docs/licenses/`).
+diff --git a/nx/LEIA-ME.txt b/nx/LEIA-ME.txt
+deleted file mode 100644
+index f249a216c..000000000
+--- a/nx/LEIA-ME.txt
++++ /dev/null
+@@ -1,285 +0,0 @@
+-UZDoom 5.0.3 para Nintendo Switch  (build "uz5.0.3-nx4.13")
+-=====================================================================
+-Port, launcher e otimizações para Switch: Renan  -  Telegram @aeon1911
+-=====================================================================
+-
+-nx4.13 - Vulkan é o renderizador
+---------------------------------
+-A tela preta depois do loading era a janela da tela de loading: ao fechar,
+-o formato da imagem ficava 0 e o compositor não mostrava o quadro do
+-Vulkan. O formato volta ao valor inicial antes do Vulkan registrar a
+-imagem. O jogo abre em Vulkan. O rodapé tem que mostrar uz5.0.3-nx4.13.
+-
+-nx4.12 - a tela preta depois do loading
+-----------------------------------------
+-A nx4.11 abria em Vulkan e soltava a tela de loading antes de mostrar a
+-imagem, então o console ficava preto. O padrão voltou para OpenGL ES.
+-Vulkan continua em OPÇÕES → Vídeo. Se ele não conseguir abrir a imagem,
+-o jogo segue em OpenGL ES. O rodapé tem que mostrar uz5.0.3-nx4.12.
+-
+-nx4.11 - Vulkan como opção de vídeo
+-------------------------------------
+-O motor agora também desenha com Vulkan (driver Mesa NVK do Tegra X1),
+-no mesmo UZDoom 5.0.3. Brutal Doom, Lexicon e WadFusion continuam neste
+-motor. Em OPÇÕES, "Vídeo" escolhe Vulkan ou OpenGL ES. O padrão novo é
+-Vulkan. Se o Vulkan não abrir, o jogo volta sozinho para OpenGL ES.
+-O rodapé tem que mostrar uz5.0.3-nx4.11.
+-
+-nx4.10 - a luta não empilha mais vários tics antes de desenhar
+---------------------------------------------------------------
+-No Brutal Doom um tic custa vários milissegundos. Quando o quadro
+-atrasava, o motor rodava os 4 a 6 tics atrasados antes de mostrar a
+-imagem, e a tela ficava parada (no perf.log isso aparece como um quadro
+-de ~150 ms com dezenas de milissegundos só em thinkers). Agora, numa
+-fase, em um jogador, cada quadro roda um tic, ou dois se o quadro
+-anterior coube em 30 fps. Rede e demo continuam iguais. Para voltar ao
+-comportamento antigo: +set nx_simcap 0
+-O rodapé tem que mostrar uz5.0.3-nx4.10.
+-
+-nx4.9 - a abertura do Brutal volta a ler o controle
+-----------------------------------------------------
+-Essa tela de fogo é o mapa TITLEMAP do Brutal22test6. O jogo mostrava
+-um quadro e ficava preso na espera da tela de 30 fps, então o botão
+-nunca era lido. A abertura apresenta a cada atualização da tela, como
+-a build que jogava. Dentro de uma fase o limite de 30 fps continua.
+-O rodapé tem que mostrar uz5.0.3-nx4.9.
+-
+-nx4.8 - a intro do WadFusion volta a sair da cidade em chamas
+---------------------------------------------------------------
+-Essa tela é um mapa (wf_newgame), não o title 2D. A 4.1 passou a montar
+-o mipmap de todas as texturas enquanto ela estava na tela, e o quadro
+-não voltava. O lote de texturas voltou ao caminho da build que jogava.
+-Sprite que aparece no meio da fase continua com mipmap na CPU.
+-O rodapé tem que mostrar uz5.0.3-nx4.8.
+-
+-nx4.7 - o title usa o mesmo caminho da build que abria
+--------------------------------------------------------
+-A comparação com a nx3.7 (a última que entrava nesse pack) mostra que o
+-laço do title não foi reescrito. O que a 4.1 acrescentou e ainda rodava
+-ali era o mipmap na CPU, o corte de luzes e o cache de upload de luz,
+-inclusive enquanto os mods terminavam de carregar. Isso fica desligado
+-no title e nas duas telas de loading. Dentro do mapa continua ligado.
+-O rodapé tem que mostrar uz5.0.3-nx4.7.
+-
+-nx4.6 - a intro do WadFusion não fica mais parada no title
+-----------------------------------------------------------
+-Brutal Doom + Lexicon + WadFusion mostravam o title do Doom e não saíam
+-dali. O mapa seguinte precacheia todas as texturas, e o mipmap na CPU
+-nessas imagens grandes travava com o title ainda na tela. Sprite pequeno
+-continua na CPU; title, céu e parede grande voltam ao caminho antigo.
+-O rodapé tem que mostrar uz5.0.3-nx4.6.
+-
+-nx4.5 - o mixer volta ao outro núcleo depois da tela de carregamento
+----------------------------------------------------------------------
+-A nx4.4 deixou o mixer no mesmo núcleo do jogo para a tela de carregamento
+-abrir. Em mod com muito som (Brutal Doom) o jogo esperava o mixer a todo
+-momento e travava na intro ou no meio da fase. O mixer continua fora desse
+-núcleo enquanto a tela de carregamento desenha, e passa para o outro núcleo
+-quando ela termina. Luzes, estabilizador e mipmaps continuam. O rodapé tem
+-que mostrar uz5.0.3-nx4.5.
+-
+-nx4.4 - o mixer de áudio saiu do núcleo da tela de carregamento
+-----------------------------------------------------------------
+-A nx4.1 passou o mixer para o mesmo núcleo dessa tela, com prioridade
+-maior, e o primeiro quadro nunca era desenhado. A tela voltou ao jeito
+-da build que abria, e o mixer ficou onde estava. O rodapé tem que mostrar
+-uz5.0.3-nx4.4. Se ainda ficar preta, em sdmc:/switch/gzdoom/boot.log a
+-primeira linha diz se o gzdoom.nro chegou a abrir.
+-
+-nx4.3 - a tela de carregamento abre na hora do Jogar
+-----------------------------------------------------
+-A nx4.2 ainda ficava preta: o primeiro quadro era desenhado num núcleo que
+-o mixer de áudio (e, na prioridade nova, o driver de vídeo) não soltava.
+-Agora esse quadro é desenhado na thread principal, antes do jogo começar,
+-e a animação fica no outro núcleo. O rodapé do launcher tem que mostrar
+-uz5.0.3-nx4.3. A pasta da nx4.2 não serve.
+-
+-nx4.2 - a tela de carregamento voltou a abrir
+----------------------------------------------
+-Na nx4.1, ao apertar Jogar a tela ficava preta e a tela de carregamento
+-da homebrew não aparecia. O mixer de áudio tinha passado a ocupar o
+-mesmo núcleo dessa tela, com prioridade maior, e uma lista grande de
+-mods podia estourar o limite de linha de comando do Atmosphere (2048
+-bytes), corrompendo o caminho do gzdoom.nro. Os dois foram corrigidos.
+-As opções de desempenho da nx4.1 continuam iguais.
+-
+-nx4.1 - estabilidade em cenas pesadas
+--------------------------------------
+-Em mapas com muito fogo, tochas e efeitos o FPS caía. Cada luz dinâmica
+-(tocha, vela, fogo, bola de fogo, clarão) custa processador em cada
+-parede, chão e sprite que ela ilumina, e o driver de vídeo do Switch
+-cobra caro por cada objeto desenhado.
+-
+-- NOVA OPÇÃO "Estabilizar FPS" (Automático por padrão): enquanto os
+-  quadros passam do limite de FPS, o jogo corta aos poucos só o que é
+-  visual - menos luzes dinâmicas (as mais próximas ficam), efeitos e
+-  decorações muito distantes, efeitos quase invisíveis, alcance das
+-  sombras de sprites e, no aperto maior, a luz dinâmica sobre sprites.
+-  Quando sobra tempo, os detalhes voltam devagar. Monstros, projéteis,
+-  itens, dano e scripts nunca mudam.
+-- LUZES DINÂMICAS COM ORÇAMENTO: no "Equilibrado" só as 16 luzes mais
+-  próximas (até 2500 unidades) iluminam o cenário; as outras apagam com
+-  um fade suave (sem piscar). "Qualidade" continua sem limite.
+-- Dados de luz repetidos não são reenviados ao driver a cada parede
+-  (paredes vizinhas iluminadas pelas mesmas tochas).
+-- Partículas distantes seguem o mesmo corte dos outros efeitos.
+-- Todos os perfis passam uma vez para "30 FPS travado" (o modo mais
+-  estável no Switch) com o estabilizador ligado. Dá para mudar em OPÇÕES.
+-- perf.log mostra também chamadas de desenho por quadro, luzes usadas,
+-  uploads de luz evitados e o nível do estabilizador (coluna "stab").
+-
+-nx4.0 - versão geral
+---------------------
+-Até a nx3.8 o port era ajustado para o Project Brutality. A nx4.0 é o
+-UZDoom 5.0.3 original com só a camada do Switch por cima, para rodar
+-qualquer mod (Brutal Doom, Project Brutality, Lexicon, Trailblazer,
+-Samsara, WadFusion...):
+-
+-- Os .pk3 do motor (uzdoom.pk3, game_support.pk3, brightmaps.pk3,
+-  lights.pk3, game_widescreen_gfx.pk3) são exatamente os do UZDoom 5.0.3
+-  oficial. Saiu o gancho "NXFxSkip" que existia no uzdoom.pk3.
+-- Saiu do motor o "nx_fx_thin" (apagava efeitos do Brutality pelo nome
+-  da classe). O jogo não remove nem troca mais nada de nenhum mod.
+-- O launcher não procura mais "brutal"/"pb" no nome dos mods: nenhum mod
+-  recebe opções próprias (antes o Brutal Doom também era tratado como
+-  Project Brutality). Saiu a opção "Efeitos de tiro (Brutality)" e os
+-  ajustes automáticos de perfil quando o PB era adicionado.
+-- Continua tudo o que é do Switch: cache de leitura do cartão SD,
+-  imagens e sons preparados em segundo plano, shaders pré-preparados,
+-  tela de carregamento, 30 FPS travado, uso dos núcleos, perf.log,
+-  crash.log/hang.log. Nenhuma opção mexe em clock.
+-
+-Se você jogou o Brutality com as versões nx3.x: o launcher antigo gravou
+-as opções leves do PB (pb_*, nashgore_*) no seu uzdoom.ini. Elas ficam
+-salvas lá. Para voltar ao padrão do PB, use o menu de opções do próprio
+-PB (restaurar padrões) ou apague sd:/switch/gzdoom/uzdoom.ini (perde as
+-outras configurações do motor, como controles).
+-
+-
+-Instalação (por cima de uma versão anterior)
+---------------------------------------------
+-Copie a pasta "switch" deste pacote para a raiz do cartão SD e aceite
+-substituir os arquivos:
+-    sd:/switch/gzdoom_launcher.nro       <- abra ESTE no Homebrew Menu
+-    sd:/switch/gzdoom/gzdoom.nro         <- o motor
+-    sd:/switch/gzdoom/*.pk3              <- recursos do motor (originais)
+-Ela NÃO mexe no seu uzdoom.ini, shadervariants.txt, launcher.ini, nem
+-em iwads/, pwads/ e save/.
+-
+-Instalação do zero
+-------------------
+-Copie a pasta "switch" e depois também a pasta
+-"so-para-instalacao-do-zero/switch" (uzdoom.ini padrão e a lista
+-inicial de shaders). Coloque os IWADs em sd:/switch/gzdoom/iwads/ e os
+-mods em sd:/switch/gzdoom/pwads/.
+-
+-
+-Launcher
+---------
+-Abra o Homebrew Menu em MODO TÍTULO (segure R ao abrir qualquer jogo).
+-Pelo Álbum só há ~400 MB de RAM, pouco para mods grandes.
+-
+-  L / R            troca de aba (JOGOS, MODS, OPÇÕES)
+-  +                joga com o perfil selecionado (de qualquer aba)
+-  B                volta / sai
+-
+-JOGOS
+-  cima/baixo       escolhe o perfil
+-  A                jogar
+-  Y                novo perfil (nome + jogo base; pode copiar os mods
+-                   do perfil selecionado)
+-  -                duplica o perfil selecionado
+-  X                exclui (só perfis criados por você)
+-  Cada jogo em iwads/ (doom2.wad, doom_fusion.ipk3...) já tem um perfil
+-  próprio, que também guarda mods e opções.
+-
+-MODS  (duas listas: ORDEM DE CARREGAMENTO | DISPONÍVEIS em pwads/)
+-  esquerda/direita troca de lista
+-  A (Disponíveis)  adiciona o mod ao fim da ordem
+-  A (Ordem)        "pega" o mod: mova com cima/baixo e aperte A para
+-                   soltar (B cancela)
+-  ZL / ZR          sobe / desce o mod direto, sem pegar
+-  X                remove o mod da ordem (o arquivo não é apagado)
+-  Tudo é salvo na hora em sd:/switch/gzdoom/launcher.ini.
+-
+-  Ordem: siga a do autor do mod. Em geral mapas primeiro e o mod de
+-  gameplay por último (ex.: Lexicon + Brutal Doom = arquivos do Lexicon
+-  e depois o Brutal Doom). Samsara e Trailblazer são mods de gameplay.
+-
+-OPÇÕES (do perfil selecionado)
+-  Desempenho, Resolução de renderização (100% a 60%), Limite de FPS,
+-  Driver de vídeo em outro núcleo (experimental), Mostrar FPS,
+-  Tela de carregamento, Dificuldade, Monstros, Mapa inicial, Classe,
+-  Carregar save, Gravar log, Argumentos extras, Renomear perfil,
+-  Trocar jogo base.
+-
+-  Desempenho (só opções do motor, iguais para todos os mods):
+-    Qualidade     - tudo ligado, como no PC.
+-    Equilibrado   - luzes dinâmicas leves (até 6 por superfície, as 16
+-                    mais próximas), menos partículas e decalques, filtro
+-                    anisotrópico 4x, efeitos muito distantes cortados.
+-    Switch (leve) - sem luzes dinâmicas, efeitos mínimos; efeitos e
+-                    decorações distantes (fora monstros, projéteis,
+-                    itens e o que pode ser atingido) não são desenhados.
+-  Mods pesados (Brutality, Brutal Doom) ficam mais fluidos em
+-  "Switch (leve)" + Limite de FPS 30. As opções de efeitos do próprio
+-  mod (sangue, cápsulas etc.) ficam no menu do mod, dentro do jogo.
+-
+-  Limite de FPS: 30 (travado, VSync a cada 2 atualizações), 35, 40 ou
+-  sem limite (VSync 60 Hz). Para o jogo mais estável: 30 FPS travado.
+-
+-  Estabilizar FPS: Automático (padrão) / Desligado. Mira no limite de
+-  FPS (30 quando não há limite). Não mexe em clock nem na resolução.
+-
+-
+-Sobre o tempo de carregamento
+------------------------------
+-- A primeira abertura de um conjunto de mods é a mais lenta e a tela
+-  mostra "medindo o tempo". Nas seguintes aparece o tempo restante.
+-- Com mods grandes, a etapa mais longa é "Compilando scripts do mod":
+-  é o motor compilando o ZScript do mod - trabalho de CPU que não dá
+-  para pular.
+-- Depois da tela de carregamento aparece a tela de início do UZDoom
+-  enquanto os shaders salvos são preparados; em seguida vem o menu.
+-
+-
+-Ajustes avançados (em OPÇÕES > "Argumentos extras" do perfil)
+--------------------------------------------------------------
+-  gles_async_textures 0/1     preparar imagens em segundo plano (1)
+-  snd_asyncload 0/1           preparar sons em segundo plano (1)
+-  nx_workers 1-2              threads de preparo em segundo plano (1)
+-  gles_async_prefetch_mb N    memória para imagens pré-carregadas (192)
+-  gles_async_preupload_ms N   tempo por quadro enviando imagens prontas
+-                              para a GPU antes de serem usadas (1.5)
+-  nx_perflog 0/1              gravar perf.log (1)
+-  nx_dynlight_max N           máximo de luzes dinâmicas por quadro (0 = sem limite)
+-  nx_dynlight_dist N          distância máxima das luzes dinâmicas (0 = sem limite)
+-  nx_stabilizer N             FPS alvo do estabilizador (0 = desligado)
+-  Ex. em "Argumentos extras":  +set nx_perflog 0
+-
+-
+-Problemas
+----------
+-- Erro fatal: a mensagem aparece na tela e fica em sd:/switch/gzdoom/error.log
+-- Fechou ("o software foi fechado..."): o motivo fica em
+-  sd:/switch/gzdoom/crash.log e em sd:/atmosphere/crash_reports/.
+-- Lento em alguma cena: sd:/switch/gzdoom/perf.log (logo depois de jogar,
+-  antes de abrir de novo - ele é refeito a cada abertura).
+-- Tela preta/travou logo depois da tela de carregamento: desligue
+-  "Tela de carregamento" em OPÇÕES.
+-- Congelou com "Driver de vídeo em outro núcleo" ligado: desligue a
+-  opção (o hang.log em sd:/switch/gzdoom/ diz onde travou).
+-- Para zerar os shaders guardados: apague sd:/switch/gzdoom/shadervariants.txt
+-  (ele se refaz sozinho). loadtimes.txt guarda só os tempos de abertura.
+-
+-
+-Créditos
+---------
+-Port para Switch, launcher, tela de carregamento e otimizações:
+-Renan  -  Telegram @aeon1911
+-
+-Baseado em: UZDoom/GZDoom/ZDoom teams (GPLv3), fgsfds (port de Switch e
+-launcher original), Thorhax (GZDoom-NX-2026), NaGa e danfromtico
+-(Mesa NVK / Vulkan no Horizon), devkitPro (devkitA64, libnx).
+-Fontes Bebas Neue e Poppins: SIL Open Font License (dentro do launcher).
+-Código-fonte (GPLv3): repositório do projeto no GitHub.
+diff --git a/nx/build/README.md b/nx/build/README.md
+deleted file mode 100644
+index 3982da5fb..000000000
+--- a/nx/build/README.md
++++ /dev/null
+@@ -1,50 +0,0 @@
+-# Compilando o port para Switch
+-
+-## Com o devkitPro instalado (o normal)
+-
+-Pacotes do devkitPro (`dkp-pacman -S ...`):
+-
+-```
+-switch-dev switch-mesa switch-libdrm_nouveau switch-sdl2 switch-openal-soft
+-switch-libvpx switch-libogg switch-libvorbis switch-libopus switch-flac
+-switch-mpg123 switch-zlib switch-pkg-config switch-cmake
+-```
+-
+-O libsndfile não existe nos pacotes do devkitPro:
+-
+-```
+-git clone --depth 1 --branch 1.2.2 https://github.com/libsndfile/libsndfile.git
+-nx/build/build-libsndfile.sh libsndfile
+-```
+-
+-No PC também é preciso `cmake`, `ninja`, `python3` e um compilador C/C++ (para as
+-ferramentas zipdir/re2c/lemon usadas durante a compilação). Depois:
+-
+-```
+-nx/build/build-switch.sh
+-```
+-
+-O pacote para o cartão SD sai em `build/package/` (`switch/` + `so-para-instalacao-do-zero/` + `LEIA-ME.txt`).
+-
+-## Sem acesso aos servidores do devkitPro
+-
+-`nx/build/toolchain-from-source/` monta tudo a partir do GitHub (é assim que as
+-builds deste repositório foram feitas): devkitA64 (GCC 16.1.0, binutils 2.46,
+-newlib do devkitPro), libnx 4.12.0, switch-tools e os portlibs com as receitas e
+-patches do `devkitPro/pacman-packages`.
+-
+-```
+-cd nx/build/toolchain-from-source
+-./fetch-sources.sh          # clona tudo em ./src e aplica os patches
+-./build-toolchain.sh        # instala em /opt/devkitpro
+-./build-portlibs.sh         # libnx, mesa, SDL2, OpenAL, codecs, zlib, libsndfile...
+-cd ../../.. && nx/build/build-switch.sh
+-```
+-
+-## Checagem obrigatória
+-
+-A libnx nunca configura o registrador de thread pointer (`tpidr_el0`): todo código
+-tem que ser compilado com `-mtp=soft`. O `build-switch.sh` falha se o executável
+-usar `tpidr_el0`. Nunca passe `-DCMAKE_C_FLAGS=`/`-DCMAKE_CXX_FLAGS=` para projetos
+-do Switch: isso apaga as flags do toolchain; flags extras vão por `CFLAGS`/`CXXFLAGS`
+-de ambiente.
+diff --git a/nx/build/build-libsndfile.sh b/nx/build/build-libsndfile.sh
+deleted file mode 100755
+index 09414d358..000000000
+--- a/nx/build/build-libsndfile.sh
++++ /dev/null
+@@ -1,20 +0,0 @@
+-#!/bin/bash
+-# libsndfile is not packaged by devkitPro: build it into the switch portlibs.
+-# Needs switch-libogg, switch-libvorbis, switch-libopus and switch-flac.
+-#   build-libsndfile.sh <libsndfile 1.2.2 source dir>
+-set -e
+-SRC=$1
+-export DEVKITPRO=${DEVKITPRO:-/opt/devkitpro}
+-source "$DEVKITPRO/switchvars.sh"
+-# extra flags go through the environment: -DCMAKE_C_FLAGS=... would replace
+-# the toolchain's (-mtp=soft etc.) and produce a crashing binary
+-unset CFLAGS CXXFLAGS CPPFLAGS LDFLAGS
+-cmake -S "$SRC" -B "$SRC/build-nx" -G "Unix Makefiles" \
+-	-DCMAKE_TOOLCHAIN_FILE="$DEVKITPRO/cmake/Switch.cmake" \
+-	-DCMAKE_INSTALL_PREFIX="$PORTLIBS_PREFIX" -DBUILD_SHARED_LIBS=OFF \
+-	-DBUILD_PROGRAMS=OFF -DBUILD_EXAMPLES=OFF -DBUILD_TESTING=OFF -DENABLE_CPACK=OFF \
+-	-DENABLE_EXTERNAL_LIBS=ON -DENABLE_MPEG=OFF -DINSTALL_MANPAGES=OFF -DBUILD_REGTEST=OFF
+-make -C "$SRC/build-nx" -j"$(nproc)"
+-make -C "$SRC/build-nx" install
+-# ZMusic's CMake on the Switch expects an (empty) libdl
+-[ -f "$PORTLIBS_PREFIX/lib/libdl.a" ] || aarch64-none-elf-ar rcs "$PORTLIBS_PREFIX/lib/libdl.a"
+diff --git a/nx/build/build-switch.sh b/nx/build/build-switch.sh
+deleted file mode 100755
+index ac3ec2f52..000000000
+--- a/nx/build/build-switch.sh
++++ /dev/null
+@@ -1,46 +0,0 @@
+-#!/bin/bash
+-# Builds the Switch port: gzdoom.nro (engine), gzdoom_launcher.nro and the
+-# engine .pk3 files, then assembles the SD card package.
+-#
+-# Needs a devkitPro install (devkitA64 + libnx + the switch portlibs listed in
+-# nx/build/README.md) and, on the host, cmake, ninja and a C/C++ compiler.
+-#
+-#   nx/build/build-switch.sh            # build + package into build/package
+-#   JOBS=4 nx/build/build-switch.sh
+-set -e
+-ROOT=$(cd "$(dirname "$0")/../.." && pwd)
+-OUT=${OUT:-$ROOT/build}
+-JOBS=${JOBS:-$(nproc)}
+-export DEVKITPRO=${DEVKITPRO:-/opt/devkitpro}
+-export PORTLIBS_PREFIX=$DEVKITPRO/portlibs/switch
+-export PATH=$DEVKITPRO/tools/bin:$DEVKITPRO/devkitA64/bin:$PORTLIBS_PREFIX/bin:$PATH
+-
+-# 1. host tools (zipdir, re2c, lemon) used while building
+-if [ ! -f "$OUT/native/ImportExecutables.cmake" ]; then
+-	cmake -S "$ROOT" -B "$OUT/native" -G Ninja -DCMAKE_BUILD_TYPE=Release
+-fi
+-ninja -C "$OUT/native" -j"$JOBS" zipdir re2c lemon
+-
+-# 2. the Switch build
+-if [ ! -f "$OUT/nx/build.ninja" ]; then
+-	cmake -S "$ROOT" -B "$OUT/nx" -G Ninja \
+-		-DCMAKE_TOOLCHAIN_FILE="$DEVKITPRO/cmake/Switch.cmake" \
+-		-DCMAKE_BUILD_TYPE=Release \
+-		-DNINTENDO_SWITCH=ON \
+-		-DDYN_OPENAL=OFF -DDYN_SNDFILE=OFF -DDYN_MPG123=OFF \
+-		-DIMPORT_EXECUTABLES="$OUT/native/ImportExecutables.cmake" \
+-		-DSNDFILE_INCLUDE_DIR="$PORTLIBS_PREFIX/include" \
+-		-DSNDFILE_LIBRARY="$PORTLIBS_PREFIX/lib/libsndfile.a"
+-fi
+-ninja -C "$OUT/nx" -j"$JOBS"
+-
+-# 3. sanity check: libnx never sets up the hardware thread pointer, so no code
+-#    may use TLS through tpidr_el0 (everything must be built with -mtp=soft)
+-for elf in "$OUT/nx/uzdoom.elf" "$OUT/nx/tools/nxlauncher/gzdoom_launcher.elf"; do
+-	[ -f "$elf" ] || continue
+-	n=$(aarch64-none-elf-objdump -d "$elf" | grep -c tpidr_el0 || true)
+-	if [ "$n" != "0" ]; then echo "ERROR: $elf uses tpidr_el0 ($n times)"; exit 1; fi
+-done
+-
+-# 4. SD card package
+-"$ROOT/nx/build/package.sh" "$OUT/nx" "$OUT/package"
+diff --git a/nx/build/package.sh b/nx/build/package.sh
+deleted file mode 100755
+index 2977ec2a7..000000000
+--- a/nx/build/package.sh
++++ /dev/null
+@@ -1,14 +0,0 @@
+-#!/bin/bash
+-# Assembles the SD card layout from a finished Switch build directory.
+-#   package.sh <build dir> <output dir>
+-set -e
+-ROOT=$(cd "$(dirname "$0")/../.." && pwd)
+-B=$1; P=$2
+-rm -rf "$P"
+-mkdir -p "$P/switch/gzdoom/temp" "$P/so-para-instalacao-do-zero/switch/gzdoom"
+-cp "$B/gzdoom_launcher.nro" "$P/switch/"
+-cp "$B/gzdoom.nro" "$B"/*.pk3 "$P/switch/gzdoom/"
+-cp -r "$B/soundfonts" "$B/fm_banks" "$P/switch/gzdoom/"
+-cp "$ROOT/nx/uzdoom.ini" "$ROOT/nx/shadervariants.txt" "$P/so-para-instalacao-do-zero/switch/gzdoom/"
+-cp "$ROOT/nx/LEIA-ME.txt" "$P/"
+-echo "package: $P"
+diff --git a/nx/build/toolchain-from-source/build-portlibs.sh b/nx/build/toolchain-from-source/build-portlibs.sh
+deleted file mode 100755
+index c153b1acf..000000000
+--- a/nx/build/toolchain-from-source/build-portlibs.sh
++++ /dev/null
+@@ -1,102 +0,0 @@
+-#!/bin/bash
+-# libnx + the Switch portlibs used by this port, built from GitHub sources with
+-# the devkitPro pacman-packages recipes/patches (run fetch-sources.sh first).
+-# Also needs the host tools/cmake files installed by build-toolchain.sh.
+-#   build-portlibs.sh [libnx drm mesa sdl2 openal ogg vorbis opus flac mpg123 sndfile vpx zlib]
+-set -e
+-set -o pipefail
+-export DEVKITPRO=/opt/devkitpro
+-export PATH=$DEVKITPRO/tools/bin:$DEVKITPRO/devkitA64/bin:$DEVKITPRO/portlibs/switch/bin:$PATH
+-SRC=${SRC:-$PWD/src}
+-PK=$SRC/pacman-packages/switch
+-J=${J:-3}
+-stamp() { echo "=== $(date +%T) $*"; }
+-only="$*"
+-want() { [ -z "$only" ] || [[ " $only " == *" $1 "* ]]; }
+-sv() { source $DEVKITPRO/devkita64.sh; source $DEVKITPRO/switchvars.sh; }
+-
+-if want libnx; then stamp libnx
+-  cd $SRC/libnx/nx && make -j$J && make install
+-fi
+-if want drm; then stamp libdrm_nouveau
+-  cd $SRC/libdrm_nouveau && make -j$J && make install
+-fi
+-if want mesa; then stamp mesa
+-  cd $SRC/mesa-20.1.0-rc3
+-  if [ ! -f .patched ]; then
+-    patch -p1 -i $PK/mesa/switch-mesa-20.1.0-5.patch
+-    patch -p1 -i $PK/mesa/gl_XML.py.patch
+-    patch -p1 -i $PK/mesa/glX_XML.py.patch
+-    touch .patched
+-  fi
+-  rm -rf build
+-  ( sv; $DEVKITPRO/meson-cross.sh switch ../crossfile.txt build -Db_ndebug=true )
+-  ninja -C build -j$J || exit 1
+-  ninja -C build install || exit 1
+-  sed -i "s,-lEGL ,-lEGL -ldrm_nouveau ," $DEVKITPRO/portlibs/switch/lib/pkgconfig/egl.pc || true
+-  install -Dm644 $PK/mesa/OpenGLConfig.cmake $DEVKITPRO/portlibs/switch/lib/cmake/OpenGL/OpenGLConfig.cmake
+-fi
+-if want sdl2; then stamp SDL2
+-  cd $SRC/SDL2-2.28.5
+-  [ -f .patched ] || { patch -p1 -i $PK/SDL2/SDL2-2.28.5.patch; touch .patched; }
+-  ( sv; ./configure --prefix="${PORTLIBS_PREFIX}" --host=aarch64-none-elf --disable-shared --enable-static \
+-    --enable-audio --enable-joystick --disable-power --disable-filesystem --enable-cpuinfo --enable-pthreads \
+-    --enable-timers --enable-video && make -j$J && make install ) || exit 1
+-fi
+-if want openal; then stamp openal-soft
+-  cd $SRC/openal-soft-1.21.1
+-  [ -f .patched ] || { patch -Np1 -i $PK/openal-soft/avoid-readlink.patch; sed -i 's#SDL2/##' alc/backends/sdl2.cpp; touch .patched; }
+-  rm -rf build-nx && mkdir build-nx && cd build-nx
+-  ( sv; unset CFLAGS CXXFLAGS CPPFLAGS LDFLAGS; aarch64-none-elf-cmake -G"Unix Makefiles" -DUSE_SWITCH=ON -DALSOFT_UTILS=OFF -DLIBTYPE=STATIC \
+-    -DALSOFT_EXAMPLES=OFF -DALSOFT_REQUIRE_SDL2=ON -DALSOFT_BACKEND_SDL2=ON -DSDL2_INCLUDE_DIR="${PORTLIBS_PREFIX}/include" \
+-    -DCMAKE_INSTALL_PREFIX="${PORTLIBS_PREFIX}" .. && make -j$J && make install ) || exit 1
+-fi
+-if want ogg; then stamp libogg
+-  cd $SRC/libogg-1.3.4 && [ -f configure ] || ./autogen.sh
+-  ( sv; ./configure --prefix="${PORTLIBS_PREFIX}" --host=aarch64-none-elf --disable-shared --enable-static && make -j$J && make install ) || exit 1
+-fi
+-if want vorbis; then stamp libvorbis
+-  cd $SRC/libvorbis-1.3.7 && [ -f configure ] || ./autogen.sh
+-  ( sv; ./configure --prefix="${PORTLIBS_PREFIX}" --host=aarch64-none-elf --disable-shared --enable-static --disable-examples --disable-docs && make -j$J && make install ) || exit 1
+-fi
+-if want opus; then stamp opus
+-  cd $SRC/opus-1.3 && [ -f configure ] || ./autogen.sh
+-  ( sv; ./configure --prefix="${PORTLIBS_PREFIX}" --host=aarch64-none-elf --disable-shared --enable-static --disable-doc --disable-extra-programs && make -j$J && make install ) || exit 1
+-fi
+-if want flac; then stamp flac
+-  cd $SRC/flac-1.3.2
+-  # only the compat.h part applies to the git tree (the rest patches generated Makefile.in files)
+-  [ -f .patched ] || { patch -Np1 -i $PK/flac/flac-1.3.2.patch || true; touch .patched; }
+-  [ -f configure ] || ./autogen.sh
+-  ( sv; CFLAGS="${CFLAGS} -D__SWITCH__ " ./configure --prefix="${PORTLIBS_PREFIX}" --host=aarch64-none-elf \
+-    --disable-shared --enable-static --disable-xmms-plugin --enable-cpplibs --disable-sse --disable-doxygen-docs \
+-    && make -C src/libFLAC -j$J && make -C src/libFLAC install && make -C include install )
+-  install -Dm644 $SRC/flac-1.3.2/src/libFLAC/flac.pc $DEVKITPRO/portlibs/switch/lib/pkgconfig/flac.pc || true
+-fi
+-if want mpg123; then stamp mpg123
+-  cd $SRC/mpg123-1.31.3
+-  [ -f .patched ] || { patch -Np1 -i $PK/mpg123/mpg123-1.31.3.patch || true; touch .patched; }
+-  autoreconf -fi
+-  ( sv; export CFLAGS="${CFLAGS} -Wno-error=incompatible-pointer-types"; LIBS="-lnx -lm" ./configure --prefix="${PORTLIBS_PREFIX}" --host=aarch64-none-elf --disable-shared --enable-static \
+-    --enable-fifo=no --enable-ipv6=no --enable-network=no --enable-int-quality=no --with-cpu=generic \
+-    --with-default-audio=dummy --disable-components --enable-libmpg123 && make -j$J && make install ) || exit 1
+-fi
+-if want sndfile; then stamp libsndfile
+-  cd $SRC/libsndfile-1.2.2 && rm -rf build-nx && mkdir build-nx && cd build-nx
+-  ( sv; unset CFLAGS CXXFLAGS CPPFLAGS LDFLAGS; aarch64-none-elf-cmake -G"Unix Makefiles" -DCMAKE_INSTALL_PREFIX="${PORTLIBS_PREFIX}" \
+-    -DBUILD_SHARED_LIBS=OFF -DBUILD_PROGRAMS=OFF -DBUILD_EXAMPLES=OFF -DBUILD_TESTING=OFF -DENABLE_CPACK=OFF \
+-    -DENABLE_EXTERNAL_LIBS=ON -DENABLE_MPEG=OFF -DINSTALL_MANPAGES=OFF -DBUILD_REGTEST=OFF .. && make -j$J && make install ) || exit 1
+-fi
+-if want vpx; then stamp libvpx
+-  cd $SRC/libvpx-1.8.0
+-  [ -f .patched ] || { patch -p1 -i $PK/libvpx/libvpx.patch; touch .patched; }
+-  ( sv; CROSS=aarch64-none-elf- ./configure --prefix="${PORTLIBS_PREFIX}" --target=generic-gnu --disable-examples \
+-    --disable-tools --disable-docs --disable-unit-tests --disable-shared --enable-static && make -j$J && make install ) || exit 1
+-fi
+-if want zlib; then stamp zlib
+-  cd $SRC/zlib-1.3.1
+-  ( sv; CHOST=aarch64-none-elf ./configure --prefix="${PORTLIBS_PREFIX}" --static && make -j$J libz.a && make install ) || exit 1
+-fi
+-# ZMusic's CMake on the Switch expects an (empty) libdl
+-[ -f $DEVKITPRO/portlibs/switch/lib/libdl.a ] || aarch64-none-elf-ar rcs $DEVKITPRO/portlibs/switch/lib/libdl.a
+-stamp DONE
+diff --git a/nx/build/toolchain-from-source/build-toolchain.sh b/nx/build/toolchain-from-source/build-toolchain.sh
+deleted file mode 100755
+index a8220b982..000000000
+--- a/nx/build/toolchain-from-source/build-toolchain.sh
++++ /dev/null
+@@ -1,73 +0,0 @@
+-#!/bin/bash
+-# devkitA64 (GCC 16.1.0 / binutils 2.46 / newlib devkitPro) built from GitHub
+-# sources, plus the devkitPro host tools and CMake/meson/pkg-config helpers.
+-# Run fetch-sources.sh first. Installs to /opt/devkitpro (must be writable).
+-# Only needed where devkitPro's own packages can't be installed.
+-set -e
+-export prefix=/opt/devkitpro/devkitA64
+-export target=aarch64-none-elf
+-export PATH=$prefix/bin:$PATH
+-SRC=${SRC:-$PWD/src}
+-B=${B:-$PWD/build}
+-J=${J:-3}
+-mkdir -p $B/binutils $B/gcc $B/newlib
+-stamp() { echo "=== $(date +%T) $*"; }
+-
+-stamp binutils
+-cd $B/binutils
+-[ -f .done ] || { $SRC/binutils-2.46.0/configure --prefix=$prefix --target=$target --disable-nls --disable-werror \
+-  --disable-shared --disable-debug --enable-lto --enable-plugins --enable-poison-system-directories \
+-  --disable-gdb --disable-gdbserver --disable-sim --disable-readline --disable-libdecnumber --disable-gprofng \
+-  && make -j$J MAKEINFO=true && make install MAKEINFO=true && touch .done; }
+-
+-stamp gcc-stage1
+-cd $B/gcc
+-[ -f .stage1 ] || { CFLAGS_FOR_TARGET="-O2 -ffunction-sections -fdata-sections" \
+-  CXXFLAGS_FOR_TARGET="-O2 -ffunction-sections -fdata-sections" LDFLAGS_FOR_TARGET="" \
+-  $SRC/gcc-16.1.0/configure --target=$target --prefix=$prefix --enable-languages=c,c++,lto \
+-  --with-gnu-as --with-gnu-ld --with-gcc --enable-cxx-flags='-ffunction-sections' --disable-libstdcxx-verbose \
+-  --enable-poison-system-directories --enable-threads=posix --disable-win32-registry --disable-nls --disable-debug \
+-  --disable-libmudflap --disable-libssp --disable-libgomp --disable-libstdcxx-pch --enable-libstdcxx-time=yes \
+-  --enable-libstdcxx-filesystem-ts --with-newlib=yes --with-native-system-header-dir=/include \
+-  --with-sysroot=$prefix/$target --enable-lto --disable-tm-clone-registry --disable-__cxa_atexit \
+-  --with-bugurl="https://devkitpro.org" --with-march=armv8 --enable-multilib --with-pkgversion="devkitA64" \
+-  --disable-bootstrap \
+-  && make -j$J all-gcc MAKEINFO=true && make install-gcc MAKEINFO=true && touch .stage1; }
+-
+-stamp newlib
+-cd $B/newlib
+-[ -f .done ] || { unset CFLAGS CC CXX; CFLAGS_FOR_TARGET="-O2 -ffunction-sections -fdata-sections" \
+-  $SRC/newlib-dkp/configure --disable-newlib-supplied-syscalls --enable-newlib-mb --disable-newlib-wide-orient \
+-  --enable-newlib-register-fini --target=$target --prefix=$prefix \
+-  && make -j$J MAKEINFO=true && make install -j1 MAKEINFO=true && touch .done; }
+-
+-stamp gcc-stage2
+-cd $B/gcc
+-[ -f .stage2 ] || { make -j$J MAKEINFO=true && make install-strip MAKEINFO=true && touch .stage2; }
+-
+-# stage1 generated limits.h without the newlib syslimits chain (no PATH_MAX): regenerate it
+-GI=$prefix/lib/gcc/$target/16.1.0/include
+-cat $SRC/gcc-16.1.0/gcc/limitx.h $SRC/gcc-16.1.0/gcc/glimits.h $SRC/gcc-16.1.0/gcc/limity.h > $GI/limits.h
+-
+-stamp rules
+-cd $SRC/devkita64-rules-1.1.1 && make install DEVKITPRO=/opt/devkitpro || cp -v *rules* /opt/devkitpro/devkitA64/ 
+-stamp host-tools
+-for t in switch-tools general-tools; do
+-  (cd $SRC/$t && ./autogen.sh && ./configure --prefix=/opt/devkitpro/tools && make -j$J && make install)
+-done
+-
+-stamp cmake-meson-pkgconfig
+-D=/opt/devkitpro; PP=$SRC/pacman-packages
+-mkdir -p $D/cmake/Platform $D/portlibs/switch/bin $D/portlibs/switch/lib
+-cp $PP/cmake/common-utils/dkp-*.cmake $D/cmake/
+-cp $PP/cmake/common-utils/Generic-dkP.cmake $D/cmake/Platform/
+-cp $PP/cmake/devkita64/aarch64-none-elf-cmake $D/devkitA64/bin/
+-cp $PP/cmake/devkita64/devkitA64.cmake $PP/cmake/switch/Switch.cmake $D/cmake/
+-cp $PP/cmake/switch/NintendoSwitch.cmake $D/cmake/Platform/
+-cp $PP/cmake/switch/aarch64-none-elf-cmake $D/portlibs/switch/bin/
+-install -m755 $PP/dkp-meson-scripts/meson-cross.sh $PP/dkp-meson-scripts/meson-toolchain.sh $D/
+-install -m644 $PP/dkp-toolchain-vars/devkita64.sh $PP/dkp-toolchain-vars/switchvars.sh $D/
+-install -m755 $PP/dkp-toolchain-vars/portlibs_prefix.sh $D/
+-install -m755 $PP/switch/pkg-config/pkg-config.in $D/portlibs/switch/bin/aarch64-none-elf-pkg-config
+-chmod +x $D/devkitA64/bin/aarch64-none-elf-cmake $D/portlibs/switch/bin/aarch64-none-elf-cmake
+-stamp DONE
+diff --git a/nx/build/toolchain-from-source/fetch-sources.sh b/nx/build/toolchain-from-source/fetch-sources.sh
+deleted file mode 100755
+index d7c99a382..000000000
+--- a/nx/build/toolchain-from-source/fetch-sources.sh
++++ /dev/null
+@@ -1,43 +0,0 @@
+-#!/bin/bash
+-# Fetches everything needed to build devkitA64 + libnx + the switch portlibs
+-# from GitHub (for machines where the devkitPro package servers can't be
+-# reached). Normal setups should just install devkitPro with its pacman.
+-#   fetch-sources.sh [src dir]
+-set -e
+-SRC=${1:-$PWD/src}
+-mkdir -p "$SRC" && cd "$SRC"
+-c() { [ -d "$3" ] || git clone -q --depth 1 --branch "$2" "https://github.com/$1.git" "$3"; }
+-c devkitPro/buildscripts master buildscripts
+-c devkitPro/pacman-packages master pacman-packages
+-c gnutools/binutils-gdb binutils-2_46 binutils-2.46.0
+-c gcc-mirror/gcc releases/gcc-16.1.0 gcc-16.1.0
+-c devkitPro/newlib devkitPro newlib-dkp
+-c devkitPro/devkita64-rules v1.1.1 devkita64-rules-1.1.1
+-c switchbrew/libnx v4.12.0 libnx
+-c switchbrew/switch-tools v1.13.1 switch-tools
+-c devkitPro/general-tools v1.4.4 general-tools
+-c devkitPro/libdrm_nouveau v1.0.1 libdrm_nouveau
+-c chaotic-cx/mesa-mirror mesa-20.1.0-rc3 mesa-20.1.0-rc3
+-c libsdl-org/SDL release-2.28.5 SDL2-2.28.5
+-c kcat/openal-soft 1.21.1 openal-soft-1.21.1
+-c webmproject/libvpx v1.8.0 libvpx-1.8.0
+-c xiph/ogg v1.3.4 libogg-1.3.4
+-c xiph/vorbis v1.3.7 libvorbis-1.3.7
+-c xiph/opus v1.3 opus-1.3
+-c xiph/flac 1.3.2 flac-1.3.2
+-c libsndfile/libsndfile 1.2.2 libsndfile-1.2.2
+-c libsdl-org/mpg123 v1.31.3-SDL mpg123-1.31.3
+-c madler/zlib v1.3.1 zlib-1.3.1
+-
+-P=buildscripts/patches
+-[ -f binutils-2.46.0/.patched ] || { (cd binutils-2.46.0 && patch -p1 -s < ../$P/binutils-2.46.0-1.patch && touch .patched); }
+-[ -f gcc-16.1.0/.patched ] || { (cd gcc-16.1.0 && patch -p1 -s < ../$P/gcc-16.1.0-1.patch && touch .patched); }
+-# (the devkitPro branch of newlib already contains newlib-4.6.0.20260123-4.patch)
+-
+-# fixes needed with GCC 16 / current newlib:
+-# - newlib now declares timespec_get(): mesa's C11 fallback must use another name
+-grep -q mesa_timespec_get mesa-20.1.0-rc3/include/c11/threads.h || \
+-	sed -i 's|^#include <sys/time.h>$|#include <sys/time.h>\n#define timespec_get mesa_timespec_get|' mesa-20.1.0-rc3/include/c11/threads.h
+-# - openal-soft 1.21.1 has a typo in a template that GCC 16 no longer ignores
+-sed -i 's/const T& operator\*() const& { return this->mValue; }/const T\& operator*() const\& { return mStore.mValue; }/' openal-soft-1.21.1/common/aloptional.h
+-echo "sources ready in $SRC"
+diff --git a/nx/gzdoom-4.5-reference.ini b/nx/gzdoom-4.5-reference.ini
+deleted file mode 100644
+index 258fbeb9f..000000000
+--- a/nx/gzdoom-4.5-reference.ini
++++ /dev/null
+@@ -1,794 +0,0 @@
+-# This file was generated by GZDoom g4.5pre-622-g72c1f23880 on 2021-05-09 16:23:45
+-# These are the directories to automatically search for IWADs.
+-# Each directory should be on a separate line, preceded by Path=
+-[IWADSearch.Directories]
+-Path=.
+-Path=$DOOMWADDIR
+-Path=$PROGDIR/iwads
+-Path=$PROGDIR/pwads
+-
+-# These are the directories to search for wads added with the -file
+-# command line parameter, if they cannot be found with the path
+-# as-is. Layout is the same as for IWADSearch.Directories
+-[FileSearch.Directories]
+-Path=$PROGDIR/pwads
+-Path=$PROGDIR/iwads
+-Path=$DOOMWADDIR
+-
+-# These are the directories to search for soundfonts that let listed in the menu.
+-# Layout is the same as for IWADSearch.Directories
+-[SoundfontSearch.Directories]
+-Path=$PROGDIR/soundfonts
+-Path=$PROGDIR/fm_banks
+-
+-# Files to automatically execute when running the corresponding game.
+-# Each file should be on its own line, preceded by Path=
+-
+-[Doom.AutoExec]
+-Path=./autoexec.cfg
+-
+-[Heretic.AutoExec]
+-Path=./autoexec.cfg
+-
+-[Hexen.AutoExec]
+-Path=./autoexec.cfg
+-
+-[Strife.AutoExec]
+-Path=./autoexec.cfg
+-
+-[Chex.AutoExec]
+-Path=./autoexec.cfg
+-
+-# WAD files to always load. These are loaded after the IWAD but before
+-# any files added with -file. Place each file on its own line, preceded
+-# by Path=
+-[Global.Autoload]
+-
+-# Wad files to automatically load depending on the game and IWAD you are
+-# playing.  You may have have files that are loaded for all similar IWADs
+-# (the game) and files that are only loaded for particular IWADs. For example,
+-# any files listed under 'doom.Autoload' will be loaded for any version of Doom,
+-# but files listed under 'doom.doom2.Autoload' will only load when you are
+-# playing a Doom 2 based game (doom2.wad, tnt.wad or plutonia.wad), and files listed under
+-# 'doom.doom2.commercial.Autoload' only when playing doom2.wad.
+-
+-[doom.Autoload]
+-
+-[doom.id.Autoload]
+-
+-[doom.id.doom2.Autoload]
+-
+-[doom.id.doom2.commercial.Autoload]
+-
+-[doom.id.doom2.commercial.french.Autoload]
+-
+-[doom.id.doom2.commercial.xbox.Autoload]
+-
+-[doom.id.doom2.unity.Autoload]
+-
+-[doom.id.doom2.bfg.Autoload]
+-
+-[doom.id.doom2.plutonia.Autoload]
+-
+-[doom.id.doom2.plutonia.unity.Autoload]
+-
+-[doom.id.doom2.tnt.Autoload]
+-
+-[doom.id.doom2.tnt.unity.Autoload]
+-
+-[doom.id.doom1.Autoload]
+-
+-[doom.id.doom1.registered.Autoload]
+-
+-[doom.id.doom1.ultimate.Autoload]
+-
+-[doom.id.doom1.ultimate.xbox.Autoload]
+-
+-[doom.id.wadsmoosh.Autoload]
+-
+-[doom.id.doom1.unity.Autoload]
+-
+-[doom.id.doom1.bfg.Autoload]
+-
+-[doom.freedoom.Autoload]
+-
+-[doom.freedoom.demo.Autoload]
+-
+-[doom.freedoom.phase1.Autoload]
+-
+-[doom.freedoom.phase2.Autoload]
+-
+-[doom.freedoom.freedm.Autoload]
+-
+-[heretic.Autoload]
+-
+-[heretic.heretic.Autoload]
+-
+-[heretic.shadow.Autoload]
+-
+-[blasphemer.Autoload]
+-
+-[hexen.Autoload]
+-
+-[hexen.deathkings.Autoload]
+-
+-[hexen.hexen.Autoload]
+-
+-[strife.Autoload]
+-
+-[strife.strife.Autoload]
+-
+-[strife.veteran.Autoload]
+-
+-[chex.Autoload]
+-
+-[chex.chex1.Autoload]
+-
+-[chex.chex3.Autoload]
+-
+-[urbanbrawl.Autoload]
+-
+-[hacx.Autoload]
+-
+-[hacx.hacx1.Autoload]
+-
+-[hacx.hacx2.Autoload]
+-
+-[harmony.Autoload]
+-
+-[square.Autoload]
+-
+-[square.squareware.Autoload]
+-
+-[square.square.Autoload]
+-
+-[delaweare.Autoload]
+-
+-[woolball.Autoload]
+-
+-[woolball.rotwb.Autoload]
+-
+-[LastRun]
+-Version=222
+-
+-[GlobalSettings]
+-I_FriendlyWindowTitle=1
+-adl_chips_count=6
+-adl_emulator_id=0
+-adl_fullpan=true
+-adl_run_at_pcm_rate=false
+-adl_volume_model=0
+-autoloadbrightmaps=false
+-autoloadlights=false
+-autoloadwidescreen=true
+-autosavecount=4
+-autosavenum=0
+-chase_dist=90
+-chase_height=-8
+-cl_capfps=false
+-cl_defaultconfiguration=0
+-cl_noprediction=false
+-cl_oldfreelooklimit=false
+-cl_predict_lerpscale=0.05000000074505806
+-cl_predict_lerpthreshold=2
+-cl_predict_specials=true
+-cl_run=false
+-cl_waitforsave=true
+-con_buffersize=-1
+-con_ctrl_d=
+-con_notifylines=4
+-defaultiwad=DOOM 2: Hell on Earth
+-demo_compress=true
+-developer=0
+-disableautoload=false
+-disableautosave=0
+-enablescriptscreenshot=false
+-fluid_chorus=false
+-fluid_chorus_depth=8
+-fluid_chorus_level=1
+-fluid_chorus_speed=0.30000001192092896
+-fluid_chorus_type=0
+-fluid_chorus_voices=3
+-fluid_gain=0.5
+-fluid_interp=1
+-fluid_lib=
+-fluid_patchset=gzdoom
+-fluid_reverb=false
+-fluid_reverb_damping=0.23000000417232513
+-fluid_reverb_level=0.5699999928474426
+-fluid_reverb_roomsize=0.6100000143051147
+-fluid_reverb_width=0.7599999904632568
+-fluid_samplerate=0
+-fluid_threads=1
+-fluid_voices=128
+-freelook=true
+-gl_billboard_faces_camera=false
+-gl_billboard_mode=0
+-gl_billboard_particles=true
+-gl_cachenodes=true
+-gl_cachetime=0.6000000238418579
+-gl_debug=false
+-gl_debug_breakpoint=false
+-gl_debug_level=0
+-gl_distfog=70
+-gl_dither_bpc=0
+-gl_enhanced_nv_stealth=3
+-gl_es=false
+-gl_finishbeforeswap=false
+-gl_fxaa=0
+-gl_lens=false
+-gl_lens_chromatic=1.1200000047683716
+-gl_lens_k=-0.11999999731779099
+-gl_lens_kcube=0.10000000149011612
+-gl_light_particles=true
+-gl_light_shadowmap=false
+-gl_light_sprites=true
+-gl_lights=true
+-gl_mask_sprite_threshold=0.5
+-gl_mask_threshold=0.5
+-gl_mirror_envmap=true
+-gl_multisample=1
+-gl_multithread=true
+-gl_no_skyclear=false
+-gl_particles_style=2
+-gl_plane_reflection=true
+-gl_render_precise=false
+-gl_satformula=1
+-gl_seamless=false
+-gl_shadowmap_filter=1
+-gl_shadowmap_quality=512
+-gl_sort_textures=false
+-gl_sprite_blend=false
+-gl_ssao=0
+-gl_ssao_portals=1
+-gl_ssao_strength=0.699999988079071
+-gl_texture_filter=5
+-gl_texture_filter_anisotropic=1
+-gl_texture_hqresize_maxinputsize=512
+-gl_texture_hqresize_mt_height=4
+-gl_texture_hqresize_mt_width=16
+-gl_texture_hqresize_multithread=true
+-gl_texture_hqresize_targets=15
+-gl_texture_hqresizemode=0
+-gl_texture_hqresizemult=1
+-gl_usecolorblending=true
+-gme_stereodepth=0
+-gus_memsize=0
+-gus_patchdir=
+-i_soundinbackground=false
+-inter_subtitles=false
+-invertmouse=false
+-invertmousex=false
+-language=auto
+-longsavemessages=true
+-lookstrafe=false
+-m_blockcontrollers=false
+-m_cleanscale=false
+-m_filter=false
+-m_forward=1
+-m_pitch=1
+-m_sensitivity_x=4
+-m_sensitivity_y=2
+-m_show_backbutton=0
+-m_showinputgrid=0
+-m_side=2
+-m_simpleoptions=true
+-m_use_mouse=2
+-m_yaw=1
+-map_point_coordinates=true
+-midi_config=gzdoom
+-midi_dmxgus=false
+-midi_voices=32
+-mod_autochip=false
+-mod_autochip_scan_threshold=12
+-mod_autochip_size_force=100
+-mod_autochip_size_scan=500
+-mod_dumb_mastervolume=1
+-mod_interp=2
+-mod_samplerate=0
+-mod_volramp=2
+-mouse_capturemode=1
+-mus_calcgain=true
+-mus_enabled=true
+-mus_gainoffset=0
+-mus_usereplaygain=false
+-nointerscrollabort=false
+-nomonsterinterpolation=false
+-opl_core=0
+-opl_fullpan=true
+-opl_numchips=2
+-opn_chips_count=8
+-opn_emulator_id=0
+-opn_fullpan=true
+-opn_run_at_pcm_rate=false
+-os_isanyof=true
+-png_gamma=0
+-png_level=5
+-queryiwad=true
+-quicksavenum=-1
+-quicksaverotation=false
+-quicksaverotationcount=4
+-r_actorspriteshadow=1
+-r_actorspriteshadowdist=1500
+-r_blendmethod=false
+-r_dynlights=true
+-r_fakecontrast=1
+-r_fullbrightignoresectorcolor=true
+-r_fuzzscale=true
+-r_line_distance_cull=0
+-r_linearsky=false
+-r_magfilter=false
+-r_minfilter=true
+-r_mipmap=true
+-r_mirror_recursions=4
+-r_models=true
+-r_multithreaded=1
+-r_noaccel=false
+-r_quakeintensity=1
+-r_sprite_distance_cull=0
+-r_spriteadjust=2
+-r_ticstability=true
+-save_dir=
+-save_formatted=false
+-saveloadconfirmation=true
+-savestatistics=0
+-screenshot_dir=
+-screenshot_quiet=false
+-screenshot_type=png
+-show_messages=true
+-showendoom=0
+-snd_aldevice=Default
+-snd_alresampler=Default
+-snd_backend=openal
+-snd_buffersize=0
+-snd_channels=128
+-snd_efx=true
+-snd_hrtf=-1
+-snd_mastervolume=1
+-snd_mididevice=-5
+-snd_midiprecache=false
+-snd_musicvolume=0.5
+-snd_samplerate=0
+-snd_sfxvolume=1
+-snd_streambuffersize=64
+-snd_waterreverb=true
+-statfile=zdoomstat.txt
+-storesavepic=true
+-strictdecorate=false
+-telezoom=true
+-timidity_channel_pressure=false
+-timidity_chorus=0
+-timidity_config=gzdoom
+-timidity_drum_effect=false
+-timidity_drum_power=1
+-timidity_key_adjust=0
+-timidity_lpf_def=1
+-timidity_min_sustain_time=5000
+-timidity_modulation_envelope=true
+-timidity_modulation_wheel=true
+-timidity_overlap_voice_allow=true
+-timidity_pan_delay=false
+-timidity_portamento=true
+-timidity_reverb=0
+-timidity_reverb_level=0
+-timidity_surround_chorus=false
+-timidity_temper_control=true
+-timidity_tempo_adjust=1
+-turnspeedsprintfast=1280
+-turnspeedsprintslow=320
+-turnspeedwalkfast=640
+-turnspeedwalkslow=320
+-use_joystick=true
+-use_mouse=true
+-vid_activeinbackground=false
+-vid_adapter=0
+-vid_aspect=0
+-vid_brightness=0
+-vid_contrast=1
+-vid_cropaspect=false
+-vid_defheight=480
+-vid_defwidth=640
+-vid_fullscreen=true
+-vid_gamma=1
+-vid_hdr=false
+-vid_maxfps=200
+-vid_preferbackend=3
+-vid_rendermode=4
+-vid_saturation=1
+-vid_scale_customheight=720
+-vid_scale_custompixelaspect=1
+-vid_scale_customwidth=1280
+-vid_scale_linear=false
+-vid_scalefactor=1
+-vid_scalemode=5
+-vid_sdl_render_driver=
+-vid_vsync=true
+-vr_hunits_per_meter=41
+-vr_ipd=0.06199999898672104
+-vr_screendist=0.800000011920929
+-wildmidi_config=
+-wildmidi_enhanced_resampling=true
+-wildmidi_reverb=false
+-win_h=864
+-win_maximized=false
+-win_w=1536
+-win_x=-1
+-win_y=-1
+-xbrz_centerdirectionbias=4
+-xbrz_colorformat=0
+-xbrz_dominantdirectionthreshold=3.5999999046325684
+-xbrz_equalcolortolerance=30
+-xbrz_luminanceweight=1
+-xbrz_steepdirectionthreshold=2.200000047683716
+-
+-[GlobalSettings.Unknown]
+-
+-[Doom.Player]
+-autoaim=35
+-classicflight=false
+-color=40 cf 00
+-colorset=0
+-fov=90
+-gender=male
+-movebob=0.25
+-name=Player
+-neverswitchonpickup=false
+-playerclass=Fighter
+-skin=base
+-stillbob=0
+-team=255
+-wbobfire=0
+-wbobspeed=1
+-wi_noautostartmap=false
+-
+-[Doom.ConsoleVariables]
+-addrocketexplosion=false
+-adl_bank=14
+-adl_custom_bank=
+-adl_use_custom_bank=false
+-allcheats=false
+-am_backcolor=6c 54 40
+-am_cdwallcolor=4c 38 20
+-am_colorset=0
+-am_customcolors=true
+-am_drawmapback=1
+-am_efwallcolor=66 55 55
+-am_emptyspacemargin=0
+-am_fdwallcolor=88 70 58
+-am_followplayer=true
+-am_gridcolor=8b 5a 2b
+-am_interlevelcolor=ff 00 00
+-am_intralevelcolor=00 00 ff
+-am_lockedcolor=00 78 00
+-am_map_secrets=1
+-am_markcolor=2
+-am_markfont=AMMNUMx
+-am_notseencolor=6c 6c 6c
+-am_ovcdwallcolor=00 88 44
+-am_ovefwallcolor=00 88 44
+-am_overlay=0
+-am_ovfdwallcolor=00 88 44
+-am_ovinterlevelcolor=ff ff 00
+-am_ovlockedcolor=00 88 44
+-am_ovotherwallscolor=00 88 44
+-am_ovportalcolor=00 40 22
+-am_ovsecretsectorcolor=00 ff ff
+-am_ovsecretwallcolor=00 88 44
+-am_ovspecialwallcolor=ff ff ff
+-am_ovtelecolor=ff ff 00
+-am_ovthingcolor=e8 88 00
+-am_ovthingcolor_citem=e8 88 00
+-am_ovthingcolor_friend=e8 88 00
+-am_ovthingcolor_item=e8 88 00
+-am_ovthingcolor_monster=e8 88 00
+-am_ovthingcolor_ncmonster=e8 88 00
+-am_ovunexploredsecretcolor=00 ff ff
+-am_ovunseencolor=00 22 6e
+-am_ovwallcolor=00 ff 00
+-am_ovyourcolor=fc e8 d8
+-am_portalcolor=40 40 40
+-am_portaloverlay=true
+-am_rotate=0
+-am_secretsectorcolor=ff 00 ff
+-am_secretwallcolor=00 00 00
+-am_showgrid=false
+-am_showitems=false
+-am_showkeys=true
+-am_showkeys_always=false
+-am_showmaplabel=2
+-am_showmonsters=true
+-am_showsecrets=true
+-am_showthingsprites=0
+-am_showtime=true
+-am_showtotaltime=false
+-am_showtriggerlines=0
+-am_specialwallcolor=ff ff ff
+-am_textured=false
+-am_thingcolor=fc fc fc
+-am_thingcolor_citem=fc fc fc
+-am_thingcolor_friend=fc fc fc
+-am_thingcolor_item=fc fc fc
+-am_thingcolor_monster=fc fc fc
+-am_thingcolor_ncmonster=fc fc fc
+-am_thingrenderstyles=true
+-am_tswallcolor=88 88 88
+-am_unexploredsecretcolor=ff 00 ff
+-am_wallcolor=2c 18 08
+-am_xhaircolor=80 80 80
+-am_yourcolor=fc e8 d8
+-am_zoomdir=0
+-blood_fade_scalar=1
+-chat_substitution=false
+-chatmacro0=No
+-chatmacro1=I'm ready to kick butt!
+-chatmacro2=I'm OK.
+-chatmacro3=I'm not looking too good!
+-chatmacro4=Help!
+-chatmacro5=You suck!
+-chatmacro6=Next time, scumbag...
+-chatmacro7=Come here!
+-chatmacro8=I'll take care of it.
+-chatmacro9=Yes
+-cl_bbannounce=false
+-cl_bloodsplats=true
+-cl_bloodtype=0
+-cl_custominvulmapcolor1=00 00 1a
+-cl_custominvulmapcolor2=a6 a6 7a
+-cl_customizeinvulmap=false
+-cl_doautoaim=false
+-cl_gfxlocalization=3
+-cl_maxdecals=1024
+-cl_missiledecals=true
+-cl_pufftype=0
+-cl_rockettrails=1
+-cl_showmultikills=true
+-cl_showsecretmessage=true
+-cl_showsprees=true
+-cl_spreaddecals=true
+-classic_scaling_factor=1
+-classic_scaling_pixelaspect=1.2000000476837158
+-compatmode=0
+-con_alpha=0.75
+-con_centernotify=false
+-con_midtime=3
+-con_notablist=false
+-con_notifytime=3
+-con_pulsetext=false
+-con_scale=0
+-con_scaletext=0
+-crosshair=0
+-crosshaircolor=ff 00 00
+-crosshairforce=false
+-crosshairgrow=false
+-crosshairhealth=2
+-crosshairon=true
+-crosshairscale=0.5
+-dehload=0
+-dimamount=-1
+-dimcolor=ff d7 00
+-displaynametags=0
+-dlg_musicvolume=1
+-dlg_vgafont=false
+-gl_aalines=false
+-gl_bandedswlight=false
+-gl_bloom=false
+-gl_bloom_amount=1.399999976158142
+-gl_brightfog=false
+-gl_enhanced_nightvision=true
+-gl_exposure_base=0.3499999940395355
+-gl_exposure_min=0.3499999940395355
+-gl_exposure_scale=1.2999999523162842
+-gl_exposure_speed=0.05000000074505806
+-gl_fogmode=1
+-gl_fuzztype=0
+-gl_interpolate_model_frames=true
+-gl_light_models=true
+-gl_lightadditivesurfaces=false
+-gl_lightmode=2
+-gl_menu_blur=-1
+-gl_paltonemap_powtable=2
+-gl_paltonemap_reverselookup=true
+-gl_precache=false
+-gl_scale_viewport=true
+-gl_sclipfactor=1.7999999523162842
+-gl_sclipthreshold=10
+-gl_spriteclip=1
+-gl_tonemap=0
+-gl_weaponlight=8
+-hud_althud=false
+-hud_althud_forceinternal=false
+-hud_althudscale=0
+-hud_ammo_order=0
+-hud_ammo_red=25
+-hud_ammo_yellow=50
+-hud_armor_green=100
+-hud_armor_red=25
+-hud_armor_yellow=50
+-hud_aspectscale=true
+-hud_berserk_health=true
+-hud_health_green=100
+-hud_health_red=25
+-hud_health_yellow=50
+-hud_oldscale=true
+-hud_scale=0
+-hud_scalefactor=1
+-hud_showammo=2
+-hud_showangles=false
+-hud_showitems=false
+-hud_showlag=0
+-hud_showmonsters=true
+-hud_showscore=false
+-hud_showsecrets=true
+-hud_showstats=false
+-hud_showtime=0
+-hud_showweapons=true
+-hud_timecolor=5
+-hudcolor_ltim=8
+-hudcolor_statnames=6
+-hudcolor_stats=3
+-hudcolor_time=6
+-hudcolor_titl=10
+-hudcolor_ttim=5
+-hudcolor_xyco=3
+-inter_classic_scaling=true
+-log_vgafont=false
+-lookspring=true
+-m_quickexit=false
+-msg=0
+-msg0color=11
+-msg1color=5
+-msg2color=2
+-msg3color=3
+-msg4color=3
+-msgmidcolor=11
+-msgmidcolor2=4
+-nametagcolor=5
+-nocheats=false
+-opn_custom_bank=
+-opn_use_custom_bank=false
+-paletteflash=0
+-pickup_fade_scalar=1
+-r_deathcamera=false
+-r_drawfuzz=1
+-r_maxparticles=4000
+-r_portal_recursions=4
+-r_rail_smartspiral=false
+-r_rail_spiralsparsity=1
+-r_rail_trailsparsity=1
+-r_skymode=2
+-r_vanillatrans=0
+-sb_cooperative_enable=true
+-sb_cooperative_headingcolor=6
+-sb_cooperative_otherplayercolor=2
+-sb_cooperative_yourplayercolor=3
+-sb_deathmatch_enable=true
+-sb_deathmatch_headingcolor=6
+-sb_deathmatch_otherplayercolor=2
+-sb_deathmatch_yourplayercolor=3
+-sb_teamdeathmatch_enable=true
+-sb_teamdeathmatch_headingcolor=6
+-screenblocks=11
+-setslotstrict=true
+-show_obituaries=true
+-snd_menuvolume=0.6000000238418579
+-snd_pitched=false
+-st_oldouch=false
+-st_scale=0
+-transsouls=0.75
+-ui_screenborder_classic_scaling=true
+-uiscale=2
+-underwater_fade_scalar=1
+-vid_allowtrueultrawide=1
+-vid_cursor=None
+-vid_nopalsubstitutions=false
+-wi_cleantextscale=false
+-wi_percents=true
+-wi_showtotaltime=true
+-wipetype=1
+-
+-[Doom.LocalServerInfo]
+-compatflags=0
+-compatflags2=0
+-forcewater=false
+-maxviewpitch=90
+-sv_corpsequeuesize=64
+-sv_disableautohealth=false
+-sv_dropstyle=0
+-sv_portal_recursions=4
+-sv_smartaim=0
+-
+-[Doom.ConfigOnlyVariables]
+-
+-[Doom.UnknownConsoleVariables]
+-
+-[Doom.ConsoleAliases]
+-
+-[Doom.Bindings]
+-1=slot 1
+-2=slot 2
+-3=slot 3
+-4=slot 4
+-5=slot 5
+-6=slot 6
+-7=slot 7
+-8=slot 8
+-9=slot 9
+-0=slot 0
+--=sizedown
+-Equals=sizeup
+-Tab=togglemap
+-W=+forward
+-E=+use
+-T=messagemode
+-LeftBracket=invprev
+-RightBracket=invnext
+-Enter=invuse
+-A=+moveleft
+-S=+back
+-D=+moveright
+-`=toggleconsole
+-Shift=+speed
+-\=+showscores
+-X=crouch
+-Space=+jump
+-CapsLock=toggle cl_run
+-F1=menu_help
+-F2=menu_save
+-F3=menu_load
+-F4=menu_options
+-F5=menu_display
+-F6=quicksave
+-F7=menu_endgame
+-F8=togglemessages
+-F9=quickload
+-F10=menu_quit
+-F11=bumpgamma
+-F12=spynext
+-SysRq=screenshot
+-Pause=pause
+-Home=land
+-PgUp=+moveup
+-End=centerview
+-PgDn=+lookup
+-Ins=+movedown
+-Del=+lookdown
+-Mouse1=+attack
+-Mouse2=+altattack
+-MWheelUp=weapprev
+-MWheelDown=weapnext
+-MWheelRight=invnext
+-MWheelLeft=invprev
+-DPadUp=togglemap
+-DPadDown=invuse
+-DPadLeft=invprev
+-DPadRight=invnext
+-Pad_Start=pause
+-Pad_Back=menu_main
+-LThumb=crouch
+-LShoulder=weapprev
+-RShoulder=weapnext
+-LTrigger=+altattack
+-RTrigger=+attack
+-Pad_A=+use
+-Pad_Y=+jump
+-
+-[Doom.DoubleBindings]
+-
+-[Doom.AutomapBindings]
+-0=am_gobig
+--=+am_zoomout
+-Equals=+am_zoomin
+-P=am_toggletexture
+-F=am_togglefollow
+-G=am_togglegrid
+-C=am_clearmarks
+-M=am_setmark
+-KP-=+am_zoomout
+-KP+=+am_zoomin
+-UpArrow=+am_panup
+-LeftArrow=+am_panleft
+-RightArrow=+am_panright
+-DownArrow=+am_pandown
+-MWheelUp=am_zoom 1.2
+-MWheelDown=am_zoom -1.2
+-
+diff --git a/nx/gzdoom.jpg b/nx/gzdoom.jpg
+deleted file mode 100644
+index b6815abd1d243b2fb06bf8242b8f497f8a1581cb..0000000000000000000000000000000000000000
+GIT binary patch
+literal 0
+HcmV?d00001
+
+literal 53627
+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
+z%0A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
+E0N!#dl>h($
+
+diff --git a/nx/shadervariants.txt b/nx/shadervariants.txt
+deleted file mode 100644
+index b952cf3b2..000000000
+--- a/nx/shadervariants.txt
++++ /dev/null
+@@ -1,19 +0,0 @@
+-UZDoom-GLES-variants 2
+-Ep003 00807200
+-Mp000 00807200
+-Mp000 00807208
+-Mp000 00807280
+-Mp000 00807284
+-Mp000 0080f200
+-Mp000 0080f205
+-Mp000 0080f208
+-Mp000 0080f280
+-Mp006 00807202
+-Mp006 00807280
+-Mp006 00807288
+-Np000 00807200
+-Np000 00807202
+-Np000 00807208
+-Np000 0080f200
+-Np000 0080f204
+-Np000 0080f208
+diff --git a/nx/uzdoom.ini b/nx/uzdoom.ini
+deleted file mode 100644
+index 08655f5d2..000000000
+--- a/nx/uzdoom.ini
++++ /dev/null
+@@ -1,53 +0,0 @@
+-# Default UZDoom config for the Nintendo Switch build.
+-# Copied next to the .nro; the engine rewrites it on exit with every setting.
+-
+-[IWADSearch.Directories]
+-Path=.
+-Path=$DOOMWADDIR
+-Path=$PROGDIR/iwads
+-Path=$PROGDIR/pwads
+-Path=$PROGDIR
+-
+-[FileSearch.Directories]
+-Path=$PROGDIR/pwads
+-Path=$PROGDIR/iwads
+-Path=$PROGDIR
+-Path=$DOOMWADDIR
+-
+-[SoundfontSearch.Directories]
+-Path=$PROGDIR/soundfonts
+-Path=$PROGDIR/fm_banks
+-
+-[Doom.AutoExec]
+-Path=./autoexec.cfg
+-
+-[Heretic.AutoExec]
+-Path=./autoexec.cfg
+-
+-[Hexen.AutoExec]
+-Path=./autoexec.cfg
+-
+-[Strife.AutoExec]
+-Path=./autoexec.cfg
+-
+-[Chex.AutoExec]
+-Path=./autoexec.cfg
+-
+-[LastRun]
+-Version=234
+-
+-[GlobalSettings]
+-use_joystick=true
+-vid_fullscreen=true
+-vid_defwidth=1280
+-vid_defheight=720
+-vid_vsync=true
+-vid_preferbackend=2
+-vid_scalemode=0
+-vid_scalefactor=1
+-snd_backend=openal
+-queryiwad=false
+-
+-# Gamepad bindings: UZDoom 5 ships its own controller defaults
+-# (sticks move/look, ZR fire, ZL alt-fire, A use, B crouch, X reload, Y jump,
+-#  L/R switch weapons, + menu, - automap). Change them in Options > Controls.
+diff --git a/src/CMakeLists.txt b/src/CMakeLists.txt
+index d7cb6f140..57e600a5a 100644
+--- a/src/CMakeLists.txt
++++ b/src/CMakeLists.txt
+@@ -737,7 +737,6 @@ set( FASTMATH_SOURCES
+ 	common/textures/hires/hqnx/hq4x.cpp
+ 	common/textures/hires/xbr/xbrz.cpp
+ 	common/textures/hires/xbr/xbrz_old.cpp
+-	common/rendering/gl_load/gl_load.c
+ 	rendering/hwrenderer/hw_dynlightdata.cpp
+ 	rendering/hwrenderer/hw_nxlights.cpp
+ 	rendering/hwrenderer/scene/hw_bsp.cpp
+@@ -785,6 +784,26 @@ set (VULKAN_SOURCES
+ 	common/rendering/vulkan/textures/vk_framebuffer.cpp
+ )
+ 
++if (HAVE_OPENGL)
++	set (OPENGL_SOURCES
++	common/rendering/gl_load/gl_interface.cpp
++	common/rendering/gl/gl_renderer.cpp
++	common/rendering/gl/gl_stereo3d.cpp
++	common/rendering/gl/gl_framebuffer.cpp
++	common/rendering/gl/gl_renderstate.cpp
++	common/rendering/gl/gl_renderbuffers.cpp
++	common/rendering/gl/gl_postprocess.cpp
++	common/rendering/gl/gl_postprocessstate.cpp
++	common/rendering/gl/gl_debug.cpp
++	common/rendering/gl/gl_buffers.cpp
++	common/rendering/gl/gl_hwtexture.cpp
++	common/rendering/gl/gl_samplers.cpp
++	common/rendering/gl/gl_shader.cpp
++	common/rendering/gl/gl_shaderprogram.cpp
++	)
++	list (APPEND FASTMATH_SOURCES common/rendering/gl_load/gl_load.c)
++endif()
++
+ if (HAVE_GLES2)
+ 	set (GLES_SOURCES
+ 		common/rendering/gles/gles_system.cpp
+@@ -1202,20 +1221,6 @@ set (PCH_SOURCES
+ 	common/rendering/hwrenderer/postprocessing/hw_postprocess.cpp
+ 	common/rendering/hwrenderer/postprocessing/hw_postprocess_cvars.cpp
+ 	common/rendering/hwrenderer/postprocessing/hw_postprocessshader_ccmds.cpp
+-	common/rendering/gl_load/gl_interface.cpp
+-	common/rendering/gl/gl_renderer.cpp
+-	common/rendering/gl/gl_stereo3d.cpp
+-	common/rendering/gl/gl_framebuffer.cpp
+-	common/rendering/gl/gl_renderstate.cpp
+-	common/rendering/gl/gl_renderbuffers.cpp
+-	common/rendering/gl/gl_postprocess.cpp
+-	common/rendering/gl/gl_postprocessstate.cpp
+-	common/rendering/gl/gl_debug.cpp
+-	common/rendering/gl/gl_buffers.cpp
+-	common/rendering/gl/gl_hwtexture.cpp
+-	common/rendering/gl/gl_samplers.cpp
+-	common/rendering/gl/gl_shader.cpp
+-	common/rendering/gl/gl_shaderprogram.cpp
+ 	common/scripting/core/maps.cpp
+ 	common/scripting/core/dictionary.cpp
+ 	common/scripting/core/dynarrays.cpp
+@@ -1275,6 +1280,12 @@ else()
+ 	set( NOT_COMPILED_SOURCE_FILES ${NOT_COMPILED_SOURCE_FILES} ${VM_JIT_SOURCES} )
+ endif()
+ 
++if( HAVE_OPENGL )
++	set( PCH_SOURCES ${PCH_SOURCES} ${OPENGL_SOURCES} )
++else()
++	set( PCH_SOURCES ${PCH_SOURCES} common/rendering/hwrenderer/hw_noopengl.cpp )
++endif()
++
+ set( GAME_SOURCES
+ 	${HEADER_FILES}
+ 	${NOT_COMPILED_SOURCE_FILES}
+@@ -1335,10 +1346,12 @@ list( REMOVE_ITEM GAME_NONPCH_SOURCES ${PCH_SOURCES} )
+ 
+ if( NINTENDO_SWITCH )
+ 	list( REMOVE_ITEM PROJECT_LIBRARIES dl )
+-	# One Mesa for every renderer: the Mesa 26.2.4 Horizon SDK (docker/Dockerfile)
+-	# provides loaderless NVK (libvulkan.a) and EGL/GL/GLES over the same
+-	# Horizon GPU backend. libEGL embeds Zink, so it needs libvulkan too.
+-	set( PROJECT_LIBRARIES ${PROJECT_LIBRARIES} EGL GLESv2 glapi )
++	# The Mesa 26.2.4 Horizon SDK (docker/Dockerfile) provides loaderless NVK
++	# (libvulkan.a), RDoom's only renderer. EGL/GL are linked only for a build
++	# with the OpenGL backends on (libEGL embeds Zink, so it needs libvulkan).
++	if( HAVE_OPENGL OR HAVE_GLES2 )
++		set( PROJECT_LIBRARIES ${PROJECT_LIBRARIES} EGL GLESv2 glapi )
++	endif()
+ 	if( HAVE_VULKAN )
+ 		set( PROJECT_LIBRARIES ${PROJECT_LIBRARIES} vulkan )
+ 	endif()
+diff --git a/src/common/engine/nx_perf.cpp b/src/common/engine/nx_perf.cpp
+index 18ffc1aba..5936ba6be 100644
+--- a/src/common/engine/nx_perf.cpp
++++ b/src/common/engine/nx_perf.cpp
+@@ -88,9 +88,9 @@ bool NXPerf_ProfileThisTic()
+ static void WriteSettings(FILE *f)
+ {
+ 	static const char *const names[] = {
+-		"vid_vsync", "vid_maxfps", "cl_capfps", "vid_scalefactor", "nx_effect_cull", "nx_effect_minalpha", "r_actorspriteshadowdist", "vid_preferbackend", "gl_multithread", "r_dynlights", "gles_max_lights_per_surface",
++		"vid_vsync", "vid_maxfps", "cl_capfps", "vid_scalefactor", "nx_effect_cull", "nx_effect_minalpha", "r_actorspriteshadowdist", "vid_preferbackend", "gl_multithread", "r_dynlights",
+ 		"r_actorspriteshadow", "gl_texture_filter", "gl_texture_filter_anisotropic", "r_maxparticles", "cl_maxdecals",
+-		"snd_channels", "snd_efx", "snd_samplerate", "gles_async_textures", "snd_asyncload", "nx_workers",
++		"snd_channels", "snd_efx", "snd_samplerate", "snd_asyncload", "nx_workers",
+ 		"gl_sort_textures", "nx_dynlight_max", "nx_dynlight_dist", "nx_stabilizer", "nx_glthread", "nx_glthread_core", "nx_swapinterval", "r_ticstability", "nx_lateswap", "nx_simcap", nullptr };
+ 	fprintf(f, "# settings:");
+ 	for (int i = 0; names[i]; i++)
+diff --git a/src/common/platform/posix/nx/nx_loadscreen.cpp b/src/common/platform/posix/nx/nx_loadscreen.cpp
+index 7c67acde3..8157e4cc1 100644
+--- a/src/common/platform/posix/nx/nx_loadscreen.cpp
++++ b/src/common/platform/posix/nx/nx_loadscreen.cpp
+@@ -610,7 +610,7 @@ void RenderFrame(uint32_t *dst, int stride, float dt)
+ 	c.RoundRect(64, 128, 86, 5, 2.5f, accent, 255, accent2);
+ 	{
+ 		// port credit
+-		const char *by = "PORT POR RENAN";
++		const char *by = "PORT POR RENAN (\xC3\x86ON)";
+ 		const char *tg = "Telegram @aeon1911";
+ 		float w1 = c.TextWidth(fTitle, 30, by);
+ 		float w2 = c.TextWidth(fBody, 18, tg);
+diff --git a/src/common/platform/posix/nx/rdoom_version.h.in b/src/common/platform/posix/nx/rdoom_version.h.in
+index 2c9b060a3..97f73d060 100644
+--- a/src/common/platform/posix/nx/rdoom_version.h.in
++++ b/src/common/platform/posix/nx/rdoom_version.h.in
+@@ -5,4 +5,4 @@
+ #define RDOOM_BUILD_DATE "@RDOOM_BUILD_DATE@"
+ #define RDOOM_GIT_DESCRIBE "@RDOOM_GIT_DESCRIBE@"
+ #define RDOOM_ENGINE_VERSION "UZDoom 5.0.3 (7910df71)"
+-#define RDOOM_GFX_VERSION "Mesa 26.2.4 Horizon SDK: NVK (Vulkan) + EGL/OpenGL/OpenGL ES"
++#define RDOOM_GFX_VERSION "Mesa 26.2.4 Horizon SDK: NVK (Vulkan)"
+diff --git a/src/common/platform/posix/sdl/sdlglvideo.cpp b/src/common/platform/posix/sdl/sdlglvideo.cpp
+index b1e31aaa7..502460541 100644
+--- a/src/common/platform/posix/sdl/sdlglvideo.cpp
++++ b/src/common/platform/posix/sdl/sdlglvideo.cpp
+@@ -49,7 +49,9 @@
+ 
+ #include "basics.h"
+ #include "c_dispatch.h"
++#ifdef HAVE_OPENGL
+ #include "gl_framebuffer.h"
++#endif
+ #include "gl_sysfb.h"
+ #include "i_soundinternal.h"
+ #include "i_video.h"
+@@ -409,6 +411,12 @@ SDLVideo::SDLVideo ()
+ 	}
+ 
+ #ifdef HAVE_VULKAN
++#if defined(__SWITCH__)
++	// RDoom renders with Vulkan only; a config written by an older build may
++	// still ask for OpenGL or OpenGL ES (removed from the launcher)
++	if (vid_preferbackend != BACKEND_VULKAN)
++		vid_preferbackend = BACKEND_VULKAN;
++#endif
+ 	Priv::vulkanEnabled = vid_preferbackend == BACKEND_VULKAN;
+ 
+ 	if (Priv::vulkanEnabled)
+@@ -562,12 +570,11 @@ DFrameBuffer *SDLVideo::CreateFrameBuffer ()
+ 		catch (CVulkanError const &error)
+ 		{
+ #ifdef __SWITCH__
+-			// No silent switch to OpenGL: the profile asked for Vulkan.
++			// RDoom renders with Vulkan only: no other renderer to fall back to.
+ 			RDoom_SessionSet("renderer_active", "none");
+ 			RDoom_SessionSet("vulkan_error", error.what());
+ 			I_FatalError("O Vulkan n\xc3\xa3o p\xc3\xb4" "de ser iniciado / Vulkan could not be started:\n%s\n\n"
+-				"Detalhes em switch/rdoom/logs/engine-session.txt.\n"
+-				"Para usar outro renderizador, escolha OpenGL ou OpenGL ES no perfil (launcher > Editar perfil > Renderizador).", error.what());
++				"Detalhes em switch/rdoom/logs/engine-session.txt.", error.what());
+ #else
+ 			if (Priv::window != nullptr)
+ 			{
+@@ -581,6 +588,7 @@ DFrameBuffer *SDLVideo::CreateFrameBuffer ()
+ 	}
+ #endif
+ 
++#if defined(HAVE_OPENGL) || defined(HAVE_GLES2)
+ 	if (fb == nullptr)
+ 	{
+ #ifdef HAVE_GLES2
+@@ -588,8 +596,15 @@ DFrameBuffer *SDLVideo::CreateFrameBuffer ()
+ 			fb = new OpenGLESRenderer::OpenGLFrameBuffer(0, vid_fullscreen);
+ 		else
+ #endif
++#ifdef HAVE_OPENGL
+ 			fb = new OpenGLRenderer::OpenGLFrameBuffer(0, vid_fullscreen);
++#else
++			fb = new OpenGLESRenderer::OpenGLFrameBuffer(0, vid_fullscreen);
++#endif
+ 	}
++#endif
++	if (fb == nullptr)
++		I_FatalError("No renderer available (built without OpenGL; Vulkan failed)");
+ 
+ 	return fb;
+ }
+@@ -697,6 +712,7 @@ void SystemBaseFrameBuffer::SetWindowSize(int w, int h)
+ }
+ 
+ 
++#if defined(HAVE_OPENGL) || defined(HAVE_GLES2)
+ SystemGLFrameBuffer::SystemGLFrameBuffer(void *hMonitor, bool fullscreen)
+ : SystemBaseFrameBuffer(hMonitor, fullscreen)
+ {
+@@ -844,6 +860,7 @@ void SystemGLFrameBuffer::SwapBuffers()
+ 	NXPERF_SCOPE(swap_ms, nullptr);
+ 	SDL_GL_SwapWindow(Priv::window);
+ }
++#endif
+ 
+ 
+ void ProcessSDLWindowEvent(const SDL_WindowEvent &event)
+diff --git a/src/common/rendering/hwrenderer/hw_noopengl.cpp b/src/common/rendering/hwrenderer/hw_noopengl.cpp
+new file mode 100644
+index 000000000..71eab30a8
+--- /dev/null
++++ b/src/common/rendering/hwrenderer/hw_noopengl.cpp
+@@ -0,0 +1,32 @@
++//
++// Pieces of the OpenGL backend that the rest of the engine uses whatever the
++// renderer. Compiled only in a build without that backend (HAVE_OPENGL off,
++// as in RDoom NX, which renders with Vulkan only).
++//
++
++#include "c_cvars.h"
++#include "menu.h"
++#include "zstring.h"
++
++CVAR(Int, gl_multisample, 1, CVAR_ARCHIVE|CVAR_GLOBALCONFIG);
++CVAR(Int, gl_dither_bpc, 0, CVAR_ARCHIVE | CVAR_GLOBALCONFIG | CVAR_NOINITCALL)
++
++// Same as gl_stereo3d.cpp: no quad-buffered stereo outside Windows
++void UpdateVRModes(bool considerQuadBuffered)
++{
++	FOptionValues** pVRModes = OptionValues.CheckKey("VRMode");
++	if (pVRModes == nullptr) return;
++
++	TArray<FOptionValues::Pair>& vals = (*pVRModes)->mValues;
++	TArray<FOptionValues::Pair> filteredValues;
++	for (unsigned i = 0; i < vals.Size(); ++i)
++	{
++		if (vals[i].Value == 7) continue;	// quad-buffered stereo
++		filteredValues.Push(vals[i]);
++	}
++	vals = filteredValues;
++}
++
++// The vram stat only reports the GL vendor extensions
++void PrintVRAM_NV(FString &out) {}
++void PrintVRAM_ATI(FString &out) {}
+diff --git a/src/rendering/hwrenderer/hw_precache.cpp b/src/rendering/hwrenderer/hw_precache.cpp
+index 6ba7233e7..906b21d15 100644
+--- a/src/rendering/hwrenderer/hw_precache.cpp
++++ b/src/rendering/hwrenderer/hw_precache.cpp
+@@ -86,7 +86,9 @@ static void PrecacheSprite(FGameTexture *tex, SpriteHits &hits)
+ //
+ //==========================================================================
+ 
++#ifdef HAVE_GLES2
+ void GLES_AsyncTexFlush();
++#endif
+ extern bool NXSpriteDecoderActive;
+ void VkAsyncTex_Flush();
+ void NXPrefetch_NewLevel();
+@@ -95,7 +97,9 @@ void NXPrefetch_Class(PClassActor *cls, int maxtextures, bool urgent);
+ void hw_PrecacheTexture(uint8_t *texhitlist, TMap<PClassActor*, bool> &actorhitlist)
+ {
+ 	// nothing may be decoding textures in the background while precaching
++#ifdef HAVE_GLES2
+ 	GLES_AsyncTexFlush();
++#endif
+ 	VkAsyncTex_Flush();
+ 	NXPrefetch_NewLevel();
+ 
+-- 
+2.56.0
+

@@ -1,19 +1,19 @@
 #!/usr/bin/env bash
 # Frame pacing at the shipped settings (vsync on, vid_maxfps 60, Ryujinx vsync "Switch" 60 Hz).
-#   scripts/pacing-ryujinx.sh <profile> <vulkan|opengl|gles> <label> [map] [seconds-in-level]
+#   scripts/pacing-ryujinx.sh <profile> <label> [map] [seconds-in-level]
 # Logs every frame (nx_perflog 2, first ~3000 frames) and reports the frame-time
 # distribution of the level phase: mean, standard deviation, p50/p95/p99, worst,
 # and how many frames missed the 16.7 ms display interval.
 set -uo pipefail
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
-PROF=$1; REND=$2; LABEL=$3; MAP=${4:-MAP01}; SECS=${5:-60}
+PROF=$1; LABEL=$2; MAP=${3:-MAP01}; SECS=${4:-60}
 EV="$ROOT/evidence/pacing/$LABEL"
 SD="$ROOT/test-env/ryujinx/sdcard/switch/rdoom"
 mkdir -p "$EV"; rm -f "$EV/image-check.txt"
-python3 "$ROOT/scripts/test-profile.py" "$PROF" video.renderer="$REND" video.vsync=true video.fps_limit=60 \
+python3 "$ROOT/scripts/test-profile.py" "$PROF" video.renderer=vulkan video.vsync=true video.fps_limit=60 \
 	gameplay.warp="$MAP" gameplay.skill=3 'cvars={"nx_perflog":"2"}' > /dev/null
 rm -f "$SD/perf.log"
-# automap on/off once: see bench-ryujinx.sh (black OpenGL view after a direct warp in Ryujinx)
+# automap on/off once and a black-image check: see bench-ryujinx.sh
 TOGGLE_AT=${TOGGLE_AT:-20}	# seconds until the level is surely on screen (big mods load longer)
 printf 'wait 13\ntap PLUS 0.2\nwait %s\ntap MINUS\nwait 1\ntap MINUS\nwait 2\nshot check\nstick L 0 -1 3\nstick R 0.5 0 1\nwait %s\nshot level\n' "$TOGGLE_AT" "$SECS" > "$ROOT/build/vpad-pacing.txt"
 PROFILE="$PROF" timeout $((SECS + TOGGLE_AT + 140)) "$ROOT/scripts/ryujinx-test.sh" "pacing-$LABEL" "$ROOT/build/vpad-pacing.txt" $((SECS + TOGGLE_AT + 45)) > /dev/null 2>&1

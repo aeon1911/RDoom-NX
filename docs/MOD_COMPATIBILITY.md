@@ -1,17 +1,29 @@
 # Compatibilidade de mods — RDoom NX (UZDoom 5.0.3)
 
-Testes feitos no Ryujinx 1.3.3 com o `RDoom.nro` empacotado, pelo launcher,
-com o controle virtual (`scripts/vpad.py`). Os arquivos são os do usuário,
-ligados por symlink no SD de teste (`test-env/local-content.txt`); nada disso
-é distribuído. **Switch físico: pendente.**
+Testes no Ryujinx 1.3.3 com o `RDoom.nro` empacotado, pelo launcher, com o
+controle virtual (`scripts/vpad.py`), e no Switch Lite do autor (portátil,
+clocks de fábrica). Os arquivos são os do usuário (no emulador, ligados por
+symlink no SD de teste, `test-env/local-content.txt`); nada disso é
+distribuído. O RDoom renderiza só com Vulkan.
 
-| Conteúdo | Versão / arquivo | Vulkan | OpenGL | Evidência |
+| Conteúdo | Versão / arquivo | Ryujinx | Switch físico | Evidência (Ryujinx) |
 |---|---|---|---|---|
-| Freedoom: Phase 2 | 0.13.0, `freedoom2.wad` | ✅ título, menu, MAP01, andar, mirar, atirar | ✅ | `evidence/ryujinx/32-vk-freedoom`, `33-vk-play`, `36-vk-overlap`; `18-opengl-play` |
-| Brutal Doom | v22 test 6, `brutal22test6.pk3`, sobre DOOM II | ✅ MAP01, tiros, chute, movimento, 7200 frames sem erro | ✅ | `34-vk-brutal`, `bench-brutal-map01-*` |
-| Lexicon | 1.0, `lexicon-core-v1.0.pk3` + `lexicon-base-v1.0.pk3`, DOOM II | ✅ título, menu, hub "VR - Inside the Lexicon", movimento | não repetido | `35-vk-lexicon` |
-| The Compendium | v1a, `Compendium-v1a.pk3` + `compen-play.pk3`, DOOM II | ✅ HUBMAP (seletor), movimento | não repetido | `35-vk-compendium` |
+| Freedoom: Phase 2 | 0.13.0, `freedoom2.wad` | ✅ título, menu, MAP01, andar, mirar, atirar | ✅ 60 fps | `evidence/ryujinx/32-vk-freedoom`, `33-vk-play`, `36-vk-overlap` |
+| Brutal Doom | v22 test 6 / v21, sobre DOOM II ou Freedoom 2 | ✅ MAP01, tiros, chute, movimento, 7200 frames sem erro | ✅ 55–60 fps | `34-vk-brutal`, `bench-brutal-map01-*` |
+| Lexicon | 1.0, `lexicon-core-v1.0.pk3` + `lexicon-base-v1.0.pk3`, DOOM II | ✅ título, menu, hub "VR - Inside the Lexicon", movimento | ✅ 45–60 fps com o pacote slaughter | `35-vk-lexicon` |
+| The Compendium | v1a, `Compendium-v1a.pk3` + `compen-play.pk3`, DOOM II | ✅ HUBMAP (seletor), movimento | ✅ 54–60 fps | `35-vk-compendium` |
+| Ashes 2063 | WADs carregados separados | — | ✅ 55–60 fps | — |
+| Aliens Eradication TC | — | — | ✅ 52–60 fps | — |
+| Trailblazer (+ Lexicon slaughter) | — | — | ✅ 55–60 fps | — |
 | WadFusion | `doom_fusion.ipk3` **gerado para UZDoom/GZDoom 4.14** | ❌ (motor recusa o arquivo) | ❌ | `31-vk-blitupload/wadfusion-uzdoom-5.0.3-linux-pc.log` |
+
+## Mods que não rodam juntos
+
+Alguns pacotes declaram as mesmas variáveis no `CVARINFO` (por exemplo, os
+episódios do Ashes 2063 carregados ao mesmo tempo, que repetem
+`hud_vertical`). O UZDoom para com erro nesse caso. Antes de iniciar, o
+launcher lê o `CVARINFO` de cada mod ativo e avisa quais pares conflitam; dá
+para cancelar ou iniciar mesmo assim.
 
 Os testes não mostraram erros de script (`engine.log` sem "error") em
 Brutal Doom, Lexicon e Compendium.

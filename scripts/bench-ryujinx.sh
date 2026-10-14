@@ -1,26 +1,25 @@
 #!/usr/bin/env bash
 # Reproducible in-emulator benchmark of the packaged RDoom.nro.
-#   scripts/bench-ryujinx.sh <profile> <vulkan|opengl|gles> <label> [map] [seconds-in-level]
+#   scripts/bench-ryujinx.sh <profile> <label> [map] [seconds-in-level]
 # Uncapped (profile vsync off, vid_maxfps 0; Ryujinx vsync "Unbounded") so the
 # numbers show cost per frame instead of the 60 Hz ceiling. Collects perf.log
 # summaries of the level phase (thinkers > 0) into evidence/benchmarks/<label>/.
 set -uo pipefail
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
-PROF=$1; REND=$2; LABEL=$3; MAP=${4:-MAP01}; SECS=${5:-90}
+PROF=$1; LABEL=$2; MAP=${3:-MAP01}; SECS=${4:-90}
 EV="$ROOT/evidence/benchmarks/$LABEL"
 CFG="$ROOT/test-env/ryujinx/Config.json"
 SD="$ROOT/test-env/ryujinx/sdcard/switch/rdoom"
 mkdir -p "$EV"; rm -f "$EV/image-check.txt"
-python3 "$ROOT/scripts/test-profile.py" "$PROF" video.renderer="$REND" video.vsync=false video.fps_limit=0 \
+python3 "$ROOT/scripts/test-profile.py" "$PROF" video.renderer=vulkan video.vsync=false video.fps_limit=0 \
 	gameplay.warp="$MAP" gameplay.skill=3 > /dev/null
 python3 - "$CFG" 1 <<'PY'
 import json, sys
 c = json.load(open(sys.argv[1])); c["vsync_mode"] = int(sys.argv[2]); json.dump(c, open(sys.argv[1], "w"), indent=2)
 PY
 rm -f "$SD/perf.log"
-# OpenGL in Ryujinx shows a black 3D view when a session starts directly in a
-# map, until the view is switched once (docs/RYUJINX_TEST_REPORT.md): toggle the
-# automap on and off for every backend, then check the image is not black.
+# Toggle the automap on and off once after the level appears, then check the
+# captured image is not black (Ryujinx can show a black view after a direct warp).
 # TOGGLE_AT: seconds after start until the level is surely on screen (big mods load longer)
 TOGGLE_AT=${TOGGLE_AT:-20}
 printf 'wait 13\ntap PLUS 0.2\nwait %s\ntap MINUS\nwait 1\ntap MINUS\nwait 2\nshot check\nwait %s\nshot level\n' "$TOGGLE_AT" "$((SECS + 36 - TOGGLE_AT))" > "$ROOT/build/vpad-bench.txt"

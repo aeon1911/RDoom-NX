@@ -583,6 +583,15 @@ void LauncherApp::TryLaunch()
 		Message(r.pendingInstall ? "Pendente de instalação" : "Não é possível iniciar", errors);
 		return;
 	}
+	// mods that declare the same cvar stop UZDoom at start-up ("cvar ... already exists")
+	{
+		std::vector<std::pair<std::string, std::string>> mods;
+		for (const LibraryItem *m : r.mods)
+			if (m)
+				mods.push_back({ m->info.fileName, m->info.path });
+		for (const auto &clash : FindCvarClashes(mods))
+			warnings += "• " + clash + ": esses mods provavelmente não rodam juntos (o jogo para com erro). Se forem episódios ou versões do mesmo mod, ative só um.\n";
+	}
 	auto go = [this, r]() {
 		Profile *p = Current();
 		if (!p)

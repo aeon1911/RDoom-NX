@@ -1,26 +1,25 @@
 # Vulkan no RDoom NX
 
-O Vulkan é o renderizador padrão do RDoom. Ele roda pelo **Mesa NVK** (driver
+O Vulkan é o único renderizador do RDoom. Ele roda pelo **Mesa NVK** (driver
 Vulkan aberto para GPUs NVIDIA) portado para o Horizon, ligado estaticamente
 ao `RDoom.nro`, sem loader e sem nenhuma dependência instalada no console.
-OpenGL e OpenGL ES (Mesa Gallium NVC0) continuam disponíveis como escolha
-**explícita** do perfil. Não existe troca silenciosa de backend: se o Vulkan
-falhar, o jogo para com uma mensagem (pt-BR/en) dizendo o que falhou e que o
-perfil pode ser trocado para OpenGL/GLES.
+O backend OpenGL/GLES do UZDoom não é compilado (`HAVE_OPENGL=OFF`,
+`HAVE_GLES2=OFF`). Se o Vulkan falhar, o jogo para com uma mensagem
+(pt-BR/en) dizendo o que falhou e onde está o relatório.
 
-Estado em 2026-10-11:
+Estado em 2026-10-14:
 
 | Ambiente | Situação |
 |---|---|
 | Build (Docker, devkitA64 + Mesa 26.2.4 Horizon SDK) | ✅ reproduzível, NRO com o backend Vulkan incluído |
 | Ryujinx 1.3.3 (Ryubing) | ✅ instância, superfície VI, dispositivo NVK GM20B, swapchain, dezenas de milhares de frames apresentados; FreeDoom 2, Brutal Doom, Lexicon e Compendium jogáveis com imagem correta |
-| Switch físico | ⏳ **pendente** — nenhum teste em hardware real foi feito ainda |
+| Switch físico (Lite, portátil) | ✅ Freedoom 2, Brutal Doom, Lexicon (+ slaughter), Compendium, Ashes 2063, Aliens Eradication TC e Trailblazer, 45–60 fps; ver `docs/STATUS.md` |
 
 ## 1. Componentes
 
 | Peça | Origem |
 |---|---|
-| `libvulkan.a` (NVK + compilador NAK em Rust), `libEGL/libGL/libGLESv2/libglapi` | Mesa 26.2.4, danfromtico/mesa-switch `606441c9`, artefato de CI 11484346771, sha256 `937cbda82d411c3ca909aa977b3ced82d4e6070046ab016911b1ce84e58ca392` (verificado no `docker/Dockerfile`) |
+| `libvulkan.a` (NVK + compilador NAK em Rust); `libEGL/libglapi` só porque o SDL2 depende delas | Mesa 26.2.4, danfromtico/mesa-switch `606441c9`, artefato de CI 11484346771, sha256 `937cbda82d411c3ca909aa977b3ced82d4e6070046ab016911b1ce84e58ca392` (verificado no `docker/Dockerfile`) |
 | Superfície | `VK_NN_vi_surface` sobre o `NWindow` padrão do libnx |
 | Backend do motor | `engine/src/common/rendering/vulkan/` (UZDoom 5.0.3) + ZVulkan/VMA em `engine/libraries/ZVulkan` |
 | Criação do contexto | `engine/src/common/platform/posix/sdl/sdlglvideo.cpp` |
@@ -104,15 +103,15 @@ FreeDoom MAP01: 177 → 201 fps (antes da correção do `phase.log`).
 `NX_Phase` (diagnóstico herdado) abria, escrevia e fechava `phase.log` no
 cartão SD **cinco vezes por frame**; o arquivo chegou a 15 MB num teste. Agora
 cada fase é registrada uma vez (até 200 linhas); o relatório de travamento
-continua sabendo a fase atual pela "migalha" em memória. Vale para os três
-backends; no Vulkan: 201 → 362–368 fps (FreeDoom MAP01, Ryujinx).
+continua sabendo a fase atual pela "migalha" em memória: 201 → 362–368 fps
+(FreeDoom MAP01, Ryujinx).
 
 ### Resultado (Ryujinx, sem limite de FPS, mesma build)
 
-| Cena | Vulkan | OpenGL | Vulkan vs OpenGL |
-|---|---|---|---|
-| FreeDoom 2 MAP01 | **367,5 fps** (2,72 ms) | 169,6 fps (5,90 ms) | +117% |
-| Brutal Doom v22 test 6, DOOM II MAP01 | **291,6 fps** (3,43 ms) | 159,4 fps (6,27 ms) | +83% |
+| Cena | Vulkan |
+|---|---|
+| FreeDoom 2 MAP01 | **367,5 fps** (2,72 ms) |
+| Brutal Doom v22 test 6, DOOM II MAP01 | **291,6 fps** (3,43 ms) |
 
 No padrão (vsync, 60 FPS) o Vulkan fica em 60,0 fps com desvio de
 0,69–0,85 ms e nenhum frame acima de 25 ms nas duas cenas.
@@ -182,7 +181,7 @@ desempenho direta só será possível no Switch físico.
 
 | CVar | Padrão | Efeito |
 |---|---|---|
-| `vid_preferbackend` | 1 (Vulkan) | escrito pelo launcher a partir do perfil (0 = OpenGL, 2 = OpenGL ES) |
+| `vid_preferbackend` | 1 (Vulkan) | o motor força 1 no Switch (configs antigas com 0/2 viram Vulkan) |
 | `rd_vk_frameoverlap` | 1 | sobreposição CPU/GPU entre frames (§3.2) |
 | `rd_vk_blitupload` | 1 | upload de texturas por imagem linear + blit (§2.5) |
 | `nx_perflog` | 1 | `perf.log` com resumos a cada 10 s (2 = todo frame) |

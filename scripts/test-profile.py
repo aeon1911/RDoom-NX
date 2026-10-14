@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Edits a profile on the emulated SD for tests: test-profile.py <id> video.renderer=opengl gameplay.warp=MAP01 ..."""
+"""Edits a profile on the emulated SD for tests: test-profile.py <id> video.vsync=false gameplay.warp=MAP01 ..."""
 import json, sys
 p = "test-env/ryujinx/sdcard/switch/rdoom/profiles/%s.json" % sys.argv[1]
 j = json.load(open(p))

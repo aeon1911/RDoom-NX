@@ -206,19 +206,9 @@ void LauncherApp::UpdateEditor(const InputFrame &in)
 			Push(Screen::Mods);
 		}
 		break;
-	case ER_Renderer: {
-		const Renderer order[] = { Renderer::Vulkan, Renderer::OpenGL, Renderer::GLES };
-		int idx = 0;
-		for (int i = 0; i < 3; i++)
-			if (order[i] == p->video.renderer)
-				idx = i;
-		idx = (idx + (dir ? dir : 1) + 3) % 3;
-		p->video.renderer = order[idx];
-		changed = true;
-		if (p->video.renderer != Renderer::Vulkan)
-			ToastMsg(std::string(RendererLabel(p->video.renderer)) + " é secundário; Vulkan continua o recomendado.");
+	case ER_Renderer:
+		ToastMsg("O RDoom usa apenas Vulkan (Mesa NVK).");
 		break;
-	}
 	case ER_Quality: {
 		const char *q[] = { "low", "stock", "high" };
 		int idx = 1;
@@ -366,7 +356,7 @@ void LauncherApp::DrawEditor(Canvas &c)
 	{
 	case ER_Iwad: help = "A IWAD é o jogo base (DOOM II, Freedoom, WadFusion…). Coloque os arquivos em switch/rdoom/iwads/."; break;
 	case ER_Mods: help = "Ative, desative e ordene os mods. A ordem importa: arquivos carregados depois sobrescrevem os anteriores."; break;
-	case ER_Renderer: help = "Vulkan (Mesa NVK) é o renderizador principal do RDoom. OpenGL e OpenGL ES ficam como alternativas explícitas; o RDoom nunca troca de renderizador sozinho."; break;
+	case ER_Renderer: help = "O RDoom renderiza só com Vulkan (Mesa NVK), feito e testado para o Switch."; break;
 	case ER_Quality: help = "RDoom — Stock Switch: sem SSAO, bloom, lens flare ou MSAA. Baixa também desliga luzes dinâmicas e limita a escala a 75%. Alta liga bloom e sombras de luz."; break;
 	case ER_Scale: help = "Resolução em que o jogo é desenhado antes de ser escalado para a tela. Valores menores aliviam mods pesados."; break;
 	case ER_Fps: help = "30 ou 35 FPS dão tempos de quadro mais estáveis em mods pesados; 60 FPS para conteúdo leve. O RDoom usa sempre os clocks de fábrica do console."; break;
@@ -856,7 +846,10 @@ void LauncherApp::UpdateSettings(const InputFrame &in)
 	case 5:
 		Message("Sobre o RDoom",
 		        info_.version + "\n" + info_.engineVersion + "\n" + info_.gfxVersion + "\n\n"
-		        "Port não oficial do UZDoom para Nintendo Switch (Atmosphère). Não é um produto da id Software nem dos mantenedores do UZDoom. "
+		        "Feito por Renan (Æon). Port não oficial do UZDoom para Nintendo Switch (Atmosphère), renderizado com Vulkan. "
+		        "Não é um produto da id Software nem dos mantenedores do UZDoom.\n\n"
+		        "Apoie o projeto: PIX ou PayPal para renanol.design@gmail.com\n"
+		        "github.com/aeon1911/RDoom-NX\n\n"
 		        "Licença GPLv3; avisos de terceiros em switch/rdoom/licenses/.");
 		break;
 	case 6:

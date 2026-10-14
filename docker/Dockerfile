@@ -6,9 +6,9 @@
 # On top of it:
 #   * Mesa 26.2.4 "switch-unified-horizon-sdk" (danfromtico/mesa-switch CI
 #     artifact 11484346771, commit 606441c90e459028a50fca352daebfc20211f890).
-#     It replaces the old switch-mesa 20.1 EGL/GLES archives with one Mesa
-#     that provides loaderless NVK Vulkan plus EGL/GL/GLES on the same Horizon
-#     backend. The archive is verified against its SHA-256 before use.
+#     It provides loaderless NVK Vulkan, RDoom's only renderer; its EGL/GL
+#     libraries are there only because devkitPro's SDL2 links against EGL.
+#     The archive is verified against its SHA-256 before use.
 #   * libsndfile 1.2.2, which devkitPro does not package (needed by ZMusic).
 #
 # Build context: the repository's third_party/ directory

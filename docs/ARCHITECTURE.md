@@ -34,10 +34,10 @@ Código específico do Switch:
 | `.../nx/nx_tls_bridge.c` | `TPIDR_EL0` por thread (`--wrap=threadCreate`) |
 | `.../nx/nx_nvcompat.c` | compatibilidade de reserva de VA no Ryujinx |
 | `.../nx/nx_loadscreen.cpp` | tela de carregamento "RDOOM" |
-| `.../nx/nx_glthread.cpp` | thread de driver do Mesa (GL), migalhas e relatório de travamento |
+| `.../nx/nx_glthread.cpp` | migalhas e relatório de travamento das threads do Mesa |
 | `src/common/engine/nx_perf.cpp` | `perf.log` (tempos por frame e resumos a cada 10 s) |
 | `src/common/rendering/vulkan/textures/vk_nxupload.cpp` | upload de texturas por imagem linear + blit |
-| `src/common/platform/posix/sdl/sdlglvideo.cpp` | criação de Vulkan/GL, sem fallback silencioso |
+| `src/common/platform/posix/sdl/sdlglvideo.cpp` | criação do Vulkan; se falhar, o jogo para com a mensagem do erro |
 
 ### `launcher/` — RDoom NX (C++17, sem dependências do motor)
 
@@ -57,7 +57,9 @@ O launcher também compila para Linux (testes de host e `tests/ui_preview`).
 ### Mesa (binário)
 
 `third_party/mesa-sdk/…606441c9.zip`, verificado por SHA-256 no Dockerfile:
-NVK (Vulkan), Gallium NVC0 (GL/GLES), EGL, NAK. Ver `docs/VULKAN.md`.
+NVK (Vulkan) e o compilador NAK. O RDoom usa só o Vulkan; o backend OpenGL/GLES
+do UZDoom não é compilado (`HAVE_OPENGL=OFF`, `HAVE_GLES2=OFF`). O EGL do SDK
+só entra no link porque o SDL2 do devkitPro depende dele. Ver `docs/VULKAN.md`.
 
 ## Layout no cartão SD
 
@@ -87,7 +89,6 @@ sdmc:/switch/rdoom/
 - Vulkan: um submit por frame; o fim do frame não espera a GPU — a espera fica
   para o início do frame seguinte (`rd_vk_frameoverlap`). Buffers persistentes
   ficam em memória coerente sem cache, sem limpeza de cache por submit.
-- OpenGL/GLES: thread de driver do Mesa (`MESA_SWITCH_GLTHREAD`).
 
 ## Logs e diagnóstico
 

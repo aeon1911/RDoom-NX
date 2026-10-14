@@ -1,16 +1,23 @@
-# RDoom NX — estado em 2026-10-13
+# RDoom NX — estado em 2026-10-14 (1.0.0)
 
-Pacote atual: `dist/RDoom.nro` sha256 `f78662e024517fb24151b053f0dd7085e784294f7190ce7ffe6c7e6865d46a24`
-(motor `5.0.3-55-g23e731af9`), zips e `SHA256SUMS.txt` em `dist/`.
+Pacote atual: `dist/RDoom.nro` sha256 `1c4fdba75e5ee27b35792e5566fd1118c14e1c7b8049755fb392c85e1e006af9`
+(motor `5.0.3-56-g499d2922b`), zips e `SHA256SUMS.txt` em `dist/`.
 
 ## Feito e verificado
 
 - Build reproduzível em Docker; série de patches em `engine/` (branch `rdoom-nx`) e em `patches/`.
 - **Vulkan (padrão) funcionando no Ryujinx**: instância, superfície VI, NVK GM20B, swapchain,
   frames apresentados, mapas renderizados corretamente — Freedoom 2, Brutal Doom, Lexicon e
-  Compendium. Sem fallback silencioso para OpenGL.
+  Compendium.
+- **Só Vulkan (1.0.0):** o backend OpenGL/GLES do UZDoom não é mais compilado (`HAVE_OPENGL=OFF`,
+  `HAVE_GLES2=OFF`); o motor força `vid_preferbackend 1`, o launcher não oferece outro renderizador e
+  perfis antigos com "opengl"/"gles" passam a usar Vulkan. Ryujinx: Freedoom MAP01 a 60 fps
+  (`evidence/ryujinx/90-vk-only-sanity`).
+- **Aviso de mods em conflito:** antes de iniciar, o launcher lê o `CVARINFO` de cada mod ativo e
+  avisa quando dois declaram as mesmas variáveis (o UZDoom pararia com erro); conferido com os pk3
+  do Ashes 2063 (todos repetem `hud_vertical`).
 - **Desempenho Vulkan** (Ryujinx, sem limite): 97 → 367,5 fps no Freedoom MAP01; Brutal Doom
-  291,6 fps; OpenGL 169,6 / 159,4 fps nas mesmas cenas. No padrão (vsync 60): 60,0 fps com desvio
+  291,6 fps. No padrão (vsync 60): 60,0 fps com desvio
   < 1 ms. Ver `PERFORMANCE.md`.
 - Otimizações: limpeza de cache só em memória cacheada, sobreposição CPU/GPU entre frames, fim das
   gravações de `phase.log` a cada frame (todas com medição antes/depois).
@@ -289,11 +296,9 @@ Pacote atual: `dist/RDoom.nro` sha256 `f78662e024517fb24151b053f0dd7085e784294f7
 - Mapas com hordas (slaughter): medir no console o malloc em pool; depois colisão (1,7–2,3 ms por tic) e os
   scripts dos imps (3,8 ms por tic com ~150).
 - Mods testados no console: Brutal Doom, Lexicon (+ slaughter), Compendium, Ashes 2063, Aliens Eradication TC,
-  Trailblazer. Modo dock: não se aplica (Switch Lite). Opcional: launcher avisar quando mods selecionados declaram a mesma cvar.
-- OpenGL no console: vista preta. No Ryujinx (OpenGL de desktop) a vista 3D fica preta ao começar direto
-  num mapa até alternar o automapa.
+  Trailblazer. Modo dock: não se aplica (Switch Lite).
 - WadFusion: regerar `doom_fusion.ipk3` com o WadFusion v1.6.1 (precisa dos WADs do usuário).
-- Release no GitHub (`.nro` + Freedoom, sem IWADs comerciais), CI e README em inglês.
+- CI no GitHub (build automático).
 - Sessões longas (1–2 h): memória e estabilidade.
 - Depois: Project Brutality (mais pesado em scripts que o Brutal Doom).
 - Lightmaps ainda sobem por cópia (compute) no Vulkan; nenhum mod testado usa.

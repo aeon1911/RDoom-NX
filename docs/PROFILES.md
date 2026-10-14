@@ -56,7 +56,7 @@ O motor recebe os mods exatamente nessa ordem (`-file`).
   "mods": [ { "file": "brutal22test6.pk3", "enabled": true, "optional": false } ],
   "mod_patterns": ["brutal*.pk3"],
   "video": {
-    "renderer": "vulkan",          // "vulkan" | "opengl" | "gles"
+    "renderer": "vulkan",          // só "vulkan"; "opengl"/"gles" de perfis antigos viram Vulkan
     "internal_scale": 1.0,         // vid_scalefactor 0.5–1.0
     "fps_limit": 60,               // vid_maxfps, 0 = sem limite, senão 20–60
     "vsync": true,                 // vid_vsync
@@ -83,10 +83,10 @@ importado não consegue injetar comandos.
 
 `launcher/src/core/launch.cpp`:
 
-- `vid_preferbackend` é gravado em `[GlobalSettings]` de
-  `config/engine/<id>.ini` (0 = OpenGL, 1 = Vulkan, 2 = OpenGL ES). O motor lê
-  esse valor antes de criar a janela; o relatório `logs/engine-session.txt`
-  mostra `renderer_requested` e `renderer_active`.
+- `vid_preferbackend` é gravado como 1 (Vulkan) em `[GlobalSettings]` de
+  `config/engine/<id>.ini`; um valor antigo (0 = OpenGL, 2 = OpenGL ES) é
+  regravado como 1, e o motor também força o Vulkan. O relatório
+  `logs/engine-session.txt` mostra `renderer_requested` e `renderer_active`.
 - O resto vira `+set` na linha de comando: `vid_scalefactor`, `vid_maxfps`,
   `vid_vsync`, `r_dynlights`, `gl_texture_filter`, efeitos de pós-processamento
   conforme a qualidade, `rd_joy_sensitivity`/`rd_joy_deadzone`/

@@ -55,7 +55,7 @@ int main(int argc, char **argv)
 	AppInfo info;
 	info.version = "RDoom 1.0.0";
 	info.engineVersion = "UZDoom 5.0.3 (7910df71)";
-	info.gfxVersion = "Mesa 26.2.4 NVK (Vulkan 1.4) + OpenGL/OpenGL ES";
+	info.gfxVersion = "Mesa 26.2.4 NVK (Vulkan 1.4)";
 	info.buildDate = "host preview";
 	info.enginePk3 = argv[3];
 	info.lastSessionFile = PathJoin(paths.Logs(), "engine-session.txt");
@@ -75,6 +75,8 @@ int main(int argc, char **argv)
 		{ BtnB, nullptr }, { BtnB, nullptr }, { BtnB, nullptr }, { BtnB, nullptr },
 		{ BtnUp, nullptr }, { BtnDown, nullptr }, { BtnDown, nullptr }, { BtnA, nullptr }, { 0, nullptr }, { 0, nullptr }, { 0, "09-iwads" },
 		{ BtnB, nullptr }, { BtnDown, nullptr }, { BtnDown, nullptr }, { BtnDown, nullptr }, { BtnA, "10-settings" },
+		{ BtnDown, nullptr }, { BtnDown, nullptr }, { BtnDown, nullptr }, { BtnDown, nullptr }, { BtnDown, nullptr }, { BtnA, "10b-about" },
+		{ BtnB, nullptr }, { BtnUp, nullptr }, { BtnUp, nullptr }, { BtnUp, nullptr }, { BtnUp, nullptr }, { BtnUp, nullptr },
 		{ BtnB, nullptr }, { BtnDown, nullptr }, { BtnA, "11-diagnostics" },
 		{ BtnB, nullptr }, { BtnUp, nullptr }, { BtnUp, nullptr }, { BtnUp, nullptr }, { BtnUp, nullptr }, { BtnUp, nullptr }, { BtnUp, nullptr },
 		{ BtnA, "12-launch" },
