@@ -1,7 +1,7 @@
 From 74c08b37aa94bac306c6c0653d6af5f0b93b3e57 Mon Sep 17 00:00:00 2001
 From: RDoom <171243930+aeon1911@users.noreply.github.com>
 Date: Tue, 13 Oct 2026 19:40:17 -0300
-Subject: [PATCH 50/56] Switch: dynamic resolution never falls back to
+Subject: [PATCH 50/57] Switch: dynamic resolution never falls back to
  frame-time rules on the console
 
 Console test of 453febfd0 (Lexicon slaughter map with Brutal, 1000-1265

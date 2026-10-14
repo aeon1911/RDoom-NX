@@ -1,7 +1,7 @@
 # RDoom NX — estado em 2026-10-14 (1.0.0)
 
-Pacote atual: `dist/RDoom.nro` sha256 `1c4fdba75e5ee27b35792e5566fd1118c14e1c7b8049755fb392c85e1e006af9`
-(motor `5.0.3-56-g499d2922b`), zips e `SHA256SUMS.txt` em `dist/`.
+Pacote atual: `dist/RDoom.nro` sha256 `9ba9b6087bc119fa244bb3ebe6a258ee3473853a0f196c5fa7ed797a1dbf66c2`
+(motor `5.0.3-57-g6926966ab`), zips e `SHA256SUMS.txt` em `dist/`.
 
 ## Feito e verificado
 
@@ -288,6 +288,16 @@ Pacote atual: `dist/RDoom.nro` sha256 `1c4fdba75e5ee27b35792e5566fd1118c14e1c7b8
   pelo `warp` funciona) — problema separado, a investigar.
 - Descartado pela desmontagem do driver: a remoção das limpezas de cache da CPU (memória coerente
   do NVK é mapeada sem cache no console).
+
+## Teste do 1.0.0 no console (2026-10-14)
+
+- Freedoom 2 MAP01: 54,6–60 fps. CPU quase parada (tic 0,3 ms), esperando 13–14 ms por frame pela GPU;
+  timestamps da GPU 11 ms, resolução 65–95%. A média de frame (17,4–18,3 ms) ficava entre a regra de
+  descida (18,7 ms) e a de subida (17,5 ms): nada mexia na resolução. Motor 6926966ab: desce com média
+  acima de 17,33 ms (≈57,7 fps) e espera > 6 ms; sobe só abaixo de 17,0 ms. **Falta confirmar no console.**
+- Brutal Doom v21 + Lexicon slaughter (PZST01, ~4000 objetos): 43–54 fps, limitado pela CPU (tic 15 ms,
+  ShotgunGuy1/Imp/`BDECWindowColision1` ×792 do Brutal Doom); GPU 10–12 ms a 75%.
+- Logs em `evidence/hw/2026-10-14-v1.0.0/`.
 
 ## Pendente
 
