@@ -306,6 +306,9 @@ Pacote atual: `dist/RDoom.nro` sha256 `5c8dc83c38c1b6e9038f47d8139e4f4454adaaec4
   em todas as janelas de 5 s, resolução variando entre 60% e 100% conforme a cena (GPU 10,2 ms). O hub ficou em
   33–37 fps (não importa). Mapa mais leve que o dos barris (DKTS01 Arch Bridge, ~800 objetos), que ainda precisa ser repetido.
   Logs em `evidence/hw/2026-10-14-dynres-acquire/`.
+- **Console, 1.0.1 (mesmo código de 387dc8279), Lexicon slaughter:** DSV101 Insurgents (~1200 objetos, ~4 min)
+  58,8–60,3 fps depois do início do mapa (primeira janela 54,9), resolução 60–100%; SF1201 Exodus cannonball
+  (~480 objetos) 59,2–60 fps. Logs em `evidence/hw/2026-10-14-v1.0.1/`.
 
 ## Pendente
 
