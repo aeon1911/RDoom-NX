@@ -1,7 +1,7 @@
 # RDoom NX — estado em 2026-10-13
 
-Pacote atual: `dist/RDoom.nro` sha256 `a566fa155500fe307bcb3bbde7e12a4cc41d65ad615253e077b47e0fac0ef3c5`
-(motor `5.0.3-53-gc5638cdba`), zips e `SHA256SUMS.txt` em `dist/`.
+Pacote atual: `dist/RDoom.nro` sha256 `0b539a9ecce9ddcbcaf6e949c7dd2e75a27319aaa795fb7d48101da3164070cf`
+(motor `5.0.3-54-ga50efb888`), zips e `SHA256SUMS.txt` em `dist/`.
 
 ## Feito e verificado
 
@@ -245,6 +245,14 @@ Pacote atual: `dist/RDoom.nro` sha256 `a566fa155500fe307bcb3bbde7e12a4cc41d65ad6
   jogo gastava ~2,8 ms por quadro em ~1500 malloc/free da newlib. 5.0.3-53-gc5638cdba: malloc/free/realloc/calloc/
   malloc_usable_size de até 1 KB saem do mesmo pool (Ryujinx: 1,1 → 0,22 ms por quadro; 4 min de horda sem
   erro); lista do pacote com 95 pipelines (hub VR incluído). Logs em `evidence/hw/2026-10-14-objpool`.
+- **Teste do c5638cdba (2026-10-14, seis sessões):** heap da thread do jogo 2,8 → 0,4–0,6 ms por quadro.
+  Lexicon slaughter CSH201 (1500–1780 atores): 45–55 fps, tic 6,6–9,4 ms, quase nenhum frame > 35 ms
+  (antes 23–36 fps). Aliens Eradication TC: 52–60 fps. Compendium e Ashes 2063: 43–53 fps em trechos, com a
+  CPU esperando 13–15 ms por quadro pela GPU e os carimbos de tempo marcando 12–13 ms — a resolução não
+  baixava. Ashes com os três episódios juntos: erro fatal de CVARINFO duplicado (os episódios são para
+  carregar separados; mesmo erro no UZDoom de PC). 5.0.3-54-ga50efb888: médias de ~20 quadros também baixam a escala
+  (quadros > 18,7 ms com espera pela GPU > 6 ms) e ela só sobe com 60 fps na média.
+  Logs em `evidence/hw/2026-10-14-pool`.
 - **Publicado em 2026-10-13:** https://github.com/aeon1911/RDoom-NX (público) com o motor em
   https://github.com/aeon1911/RDoom-NX-engine (fork do UZDoom, branch `rdoom-nx`, submódulo `engine/`).
   Autor dos commits trocado para o e-mail privado do GitHub (os hashes do motor mudaram). Não publicados:
@@ -271,7 +279,8 @@ Pacote atual: `dist/RDoom.nro` sha256 `a566fa155500fe307bcb3bbde7e12a4cc41d65ad6
   depois de atualizar.
 - Mapas com hordas (slaughter): medir no console o malloc em pool; depois colisão (1,7–2,3 ms por tic) e os
   scripts dos imps (3,8 ms por tic com ~150).
-- Outros mods no console (Compendium, Trailblazer, Ashes, Aliens TC). Modo dock: não se aplica (Switch Lite).
+- Outros mods no console: Trailblazer ainda não testado; Compendium/Ashes testados (ver acima). Modo dock:
+  não se aplica (Switch Lite). Opcional: launcher avisar quando mods selecionados declaram a mesma cvar.
 - OpenGL no console: vista preta. No Ryujinx (OpenGL de desktop) a vista 3D fica preta ao começar direto
   num mapa até alternar o automapa.
 - WadFusion: regerar `doom_fusion.ipk3` com o WadFusion v1.6.1 (precisa dos WADs do usuário).

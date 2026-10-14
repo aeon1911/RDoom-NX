@@ -1,7 +1,7 @@
 From 6bba77e332a3c28b45233e0ab981812034eaea3d Mon Sep 17 00:00:00 2001
 From: RDoom <171243930+aeon1911@users.noreply.github.com>
 Date: Tue, 13 Oct 2026 21:07:59 -0300
-Subject: [PATCH 52/53] Switch: script objects from a pooled allocator; CPU
+Subject: [PATCH 52/54] Switch: script objects from a pooled allocator; CPU
  counters for hordes
 
 Lexicon slaughter maps with Brutal Doom ran 16-25 ms tics with ~2000
