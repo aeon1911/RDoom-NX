@@ -1,7 +1,7 @@
 From 658e9ff3171d00ca4b37e341d4b7403a6cb0c0e0 Mon Sep 17 00:00:00 2001
 From: Aeon <171243930+aeon1911@users.noreply.github.com>
 Date: Wed, 30 Sep 2026 18:09:46 -0300
-Subject: [PATCH 10/58] Switch: steadier frame rate in scenes with lots of
+Subject: [PATCH 10/59] Switch: steadier frame rate in scenes with lots of
  fire, torches and effects.
 
 - Frame rate stabilizer (nx_stabilizer = target FPS): while frames miss the

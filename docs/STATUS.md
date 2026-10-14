@@ -1,7 +1,7 @@
-# RDoom NX — estado em 2026-10-14 (1.0.0)
+# RDoom NX — estado em 2026-10-14 (1.0.1)
 
-Pacote atual: `dist/RDoom.nro` sha256 `601ed87a424e32cc3d0c64c9447e435ebfa0f50730552ca56ebaefa7e4a48d04`
-(motor `5.0.3-58-g387dc8279`), zips e `SHA256SUMS.txt` em `dist/`.
+Pacote atual: `dist/RDoom.nro` sha256 `5c8dc83c38c1b6e9038f47d8139e4f4454adaaec4229c6028dd33f2116727f73`
+(motor `5.0.3-59-g2af10015c`, release 1.0.1), zips e `SHA256SUMS.txt` em `dist/`.
 
 ## Feito e verificado
 
@@ -304,7 +304,7 @@ Pacote atual: `dist/RDoom.nro` sha256 `601ed87a424e32cc3d0c64c9447e435ebfa0f5073
   carregamento conta na média como no máximo dois vsyncs. Logs em `evidence/hw/2026-10-14-dynres-band/`.
 - **Console, motor 387dc8279:** Lexicon slaughter, MOC201 (Maps of Chaos 1, ~315 objetos), ~5 min: 59,3–60,0 fps
   em todas as janelas de 5 s, resolução variando entre 60% e 100% conforme a cena (GPU 10,2 ms). O hub ficou em
-  33–37 fps (não importa). Mapa mais leve que o dos barris (~800 objetos), que ainda precisa ser repetido.
+  33–37 fps (não importa). Mapa mais leve que o dos barris (DKTS01 Arch Bridge, ~800 objetos), que ainda precisa ser repetido.
   Logs em `evidence/hw/2026-10-14-dynres-acquire/`.
 
 ## Pendente
