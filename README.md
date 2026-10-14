@@ -156,8 +156,7 @@ cd RDoom-NX && scripts/build.sh` (Docker, git, python3, rsvg-convert,
 ImageMagick, curl, unzip).
 
 **What it cost:** developed with Claude Code (Anthropic's Claude Opus 5.5
-model), with every step tested on the author's Switch Lite. Actual spend: a
-Claude Pro subscription (US$ 20/month). At API prices the project's recorded
+model), with every step tested on the author's Switch Lite. Actual spend At API prices the project's recorded
 tokens would come to about **US$ 261** (1.93 M output tokens, 6.26 M cache
 writes, 860 M cache reads, 3.7 K input tokens; Claude Opus 5.5 list prices,
 October 2026).
