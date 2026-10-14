@@ -33,9 +33,14 @@ git -C "$ROOT/engine" merge-base --is-ancestor "$UZ_BASE" HEAD || die "engine/ H
 echo "engine: $(git -C "$ROOT/engine" describe --always --tags --dirty) on UZDoom 5.0.3 ($UZ_BASE)"
 SDK="$ROOT/third_party/mesa-sdk/mesa-26.2.4-switch-unified-horizon-sdk-606441c9.zip"
 if [ ! -f "$SDK" ]; then
-	step "Fetching the Mesa Horizon SDK (danfromtico/mesa-switch CI artifact 11484346771)"
+	# the copy on this project's GitHub release (no login needed) first; the
+	# original CI artifact (danfromtico/mesa-switch 11484346771, needs gh auth)
+	# expires on 2027-01-05
+	step "Fetching the Mesa Horizon SDK (606441c9)"
 	mkdir -p "$(dirname "$SDK")"
-	gh api repos/danfromtico/mesa-switch/actions/artifacts/11484346771/zip > "$SDK" || die "cannot download the Mesa SDK (needs gh auth)"
+	curl -fsSL --retry 3 -o "$SDK" https://github.com/aeon1911/RDoom-NX/releases/download/deps-mesa-26.2.4-606441c9/mesa-26.2.4-switch-unified-horizon-sdk-606441c9.zip \
+		|| gh api repos/danfromtico/mesa-switch/actions/artifacts/11484346771/zip > "$SDK" \
+		|| die "cannot download the Mesa SDK"
 fi
 echo "937cbda82d411c3ca909aa977b3ced82d4e6070046ab016911b1ce84e58ca392  $SDK" | sha256sum -c - >/dev/null || die "Mesa SDK checksum mismatch"
 

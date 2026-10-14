@@ -19,7 +19,7 @@ Estado em 2026-10-14:
 
 | Peça | Origem |
 |---|---|
-| `libvulkan.a` (NVK + compilador NAK em Rust); `libEGL/libglapi` só porque o SDL2 depende delas | Mesa 26.2.4, danfromtico/mesa-switch `606441c9`, artefato de CI 11484346771, sha256 `937cbda82d411c3ca909aa977b3ced82d4e6070046ab016911b1ce84e58ca392` (verificado no `docker/Dockerfile`) |
+| `libvulkan.a` (NVK + compilador NAK em Rust); `libEGL/libglapi` só porque o SDL2 depende delas | Mesa 26.2.4, danfromtico/mesa-switch `606441c9`, artefato de CI 11484346771 (cópia no release `deps-mesa-26.2.4-606441c9` deste repositório), sha256 `937cbda82d411c3ca909aa977b3ced82d4e6070046ab016911b1ce84e58ca392` (verificado no `docker/Dockerfile`) |
 | Superfície | `VK_NN_vi_surface` sobre o `NWindow` padrão do libnx |
 | Backend do motor | `engine/src/common/rendering/vulkan/` (UZDoom 5.0.3) + ZVulkan/VMA em `engine/libraries/ZVulkan` |
 | Criação do contexto | `engine/src/common/platform/posix/sdl/sdlglvideo.cpp` |

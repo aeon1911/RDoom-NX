@@ -316,7 +316,7 @@ Pacote atual: `dist/RDoom.nro` sha256 `61810435b253482f86e4fccdce3012c3b92df4bbb
   Switch (scripts dos mods; 12–14 fps com 7500 objetos). Não há ajuste de resolução que resolva.
 - Project Brutality: carregamento longo (leitura dos scripts ~11 s; 577 MB lidos do SD); o visor do capacete
   custa ~3 ms de GPU (desligá-lo no menu do PB dá resolução mais alta).
-- O Mesa SDK do CI vem de um artefato do danfromtico/mesa-switch que expira em 2027-01-05: guardar uma cópia
-  antes disso para o CI continuar.
+- Mesa SDK: cópia guardada no release `deps-mesa-26.2.4-606441c9` deste repositório (o artefato original do
+  danfromtico/mesa-switch expira em 2027-01-05); `scripts/build.sh` e o CI baixam dela.
 - Lightmaps ainda sobem por cópia (compute) no Vulkan; nenhum mod testado usa.
 - Sessões longas e modo dock: não se aplicam (mapas não duram horas; Switch Lite).

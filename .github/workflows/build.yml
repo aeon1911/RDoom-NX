@@ -25,14 +25,15 @@ jobs:
           # the art script calls ImageMagick 7's "magick"; Ubuntu ships 6 ("convert", same arguments here)
           command -v magick || { printf '#!/bin/sh\nexec convert "$@"\n' | sudo tee /usr/local/bin/magick >/dev/null; sudo chmod +x /usr/local/bin/magick; }
 
-      # the Mesa Horizon SDK is a CI artifact of danfromtico/mesa-switch (build.sh checks its SHA-256)
+      # the Mesa Horizon SDK comes from the deps-mesa-26.2.4-606441c9 release of this repository
+      # (copy of a danfromtico/mesa-switch CI artifact; build.sh checks its SHA-256)
       - name: Cache the Mesa SDK and Freedoom downloads
         uses: actions/cache@v6
         with:
           path: |
             third_party/mesa-sdk
             third_party/freedoom/freedoom-0.13.0.zip
-          key: deps-mesa-606441c9-freedoom-0.13.0
+          key: deps-mesa-606441c9-mirror-freedoom-0.13.0
 
       - name: Build and test
         env:
