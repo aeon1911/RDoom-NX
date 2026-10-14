@@ -410,6 +410,14 @@ static void TestResolveAndLaunch()
 			warned = true;
 	CHECK(warned);
 
+	// Project Brutality template: GitHub zip name and release names, not Brutal Doom
+	Profile pb = MakeDefaultProfile("brutality");
+	CHECK_EQ(pb.id, std::string("project-brutality"));
+	CHECK(pb.modPatterns.size() == 1);
+	CHECK(GlobMatch(pb.modPatterns[0], "Project_Brutality-master.pk3"));
+	CHECK(GlobMatch(pb.modPatterns[0], "Project Brutality 3.0.pk3"));
+	CHECK(!GlobMatch(pb.modPatterns[0], "brutalv21.pk3"));
+
 	// missing dependency declared by GAMEINFO LOAD
 	Profile dep;
 	dep.id = "dep";

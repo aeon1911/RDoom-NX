@@ -315,7 +315,9 @@ Pacote atual: `dist/RDoom.nro` sha256 `5c8dc83c38c1b6e9038f47d8139e4f4454adaaec4
 - DKTS01 Arch Bridge (Lexicon slaughter, ~800 objetos, 90 barris): repetir no console com o 1.0.1.
 - Brutal Doom + Lexicon slaughter (~4000 objetos): 43–54 fps, limitado pelos scripts do Brutal Doom
   (`BDECWindowColision1` ×792, ShotgunGuy1, Imp).
-- Project Brutality: em andamento.
+- Project Brutality: em andamento. Ryujinx: carrega sem erro de script (leitura dos scripts 10,8 s, 577 MB
+  lidos do SD), MAP01 a 60 fps (`evidence/ryujinx/93-pb-first`). Modelo "Project Brutality" no launcher
+  (`project?brutality*.pk3`). Falta: console (tempo de carga, memória, combate).
 - WadFusion: regerar `doom_fusion.ipk3` com o WadFusion v1.6.1 (precisa dos WADs do usuário).
 - CI no GitHub (`.github/workflows/build.yml`): o Mesa SDK vem de um artefato de CI do danfromtico/mesa-switch
   que expira em 2027-01-05.

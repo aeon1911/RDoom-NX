@@ -1,0 +1,68 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="480" height="270" viewBox="0 0 480 270">
+<defs>
+  <radialGradient id="g" cx="0.78" cy="0.35" r="0.9">
+    <stop offset="0" stop-color="#ff5a14" stop-opacity="0.75"/>
+    <stop offset="0.45" stop-color="#ff5a14" stop-opacity="0.12"/>
+    <stop offset="1" stop-color="#ff5a14" stop-opacity="0"/>
+  </radialGradient>
+  <linearGradient id="fade" x1="0" y1="0" x2="0" y2="1">
+    <stop offset="0.35" stop-color="#000" stop-opacity="0"/>
+    <stop offset="1" stop-color="#000" stop-opacity="0.85"/>
+  </linearGradient>
+  <filter id="b2"><feGaussianBlur stdDeviation="2"/></filter>
+  <filter id="tex" x="0" y="0" width="100%" height="100%">
+    <feTurbulence type="fractalNoise" baseFrequency="0.012 0.03" numOctaves="4" seed="65"/>
+    <feColorMatrix type="matrix" values="0 0 0 0 0  0 0 0 0 0  0 0 0 0 0  0 0 0 1.2 -0.4"/>
+  </filter>
+</defs>
+<rect width="480" height="270" fill="#120802"/>
+<rect width="480" height="270" fill="url(#g)"/>
+<rect width="480" height="270" filter="url(#tex)" opacity="0.7"/>
+<g><path d="M240,-10 L258,-10 L180,280 L162,280 Z" fill="#ff5a14" opacity="0.25"/>
+<path d="M286,-10 L304,-10 L226,280 L208,280 Z" fill="#ff5a14" opacity="0.37"/>
+<path d="M332,-10 L350,-10 L272,280 L254,280 Z" fill="#ff5a14" opacity="0.49"/>
+<path d="M378,-10 L396,-10 L318,280 L300,280 Z" fill="#ff5a14" opacity="0.61"/>
+<path d="M424,-10 L442,-10 L364,280 L346,280 Z" fill="#ff5a14" opacity="0.73"/>
+<circle cx="386" cy="26" r="4.7" fill="#7a0505" opacity="0.8"/>
+<circle cx="419" cy="68" r="1.5" fill="#7a0505" opacity="0.8"/>
+<circle cx="269" cy="39" r="4.8" fill="#7a0505" opacity="0.8"/>
+<circle cx="335" cy="82" r="3.4" fill="#7a0505" opacity="0.8"/>
+<circle cx="414" cy="94" r="2.4" fill="#7a0505" opacity="0.8"/>
+<circle cx="241" cy="48" r="4.4" fill="#7a0505" opacity="0.8"/>
+<circle cx="436" cy="55" r="2.5" fill="#7a0505" opacity="0.8"/>
+<circle cx="344" cy="229" r="1.3" fill="#7a0505" opacity="0.8"/>
+<circle cx="424" cy="29" r="2.1" fill="#7a0505" opacity="0.8"/>
+<circle cx="248" cy="118" r="3.4" fill="#7a0505" opacity="0.8"/>
+<circle cx="348" cy="69" r="2.2" fill="#7a0505" opacity="0.8"/>
+<circle cx="452" cy="228" r="3.1" fill="#7a0505" opacity="0.8"/>
+<circle cx="431" cy="68" r="3.0" fill="#7a0505" opacity="0.8"/>
+<circle cx="354" cy="10" r="1.8" fill="#7a0505" opacity="0.8"/>
+<circle cx="368" cy="267" r="4.8" fill="#7a0505" opacity="0.8"/>
+<circle cx="368" cy="85" r="4.1" fill="#7a0505" opacity="0.8"/>
+<circle cx="404" cy="136" r="2.5" fill="#7a0505" opacity="0.8"/>
+<circle cx="454" cy="261" r="3.8" fill="#7a0505" opacity="0.8"/>
+<circle cx="393" cy="85" r="4.7" fill="#7a0505" opacity="0.8"/>
+<circle cx="335" cy="229" r="3.1" fill="#7a0505" opacity="0.8"/>
+<circle cx="263" cy="156" r="2.5" fill="#7a0505" opacity="0.8"/>
+<circle cx="353" cy="260" r="3.1" fill="#7a0505" opacity="0.8"/>
+<circle cx="357" cy="268" r="3.9" fill="#7a0505" opacity="0.8"/>
+<circle cx="409" cy="112" r="1.5" fill="#7a0505" opacity="0.8"/>
+<circle cx="330" cy="27" r="3.3" fill="#7a0505" opacity="0.8"/>
+<circle cx="411" cy="32" r="4.9" fill="#7a0505" opacity="0.8"/>
+<circle cx="455" cy="216" r="1.3" fill="#7a0505" opacity="0.8"/>
+<circle cx="325" cy="133" r="2.3" fill="#7a0505" opacity="0.8"/>
+<circle cx="232" cy="137" r="4.9" fill="#7a0505" opacity="0.8"/>
+<circle cx="379" cy="21" r="4.5" fill="#7a0505" opacity="0.8"/>
+<circle cx="269" cy="251" r="4.2" fill="#7a0505" opacity="0.8"/>
+<circle cx="442" cy="216" r="2.3" fill="#7a0505" opacity="0.8"/>
+<circle cx="308" cy="126" r="3.0" fill="#7a0505" opacity="0.8"/>
+<circle cx="222" cy="178" r="4.3" fill="#7a0505" opacity="0.8"/>
+<circle cx="249" cy="239" r="2.9" fill="#7a0505" opacity="0.8"/>
+<circle cx="424" cy="5" r="4.9" fill="#7a0505" opacity="0.8"/>
+<circle cx="371" cy="68" r="3.6" fill="#7a0505" opacity="0.8"/>
+<circle cx="337" cy="162" r="2.8" fill="#7a0505" opacity="0.8"/>
+<circle cx="366" cy="156" r="2.5" fill="#7a0505" opacity="0.8"/>
+<circle cx="206" cy="11" r="2.1" fill="#7a0505" opacity="0.8"/></g>
+<rect width="480" height="270" fill="url(#fade)"/>
+<rect x="0" y="0" width="6" height="270" fill="#ff5a14"/>
+</svg>

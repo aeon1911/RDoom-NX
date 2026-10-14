@@ -27,7 +27,7 @@ cp -r "$B/soundfonts" "$B/fm_banks" "$SD/"
 
 # launcher artwork (loaded from the SD card, not embedded in the NRO)
 for f in bg_main.jpg bg_inner.jpg splash.jpg logo_300.png logo_400.png logo_620.png \
-         card_freedoom2.jpg card_brutaldoom.jpg card_wadfusion.jpg card_lexicon.jpg card_compendium.jpg card_custom.jpg; do
+         card_freedoom2.jpg card_brutaldoom.jpg card_brutality.jpg card_wadfusion.jpg card_lexicon.jpg card_compendium.jpg card_custom.jpg; do
 	cp "$ROOT/assets/build/$f" "$SD/launcher/"
 done
 

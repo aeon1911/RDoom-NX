@@ -358,6 +358,16 @@ std::vector<Profile> BuiltinTemplates()
 	}
 	{
 		Profile p;
+		p.id = "project-brutality";
+		p.templateId = "brutality";
+		p.name = "Project Brutality";
+		p.description = "Project Brutality (pk3, versão do GitHub) sobre DOOM II. Carregamento longo: o mod tem 60 mil arquivos.";
+		p.iwadCandidates = { "doom2.wad", "doom.wad", "freedoom2.wad" };
+		p.modPatterns = { "project?brutality*.pk3" };
+		t.push_back(p);
+	}
+	{
+		Profile p;
 		p.id = "wadfusion";
 		p.templateId = "wadfusion";
 		p.name = "WadFusion";
@@ -496,11 +506,11 @@ void ProfileStore::Load()
 	}
 	// creation order; the built-in profiles (same second) keep their own order
 	auto rank = [](const Profile &p) {
-		static const char *order[] = { "freedoom2", "brutaldoom", "wadfusion", "lexicon", "compendium", "custom" };
-		for (int i = 0; i < 6; i++)
+		static const char *order[] = { "freedoom2", "brutaldoom", "brutality", "wadfusion", "lexicon", "compendium", "custom" };
+		for (int i = 0; i < 7; i++)
 			if (p.templateId == order[i])
 				return i;
-		return 6;
+		return 7;
 	};
 	std::stable_sort(profiles_.begin(), profiles_.end(), [&](const Profile &a, const Profile &b) {
 		if (a.created != b.created)

@@ -16,6 +16,7 @@ import os
 import random
 import subprocess
 import sys
+import zlib
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 SVG_DIR = os.path.join(ROOT, "src", "svg")
@@ -438,6 +439,7 @@ CARD_THEMES = {
     # template id: (base, glow, accent, motif)
     "freedoom2": ("#06120f", "#1fd39a", "#7affd2", "grid"),
     "brutaldoom": ("#160304", "#ff1e1e", "#ff8a5a", "slash"),
+    "brutality": ("#120802", "#ff5a14", "#ffb36a", "slash"),
     "wadfusion": ("#140b02", "#ff9a1a", "#ffd27a", "rings"),
     "lexicon": ("#0e0616", "#a64dff", "#e0b3ff", "glyphs"),
     "compendium": ("#050b16", "#2d8cff", "#a8d4ff", "stack"),
@@ -447,7 +449,7 @@ CARD_THEMES = {
 
 def card_svg(tid, w=480, h=270):
     base, glow, accent, motif = CARD_THEMES[tid]
-    rng = random.Random(hash(tid) & 0xffff)
+    rng = random.Random(zlib.crc32(tid.encode()) & 0xffff)	# hash() changes every run
     s = ['<svg xmlns="http://www.w3.org/2000/svg" width="%d" height="%d" viewBox="0 0 %d %d">' % (w, h, w, h)]
     s.append("""<defs>
   <radialGradient id="g" cx="0.78" cy="0.35" r="0.9">

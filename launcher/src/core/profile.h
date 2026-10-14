@@ -67,7 +67,7 @@ struct Profile
 	std::string id;                 // file name stem: [a-z0-9-]
 	std::string name;
 	std::string description;
-	std::string templateId;         // "freedoom2", "brutaldoom", "wadfusion", "lexicon", "compendium", "custom"
+	std::string templateId;         // "freedoom2", "brutaldoom", "brutality", "wadfusion", "lexicon", "compendium", "custom"
 	std::string iwad;               // file name in iwads/ (or absolute path)
 	std::vector<std::string> iwadCandidates;  // template: acceptable IWAD files, in preference order
 	std::vector<ModRef> mods;       // load order

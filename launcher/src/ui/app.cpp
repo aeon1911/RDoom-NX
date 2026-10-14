@@ -115,7 +115,7 @@ void LauncherApp::Init()
 	LoadImageFile(PathJoin(paths_.Art(), "bg_inner.jpg"), bgInner_);
 	LoadImageFile(PathJoin(paths_.Art(), "logo_300.png"), logoSmall_);
 	LoadImageFile(PathJoin(paths_.Art(), "logo_400.png"), logo_);
-	for (const char *t : { "freedoom2", "brutaldoom", "wadfusion", "lexicon", "compendium", "custom" })
+	for (const char *t : { "freedoom2", "brutaldoom", "brutality", "wadfusion", "lexicon", "compendium", "custom" })
 	{
 		Image img;
 		if (LoadImageFile(PathJoin(paths_.Art(), std::string("card_") + t + ".jpg"), img))

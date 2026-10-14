@@ -73,7 +73,7 @@ def main():
         "RDoom.nro", "uzdoom.pk3", "game_support.pk3", "game_widescreen_gfx.pk3", "brightmaps.pk3", "lights.pk3",
         "soundfonts/uzdoom.sf2", "fm_banks/GENMIDI.GS.wopl", "VERSION.txt",
         "launcher/bg_main.jpg", "launcher/bg_inner.jpg", "launcher/splash.jpg", "launcher/logo_400.png",
-        "launcher/card_freedoom2.jpg", "launcher/card_custom.jpg",
+        "launcher/card_freedoom2.jpg", "launcher/card_brutality.jpg", "launcher/card_custom.jpg",
         "iwads/LEIA-ME.txt", "mods/LEIA-ME.txt",
         "licenses/GPL-3.0-UZDoom.txt", "licenses/THIRD_PARTY_NOTICES.md", "licenses/OFL-Poppins.txt", "licenses/OFL-BebasNeue.txt",
         "licenses/MESA-MIT.txt", "licenses/LIBNX-ISC.txt",

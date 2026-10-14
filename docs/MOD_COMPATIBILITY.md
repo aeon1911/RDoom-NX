@@ -15,6 +15,7 @@ distribuído. O RDoom renderiza só com Vulkan.
 | Ashes 2063 | WADs carregados separados | — | ✅ 55–60 fps | — |
 | Aliens Eradication TC | — | — | ✅ 52–60 fps | — |
 | Trailblazer (+ Lexicon slaughter) | — | — | ✅ 55–60 fps | — |
+| Project Brutality | `Project_Brutality-master.pk3` (GitHub, 2026-03-14, 63 mil arquivos), DOOM II | ✅ MAP01, armas, tiros, 60 fps; sem erro de script; leitura dos scripts 10,8 s | ⏳ pendente | `93-pb-first` |
 | WadFusion | `doom_fusion.ipk3` **gerado para UZDoom/GZDoom 4.14** | ❌ (motor recusa o arquivo) | ❌ | `31-vk-blitupload/wadfusion-uzdoom-5.0.3-linux-pc.log` |
 
 ## Mods que não rodam juntos
