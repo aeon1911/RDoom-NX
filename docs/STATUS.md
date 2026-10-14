@@ -1,7 +1,7 @@
-# RDoom NX — estado final em 2026-10-14 (1.1.0, projeto concluído)
+# RDoom NX — estado final em 2026-10-14 (1.1.1, projeto concluído)
 
-Pacote atual: `dist/RDoom.nro` sha256 `61810435b253482f86e4fccdce3012c3b92df4bbb84c00a9d6a7485b8fbb8441`
-(motor `5.0.3-62-g911f28b46`, release 1.1.0), zips e `SHA256SUMS.txt` em `dist/`.
+Pacote atual: `dist/RDoom.nro` sha256 `ac8859f4896c5fb9de62ac2d008338d05d7fd91da7e26558b1434bc43539783c`
+(motor `5.0.3-63-g1c1599ca7`, release 1.1.1), zips e `SHA256SUMS.txt` em `dist/`.
 
 ## Feito e verificado
 
@@ -304,11 +304,39 @@ Pacote atual: `dist/RDoom.nro` sha256 `61810435b253482f86e4fccdce3012c3b92df4bbb
   carregamento conta na média como no máximo dois vsyncs. Logs em `evidence/hw/2026-10-14-dynres-band/`.
 - **Console, motor 387dc8279:** Lexicon slaughter, MOC201 (Maps of Chaos 1, ~315 objetos), ~5 min: 59,3–60,0 fps
   em todas as janelas de 5 s, resolução variando entre 60% e 100% conforme a cena (GPU 10,2 ms). O hub ficou em
-  33–37 fps (não importa). Mapa mais leve que o dos barris (DKTS01 Arch Bridge, ~800 objetos), que ainda precisa ser repetido.
+  33–37 fps (não importa). Mapa mais leve que o dos barris (DKTS01 Arch Bridge, ~800 objetos).
   Logs em `evidence/hw/2026-10-14-dynres-acquire/`.
 - **Console, 1.0.1 (mesmo código de 387dc8279), Lexicon slaughter:** DSV101 Insurgents (~1200 objetos, ~4 min)
   58,8–60,3 fps depois do início do mapa (primeira janela 54,9), resolução 60–100%; SF1201 Exodus cannonball
   (~480 objetos) 59,2–60 fps. Logs em `evidence/hw/2026-10-14-v1.0.1/`.
+
+## Project Brutality, WadFusion e correções finais (console, 2026-10-14)
+
+- **Project Brutality** (`Project_Brutality-master.pk3`, versão do GitHub de 2026-03-14, 63 mil arquivos): carrega
+  sem erro de script (leitura dos scripts 11,5 s; 577 MB lidos do SD). MAP01/MAP02 a 55–60 fps em combate; CPU
+  folgada (tic 2–5 ms, `PB_BarrelHeatSmoke` o mais caro). A cena fica no piso de 60% porque o 2D (HUD) custa
+  4,3–5,5 ms; sem o visor do capacete, 1,4–1,8 ms, resolução 81–85% e 58–60 fps. Modelo "Project Brutality" no
+  launcher (`project?brutality*.pk3`). Logs em `evidence/hw/2026-10-14-pb-first/` e `2026-10-14-tartarus-pbvisor/`.
+- **Shader 2D enxuto** (`EFF_SIMPLE2D`, motor a1d3a1e79): só o caminho 2D do `main.fp` para imagens 2D com o
+  material padrão; idêntico pixel a pixel no Ryujinx. No console, PB com o visor: 2D/present 3,7–4,9 ms (antes
+  4,3–5,5). `rd_vk_simple2d 0` volta ao caminho antigo. O `perf.log` mostra imagens 2D e área por frame.
+- **Brutal Doom v21 + Lexicon slaughter, DKTS01 Arch Bridge:** na sala grande, 3600 → 7500 objetos e 12–14 fps.
+  CPU: tic de 44–56 ms (800 `Imp` do Brutal Doom = 13,8 ms, 134 `TehArchvile`, ~1200 alvos de headshot/perna,
+  colisão 6,7 ms, 400 objetos criados por tic); GPU 9 ms. O mesmo mapa sem o Brutal Doom: 60 fps no começo,
+  56 fps com a cena cheia. Logs em `2026-10-14-tartarus-pbvisor/` e `2026-10-14-simple2d/`.
+- **Travamento ao sair (corrigido no 1.1.0):** PB + WadFusion, tela preta ao sair: `nvk_FreeDescriptorSets` vindo da
+  lista de objetos de um frame ainda em voo, liberada depois de o gerenciador de descriptor sets destruir os
+  pools. O dispositivo agora esvazia os frames pendentes logo depois de a GPU parar. Logs em `2026-10-14-crash/`.
+- **Travada de ~0,3 s ao pegar a roupa antirradiação no PB (corrigido para as próximas vezes, 1.1.0):** a imagem
+  de 1472×2160 da HUD era decodificada e enviada naquele frame; a lista de texturas pré-carregadas agora guarda
+  também imagens grandes da HUD (≥ 256×256).
+- **WadFusion** gerado de novo pelo usuário (v1.6.1): carrega e roda; PB + Sigil E5M1 a 57–60 fps. O aviso de
+  `compat_nombf21` em `maps_id1.txt` não tem efeito. No menu de episódios o Legacy of Rust aparece como
+  "The Vulcan Abyss" e "Counterfeit Eden".
+- **Legacy of Rust + PB, LR_MAP08 (1.1.0):** 48–60 fps com ~1000 objetos. CPU ~20 ms por frame (cena 7 ms para
+  ~670 itens, HUD do PB 2,5 ms, monstros 5 ms por tic) e GPU 11,5 ms com a cena no piso de 60%: os dois perto do
+  limite. O `engine-stderr.log` tinha ~1000 linhas de avisos do `mpg123` (sons MP3 do PB com lixo no começo),
+  gravadas no SD durante o jogo; o 1.1.1 liga `MPG123_QUIET`. Logs em `2026-10-14-lr-pb/`.
 
 ## Limitações conhecidas (projeto encerrado)
 
