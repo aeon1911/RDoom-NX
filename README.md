@@ -31,7 +31,7 @@ Anthropic), em sessões com testes no Switch Lite do autor a cada etapa.
 |---|---|
 | CRÉDITOS GASTOS DO MEU BOLSO COM API | **≈ US$ 261** |
 
-O equivalente em API soma os tokens registrados nas sessões do projeto, com a
+O valor soma os tokens registrados nas sessões do projeto, com a
 tabela pública do Claude Opus 5.5 (outubro de 2026): 1,93 milhão de tokens de
 saída (US$ 38,65), 6,26 milhões de escrita de cache (US$ 50,08), 860 milhões de
 leitura de cache (US$ 172,08) e 3,7 mil de entrada (US$ 0,01).
@@ -157,10 +157,10 @@ cd RDoom-NX && scripts/build.sh` (Docker, git, python3, rsvg-convert,
 ImageMagick, curl, unzip).
 
 **What it cost:** developed with Claude Code (Anthropic's Claude Opus 5.5
-model), with every step tested on the author's Switch Lite. Actual spend At API prices the project's recorded
-tokens would come to about **US$ 261** (1.93 M output tokens, 6.26 M cache
-writes, 860 M cache reads, 3.7 K input tokens; Claude Opus 5.5 list prices,
-October 2026).
+model), with every step tested on the author's Switch Lite. The author paid
+about **US$ 261** in API credits out of pocket (1.93 M output tokens, 6.26 M
+cache writes, 860 M cache reads, 3.7 K input tokens; Claude Opus 5.5 list
+prices, October 2026).
 
 **Support the project:** PIX or PayPal to `renanol.design@gmail.com`.
 
