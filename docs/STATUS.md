@@ -319,7 +319,8 @@ Pacote atual: `dist/RDoom.nro` sha256 `5c8dc83c38c1b6e9038f47d8139e4f4454adaaec4
   lidos do SD), MAP01 a 60 fps (`evidence/ryujinx/93-pb-first`). Modelo "Project Brutality" no launcher
   (`project?brutality*.pk3`). Falta: console (tempo de carga, memória, combate).
 - WadFusion: regerar `doom_fusion.ipk3` com o WadFusion v1.6.1 (precisa dos WADs do usuário).
-- CI no GitHub (`.github/workflows/build.yml`): o Mesa SDK vem de um artefato de CI do danfromtico/mesa-switch
-  que expira em 2027-01-05.
+- CI no GitHub (`.github/workflows/build.yml`) funcionando: build completo + testes em ~19 min, pacote como
+  artefato. O Mesa SDK vem de um artefato de CI do danfromtico/mesa-switch que expira em 2027-01-05: guardar
+  uma cópia antes disso.
 - Lightmaps ainda sobem por cópia (compute) no Vulkan; nenhum mod testado usa.
 - Sessões longas: não se aplicam (um mapa não dura horas); modo dock: não se aplica (Switch Lite).

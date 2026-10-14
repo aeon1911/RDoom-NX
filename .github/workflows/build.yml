@@ -13,7 +13,7 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 150
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           submodules: recursive
           fetch-depth: 0  # build.sh checks the engine is based on the UZDoom 5.0.3 commit
@@ -27,7 +27,7 @@ jobs:
 
       # the Mesa Horizon SDK is a CI artifact of danfromtico/mesa-switch (build.sh checks its SHA-256)
       - name: Cache the Mesa SDK and Freedoom downloads
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: |
             third_party/mesa-sdk
@@ -41,7 +41,7 @@ jobs:
         run: scripts/build.sh
 
       - name: Upload the package
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: RDoom-NX-${{ github.sha }}
           path: |
@@ -52,7 +52,7 @@ jobs:
 
       - name: Build logs
         if: failure()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: build-logs-${{ github.sha }}
           path: build/logs/
