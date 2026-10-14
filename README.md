@@ -43,9 +43,9 @@ Testado no Switch físico (Lite, portátil, clocks de fábrica):
 
 | Conteúdo | Resultado |
 |---|---|
-| Freedoom 2, DOOM II | 55–60 fps (1.0.0; o ajuste da resolução dinâmica para segurar 60 está em teste) |
+| Freedoom 2, DOOM II | 58–60 fps (55–60 no 1.0.0; resolução dinâmica ajustada depois) |
 | Brutal Doom v21 (Freedoom 2 / DOOM II) | 55–60 fps; fumaça e fogo em meia resolução nas lutas |
-| Lexicon (+ pacote slaughter, 1500–2000 monstros) | 45–60 fps |
+| Lexicon (+ pacote slaughter) | 59–60 fps em mapas médios; 45–60 com 1500–2000 monstros |
 | Brutal Doom + Lexicon slaughter | 43–54 fps (limite: scripts do Brutal Doom na CPU, ~4000 objetos) |
 | Trailblazer + Lexicon slaughter | 55–60 fps |
 | Compendium, Ashes 2063, Aliens Eradication TC | 54–60 fps |
@@ -138,7 +138,7 @@ its own launcher for IWAD/mod libraries, load order and profiles. Stock clocks
 only: no overclocking code of any kind. Made by **Renan (Æon)**.
 
 Tested on a Switch Lite (handheld, stock clocks): Freedoom 2 and DOOM II at
-55–60 fps; Brutal Doom v21 at 55–60 fps; Lexicon with its slaughter pack (1500–2000
+58–60 fps; Brutal Doom v21 at 55–60 fps; Lexicon with its slaughter pack (1500–2000
 monsters) at 45–60 fps; Trailblazer, Compendium, Ashes 2063 and Aliens
 Eradication TC at 54–60 fps. GPU-timed dynamic resolution, smoke and fire in a
 half-resolution layer, background sprite decoding, pipelines and textures

@@ -301,8 +301,11 @@ Pacote atual: `dist/RDoom.nro` sha256 `601ed87a424e32cc3d0c64c9447e435ebfa0f5073
 - **Console, motor 6926966ab:** Freedoom 2 MAP01 58,1–60,1 fps (era 54,6–57), resolução 74–78%.
   Lexicon slaughter (sem Brutal): 52–60 fps; uma janela a 52 fps esperava 4,9 ms pela GPU (limite era 6 ms).
   Motor 387dc8279: a espera sustentada soma o acquire do frame anterior, limite 4 ms; um travamento de
-  carregamento conta na média como no máximo dois vsyncs. **Falta confirmar no console.**
-  Logs em `evidence/hw/2026-10-14-dynres-band/`.
+  carregamento conta na média como no máximo dois vsyncs. Logs em `evidence/hw/2026-10-14-dynres-band/`.
+- **Console, motor 387dc8279:** Lexicon slaughter, MOC201 (Maps of Chaos 1, ~315 objetos), ~5 min: 59,3–60,0 fps
+  em todas as janelas de 5 s, resolução variando entre 60% e 100% conforme a cena (GPU 10,2 ms). O hub ficou em
+  33–37 fps (não importa). Mapa mais leve que o dos barris (~800 objetos), que ainda precisa ser repetido.
+  Logs em `evidence/hw/2026-10-14-dynres-acquire/`.
 
 ## Pendente
 
