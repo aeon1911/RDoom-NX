@@ -29,8 +29,7 @@ Anthropic), em sessões com testes no Switch Lite do autor a cada etapa.
 
 | | |
 |---|---|
-| Gasto real | CRÉDITOS GASTOS NA API: US$ 261 |
-| Equivalente em preço de API | **≈ US$ 261** |
+| CRÉDITOS GASTOS DO MEU BOLSO COM API | **≈ US$ 261** |
 
 O equivalente em API soma os tokens registrados nas sessões do projeto, com a
 tabela pública do Claude Opus 5.5 (outubro de 2026): 1,93 milhão de tokens de
