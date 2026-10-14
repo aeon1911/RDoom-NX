@@ -1,7 +1,7 @@
 From 23e731af998be4321ad5f617a9551e7e2dfceaef Mon Sep 17 00:00:00 2001
 From: RDoom <171243930+aeon1911@users.noreply.github.com>
 Date: Wed, 14 Oct 2026 10:58:26 -0300
-Subject: [PATCH 55/61] Switch: no busy wait on frames without a game tic
+Subject: [PATCH 55/62] Switch: no busy wait on frames without a game tic
  (r_ticstability off)
 
 Console test of a50efb888: Ashes 2063 now 55-60 fps and Compendium 54-60

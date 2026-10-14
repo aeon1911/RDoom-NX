@@ -1,0 +1,74 @@
+From 911f28b466bc1153a04117f677fa723ee5a40e28 Mon Sep 17 00:00:00 2001
+From: RDoom <171243930+aeon1911@users.noreply.github.com>
+Date: Wed, 14 Oct 2026 19:25:13 -0300
+Subject: [PATCH 62/62] RDoom 1.1.0: no crash on quit; big HUD pictures
+ preloaded
+
+Console (Project Brutality + WadFusion): black screen and a crash in
+nvk_FreeDescriptorSets when quitting. The frames left in flight by the
+frame overlap kept their delete lists until VkCommandBufferManager went
+away, after the descriptor set manager had destroyed the pools. The device
+now empties the pending frames right after vkDeviceWaitIdle.
+
+Picking up PB's radiation suit stalled ~0.3 s decoding and uploading its
+1472x2160 HUD overlay. The texture warm list also keeps large HUD pictures
+(MiscPatch/Override of 256x256 or more), loaded with the map next time.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ CMakeLists.txt                                         | 2 +-
+ src/common/rendering/vulkan/renderer/vk_renderpass.cpp | 6 +++++-
+ src/common/rendering/vulkan/system/vk_renderdevice.cpp | 6 ++++++
+ 3 files changed, 12 insertions(+), 2 deletions(-)
+
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index aefa783d5..9d7773feb 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -72,7 +72,7 @@ if( NINTENDO_SWITCH )
+ 	# our gcc complains about the use of alloca, stricmp, etc without including the appropriate headers
+ 	# unless we just do this
+ 	set( CMAKE_CXX_EXTENSIONS ON )
+-	set( RDOOM_VERSION "1.0.1" )
++	set( RDOOM_VERSION "1.1.0" )
+ 	set( SWITCH_APP_VERSION "${RDOOM_VERSION}" )
+ 	# RDoom launcher sources (outside this tree so the engine stays a patch series)
+ 	set( RDOOM_LAUNCHER_DIR "${CMAKE_SOURCE_DIR}/../launcher" CACHE PATH "RDoom launcher source directory" )
+diff --git a/src/common/rendering/vulkan/renderer/vk_renderpass.cpp b/src/common/rendering/vulkan/renderer/vk_renderpass.cpp
+index 59f1e935e..6a16dac0d 100644
+--- a/src/common/rendering/vulkan/renderer/vk_renderpass.cpp
++++ b/src/common/rendering/vulkan/renderer/vk_renderpass.cpp
+@@ -280,8 +280,12 @@ void VkRenderPassManager::TextureFirstUsed(FGameTexture *tex, int scaleFlags)
+ 		return;
+ 	// walls and flats are precached with the map already; what shows up by
+ 	// surprise are effect sprites (fire, smoke, gore) and decals
++	// Large HUD pictures too: Project Brutality's radiation suit overlay
++	// (1472x2160) took ~0.3 s to decode and upload when first picked up
+ 	const ETextureType ut = tex->GetUseType();
+-	if (ut != ETextureType::Sprite && ut != ETextureType::Decal && ut != ETextureType::SkinSprite)
++	const bool bigPicture = (ut == ETextureType::MiscPatch || ut == ETextureType::Override) &&
++		tex->GetTexelWidth() * tex->GetTexelHeight() >= 256 * 256;
++	if (ut != ETextureType::Sprite && ut != ETextureType::Decal && ut != ETextureType::SkinSprite && !bigPicture)
+ 		return;
+ 	const FString &name = tex->GetName();
+ 	if (name.IsEmpty() || name.Len() > 60 || name.IndexOf(' ') >= 0)
+diff --git a/src/common/rendering/vulkan/system/vk_renderdevice.cpp b/src/common/rendering/vulkan/system/vk_renderdevice.cpp
+index 7cf588962..e7635632b 100644
+--- a/src/common/rendering/vulkan/system/vk_renderdevice.cpp
++++ b/src/common/rendering/vulkan/system/vk_renderdevice.cpp
+@@ -154,6 +154,12 @@ VulkanRenderDevice::~VulkanRenderDevice()
+ 		if (VulkanDeviceLostCallback)
+ 			VulkanDeviceLostCallback("vkDeviceWaitIdle at shutdown");
+ 	}
++	// The frames left in flight by the frame overlap hold their delete lists
++	// (descriptor sets among them) until WaitForPendingFrame. Empty them now,
++	// while the descriptor pools still exist: freed after the descriptor set
++	// manager, nvk_FreeDescriptorSets crashed on quit (console, Project
++	// Brutality + WadFusion, black screen at exit).
++	mCommands->WaitForPendingFrame();
+ 
+ #ifdef __SWITCH__
+ 	mNXFxDepthPass.reset();
+-- 
+2.56.0
+

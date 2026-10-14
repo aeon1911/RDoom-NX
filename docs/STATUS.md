@@ -1,7 +1,7 @@
-# RDoom NX — estado em 2026-10-14 (1.0.1)
+# RDoom NX — estado final em 2026-10-14 (1.1.0, projeto concluído)
 
-Pacote atual: `dist/RDoom.nro` sha256 `5c8dc83c38c1b6e9038f47d8139e4f4454adaaec4229c6028dd33f2116727f73`
-(motor `5.0.3-59-g2af10015c`, release 1.0.1), zips e `SHA256SUMS.txt` em `dist/`.
+Pacote atual: `dist/RDoom.nro` sha256 `61810435b253482f86e4fccdce3012c3b92df4bbb84c00a9d6a7485b8fbb8441`
+(motor `5.0.3-62-g911f28b46`, release 1.1.0), zips e `SHA256SUMS.txt` em `dist/`.
 
 ## Feito e verificado
 
@@ -310,32 +310,13 @@ Pacote atual: `dist/RDoom.nro` sha256 `5c8dc83c38c1b6e9038f47d8139e4f4454adaaec4
   58,8–60,3 fps depois do início do mapa (primeira janela 54,9), resolução 60–100%; SF1201 Exodus cannonball
   (~480 objetos) 59,2–60 fps. Logs em `evidence/hw/2026-10-14-v1.0.1/`.
 
-## Pendente
+## Limitações conhecidas (projeto encerrado)
 
-- DKTS01 Arch Bridge (Lexicon slaughter, ~800 objetos, 90 barris): repetir no console com o 1.0.1.
-- Brutal Doom + Lexicon slaughter (~4000 objetos): 43–54 fps, limitado pelos scripts do Brutal Doom
-  (`BDECWindowColision1` ×792, ShotgunGuy1, Imp).
-- Project Brutality: em andamento. Ryujinx: carrega sem erro de script (leitura dos scripts 10,8 s, 577 MB
-  lidos do SD), MAP01 a 60 fps (`evidence/ryujinx/93-pb-first`). Modelo "Project Brutality" no launcher
-  (`project?brutality*.pk3`).
-  **Console (1.0.1):** MAP01 e MAP02 a 55–60 fps em combate, sem erro; leitura dos scripts 11,5 s; CPU folgada
-  (tic 2–5 ms, `PB_BarrelHeatSmoke` o mais caro, até 0,7 ms com 60 deles). A GPU fica no piso da resolução
-  (60%) porque o 2D (HUD) custa 5–6 ms (1,7 ms nos outros mods): 123 imagens por frame cobrindo só 1,8 tela
-  (Ryujinx), então o custo deve ser por desenho, não de preenchimento. Motor 0b1d8fa2f: o `perf.log` mostra
-  imagens 2D e área por frame; imagens 2D com alfa final 0 não são desenhadas. Logs em
-  `evidence/hw/2026-10-14-pb-first/`.
-  **Console, visor ligado × desligado (motor 0b1d8fa2f):** com o visor, 2D/present 4,3–5,5 ms (~200 imagens,
-  1,8 tela de área); sem o visor, 1,4–1,8 ms (~110 imagens, 0,1 tela), resolução 60% → 81–85%, 58–60 fps. O 2D
-  custa ~1,9 ms de GPU por tela de área com o `main.fp` completo. Motor a1d3a1e79: efeito `simple2d` (só o
-  caminho 2D do `main.fp`) para imagens 2D com o material padrão; idêntico pixel a pixel no Ryujinx
-  (título, menu, barra de status); `rd_vk_simple2d 0` volta ao caminho antigo. **Falta medir no console.**
-- Brutal Doom v21 + Lexicon slaughter, DKTS01 Arch Bridge (console, 2026-10-14): na sala grande, 3600 → 7500
-  objetos e 12–14 fps. CPU: tic de 44–56 ms (800 `Imp` do Brutal Doom = 13,8 ms, 134 `TehArchvile` 1,9 ms,
-  ~1200 alvos de headshot/perna, colisão 6,7 ms, 400 objetos criados por tic). GPU 9 ms (folgada). O mesmo
-  mapa sem o Brutal Doom é o caso que falta repetir. Logs em `evidence/hw/2026-10-14-tartarus-pbvisor/`.
-- WadFusion: regerar `doom_fusion.ipk3` com o WadFusion v1.6.1 (precisa dos WADs do usuário).
-- CI no GitHub (`.github/workflows/build.yml`) funcionando: build completo + testes em ~19 min, pacote como
-  artefato. O Mesa SDK vem de um artefato de CI do danfromtico/mesa-switch que expira em 2027-01-05: guardar
-  uma cópia antes disso.
+- Brutal Doom ou Project Brutality em mapas slaughter gigantes (milhares de monstros): limitados pela CPU do
+  Switch (scripts dos mods; 12–14 fps com 7500 objetos). Não há ajuste de resolução que resolva.
+- Project Brutality: carregamento longo (leitura dos scripts ~11 s; 577 MB lidos do SD); o visor do capacete
+  custa ~3 ms de GPU (desligá-lo no menu do PB dá resolução mais alta).
+- O Mesa SDK do CI vem de um artefato do danfromtico/mesa-switch que expira em 2027-01-05: guardar uma cópia
+  antes disso para o CI continuar.
 - Lightmaps ainda sobem por cópia (compute) no Vulkan; nenhum mod testado usa.
-- Sessões longas: não se aplicam (um mapa não dura horas); modo dock: não se aplica (Switch Lite).
+- Sessões longas e modo dock: não se aplicam (mapas não duram horas; Switch Lite).

@@ -36,7 +36,7 @@ tabela pública do Claude Opus 5.5 (outubro de 2026): 1,93 milhão de tokens de
 saída (US$ 38,65), 6,26 milhões de escrita de cache (US$ 50,08), 860 milhões de
 leitura de cache (US$ 172,08) e 3,7 mil de entrada (US$ 0,01).
 
-## Estado (1.0.1, 2026-10-14)
+## Estado (1.1.0, 2026-10-14) — projeto concluído
 
 Testado no Switch físico (Lite, portátil, clocks de fábrica):
 
@@ -48,6 +48,9 @@ Testado no Switch físico (Lite, portátil, clocks de fábrica):
 | Brutal Doom + Lexicon slaughter | 43–54 fps (limite: scripts do Brutal Doom na CPU, ~4000 objetos) |
 | Trailblazer + Lexicon slaughter | 55–60 fps |
 | Compendium, Ashes 2063, Aliens Eradication TC | 54–60 fps |
+| Project Brutality (versão do GitHub) sobre DOOM II | 55–60 fps em combate; 58–60 sem o visor do capacete |
+| WadFusion (gerado com o WadFusion v1.6.1) + Project Brutality | 57–60 fps (Sigil E5M1) |
+| Brutal Doom + mapa slaughter gigante (7500 objetos) | 12–14 fps: limite da CPU, sem solução no port |
 
 O que mantém o ritmo: resolução dinâmica guiada pelo tempo da GPU, fumaça e
 fogo do Brutal Doom numa camada de meia resolução, estabilizador que corta
@@ -58,7 +61,7 @@ testes em `docs/STATUS.md`.
 
 ## Instalação
 
-1. Copie `switch/` do zip `RDoom-NX-1.0.1.zip` (ou `…-Freedoom.zip`, que já
+1. Copie `switch/` do zip `RDoom-NX-1.1.0.zip` (ou `…-Freedoom.zip`, que já
    traz as IWADs livres do Freedoom) para a raiz do cartão SD. Para atualizar,
    copie por cima: perfis, saves e o cache de `switch/rdoom/cache` continuam.
 2. IWADs em `sdmc:/switch/rdoom/iwads/`, mods em `sdmc:/switch/rdoom/mods/`.
@@ -69,7 +72,7 @@ Detalhes em `docs/INSTALL-pt-BR.txt` (também dentro do pacote).
 
 ## Perfis prontos
 
-FreeDoom 2 — Vulkan Stock · Brutal Doom · WadFusion · Lexicon · Compendium ·
+FreeDoom 2 — Vulkan Stock · Brutal Doom · Project Brutality · WadFusion · Lexicon · Compendium ·
 Configuração personalizada, todos com a configuração **"RDoom — Stock
 Switch"** (1280×720, vsync, 60 FPS, sem pós-processamento pesado). Criar,
 duplicar, renomear, editar, apagar, exportar, importar e restaurar pelo
@@ -114,7 +117,7 @@ Testes: `scripts/test.sh` (host) e `scripts/ryujinx-test.sh`,
 - `docs/PERFORMANCE.md` — benchmarks e ritmo de frames, método e ressalvas
 - `docs/ARCHITECTURE.md` — fluxo de boot, módulos, layout do SD, logs
 - `docs/PROFILES.md` — perfis e modelos
-- `docs/MOD_COMPATIBILITY.md` — mods testados (e o caso do WadFusion)
+- `docs/MOD_COMPATIBILITY.md` — mods testados (e o WadFusion, que precisa ser gerado com a v1.6.1)
 - `docs/RYUJINX_TEST_REPORT.md` — ambiente e resultados no emulador
 - `docs/PORTING_AUDIT.md` — origem de cada parte, mudanças, política de clocks
 - `docs/STATUS.md` — histórico de testes no console e pendências
@@ -139,14 +142,16 @@ only: no overclocking code of any kind. Made by **Renan (Æon)**.
 Tested on a Switch Lite (handheld, stock clocks): Freedoom 2 and DOOM II at
 58–60 fps; Brutal Doom v21 at 55–60 fps; Lexicon with its slaughter pack (1500–2000
 monsters) at 45–60 fps; Trailblazer, Compendium, Ashes 2063 and Aliens
-Eradication TC at 54–60 fps. GPU-timed dynamic resolution, smoke and fire in a
+Eradication TC at 54–60 fps; Project Brutality at 55–60 fps; WadFusion (built
+with WadFusion v1.6.1) works. GPU-timed dynamic resolution, a lean 2D shader for
+HUDs and menus, smoke and fire in a
 half-resolution layer, background sprite decoding, pipelines and textures
 prepared at level load, a pooled allocator for game objects and SD writes off
 the game thread keep the frame rate up. The launcher warns before starting
 when two selected mods declare the same CVARINFO variables (they cannot load
 together).
 
-**Install:** copy `switch/` from `RDoom-NX-1.0.1.zip` (or the `-Freedoom` zip,
+**Install:** copy `switch/` from `RDoom-NX-1.1.0.zip` (or the `-Freedoom` zip,
 which includes the free Freedoom IWADs) to the root of the SD card; IWADs go in
 `sdmc:/switch/rdoom/iwads/`, mods in `sdmc:/switch/rdoom/mods/`. Start it from
 the Homebrew Menu in title mode (hold R while opening a game). To update, copy

@@ -1,7 +1,7 @@
 From 453febfd0f77d10a9be1653c86b973e5f16a0f45 Mon Sep 17 00:00:00 2001
 From: RDoom <171243930+aeon1911@users.noreply.github.com>
 Date: Tue, 13 Oct 2026 19:21:48 -0300
-Subject: [PATCH 49/61] Switch: dynamic resolution and stabilizer give detail
+Subject: [PATCH 49/62] Switch: dynamic resolution and stabilizer give detail
  back at 60 fps
 
 Console test of 30e33a509 (Lexicon + Brutal): inside the maps the view stayed
