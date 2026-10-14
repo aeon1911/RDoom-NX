@@ -317,7 +317,13 @@ Pacote atual: `dist/RDoom.nro` sha256 `5c8dc83c38c1b6e9038f47d8139e4f4454adaaec4
   (`BDECWindowColision1` ×792, ShotgunGuy1, Imp).
 - Project Brutality: em andamento. Ryujinx: carrega sem erro de script (leitura dos scripts 10,8 s, 577 MB
   lidos do SD), MAP01 a 60 fps (`evidence/ryujinx/93-pb-first`). Modelo "Project Brutality" no launcher
-  (`project?brutality*.pk3`). Falta: console (tempo de carga, memória, combate).
+  (`project?brutality*.pk3`).
+  **Console (1.0.1):** MAP01 e MAP02 a 55–60 fps em combate, sem erro; leitura dos scripts 11,5 s; CPU folgada
+  (tic 2–5 ms, `PB_BarrelHeatSmoke` o mais caro, até 0,7 ms com 60 deles). A GPU fica no piso da resolução
+  (60%) porque o 2D (HUD) custa 5–6 ms (1,7 ms nos outros mods): 123 imagens por frame cobrindo só 1,8 tela
+  (Ryujinx), então o custo deve ser por desenho, não de preenchimento. Motor 0b1d8fa2f: o `perf.log` mostra
+  imagens 2D e área por frame; imagens 2D com alfa final 0 não são desenhadas. Logs em
+  `evidence/hw/2026-10-14-pb-first/`.
 - WadFusion: regerar `doom_fusion.ipk3` com o WadFusion v1.6.1 (precisa dos WADs do usuário).
 - CI no GitHub (`.github/workflows/build.yml`) funcionando: build completo + testes em ~19 min, pacote como
   artefato. O Mesa SDK vem de um artefato de CI do danfromtico/mesa-switch que expira em 2027-01-05: guardar

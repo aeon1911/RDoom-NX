@@ -1,0 +1,103 @@
+From 0b1d8fa2f66886262596ee5f580540cd25cc217a Mon Sep 17 00:00:00 2001
+From: RDoom <171243930+aeon1911@users.noreply.github.com>
+Date: Wed, 14 Oct 2026 16:39:37 -0300
+Subject: [PATCH 60/60] Switch: 2D images per frame in perf.log; fully
+ transparent ones left out
+
+Project Brutality on the console: 55-60 fps in MAP01/02 with the scene at
+the 60% floor and 5-6 ms of GPU in 2D/present (1.7 ms in other mods). The
+HUD draws 123 images a frame covering 1.8 screens (Ryujinx), so per-draw
+cost rather than fill is the suspect. perf.log now shows the 2D image count
+and area; an image whose final alpha is 0 under a source-alpha blend is not
+drawn (several of PB's visor layers, depending on sector light).
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ src/common/2d/v_2ddrawer.cpp  | 18 ++++++++++++++++++
+ src/common/engine/nx_perf.cpp |  6 ++++++
+ src/common/engine/nx_perf.h   |  2 ++
+ 3 files changed, 26 insertions(+)
+
+diff --git a/src/common/2d/v_2ddrawer.cpp b/src/common/2d/v_2ddrawer.cpp
+index 849bdb8b2..541f03e47 100644
+--- a/src/common/2d/v_2ddrawer.cpp
++++ b/src/common/2d/v_2ddrawer.cpp
+@@ -31,6 +31,9 @@
+ #include "v_video.h"
+ #include "fcolormap.h"
+ #include "texturemanager.h"
++#ifdef __SWITCH__
++#include "nx_perf.h"
++#endif
+ 
+ static F2DDrawer drawer = F2DDrawer();
+ F2DDrawer* twod = &drawer;
+@@ -434,6 +437,21 @@ void F2DDrawer::AddTexture(FGameTexture* img, DrawParms& parms)
+ 
+ 	dg.mTranslationId = NO_TRANSLATION;
+ 	SetStyle(img, parms, vertexcolor, dg);
++#ifdef __SWITCH__
++	// An image whose final alpha is 0 under a source-alpha blend leaves the
++	// screen as it was, but still costs its whole area in fill. Project
++	// Brutality's visor draws ~20 corner layers a frame, several at alpha 0
++	// depending on the sector light (console: 5-6 ms of GPU in 2D).
++	if (vertexcolor.a == 0 && !parms.burn && dg.mRenderStyle.BlendOp == STYLEOP_Add && dg.mRenderStyle.SrcAlpha == STYLEALPHA_Src &&
++		(dg.mRenderStyle.DestAlpha == STYLEALPHA_InvSrc || dg.mRenderStyle.DestAlpha == STYLEALPHA_One))
++	{
++		nxperf.skipped2d++;
++		return;
++	}
++	nxperf.draws2d++;
++	if (Width > 0 && Height > 0)
++		nxperf.area2d += fabs(parms.destwidth * parms.destheight) / (double(Width) * Height);
++#endif
+ 	if (parms.indexed)
+ 	{
+ 		dg.mLightLevel = vertexcolor.Luminance();
+diff --git a/src/common/engine/nx_perf.cpp b/src/common/engine/nx_perf.cpp
+index 16f78a778..1affe321a 100644
+--- a/src/common/engine/nx_perf.cpp
++++ b/src/common/engine/nx_perf.cpp
+@@ -62,6 +62,7 @@ static struct
+ 	double nmalloc, ncopy, nctor, nspec; double nbytes;
+ 	double hmalloc, hfree; int hmallocs, hfrees;
+ 	int tics, thinkers, sndstarts, drawitems, transitems, glsyncs, spriteskips, draws, lightuploads, lightskips, dynlights, dynlightsall, govlevel, vksubmits, effectsculled, halfeffects;
++	int draws2d, skipped2d; double area2d;
+ } win;
+ 
+ #ifdef __SWITCH__
+@@ -210,6 +211,9 @@ void NXPerf_EndFrame()
+ 		win.effectsculled += nxperf.effectsculled;
+ 		win.halfeffects += nxperf.halfeffects;
+ 		win.halfarea += nxperf.halfarea;
++		win.draws2d += nxperf.draws2d;
++		win.skipped2d += nxperf.skipped2d;
++		win.area2d += nxperf.area2d;
+ 		win.checkpos_ms += nxperf.checkpos_ms;
+ 		win.checkpos += nxperf.checkpos;
+ 		win.checkthings += nxperf.checkthings;
+@@ -327,6 +331,8 @@ void NXPerf_EndFrame()
+ 						win.hmallocs / frames, win.hmalloc / frames, win.hfrees / frames, win.hfree / frames);
+ 				fprintf(perfFile, "#   GL draw calls per frame %.0f | dynamic lights per frame: %.1f used of %.1f | light uploads %.0f, identical skipped %.0f | stabilizer level avg %.2f (now %d), effects left out per frame %.1f, in the half-resolution layer %.1f (their area %.2f screens, most %.2f)\n",
+ 					win.draws / n, win.dynlights / n, win.dynlightsall / n, win.lightuploads / n, win.lightskips / n, win.govlevel / n, nxGovLevel, win.effectsculled / n, win.halfeffects / n, win.halfarea / n, win.halfareamax);
++				fprintf(perfFile, "#   2D (HUD, menus, messages) per frame: %.0f images covering %.2f screens, %.1f fully transparent ones left out\n",
++					win.draws2d / n, win.area2d / n, win.skipped2d / n);
+ 			}
+ 			if (frames > 0 && win.vksubmits > 0)
+ 			{
+diff --git a/src/common/engine/nx_perf.h b/src/common/engine/nx_perf.h
+index 4ee957d4f..4b77d1d89 100644
+--- a/src/common/engine/nx_perf.h
++++ b/src/common/engine/nx_perf.h
+@@ -46,6 +46,8 @@ struct NXPerfCounters
+ 	int effectsculled = 0;	// translucent effects left out by the stabilizer's screen area budget
+ 	int halfeffects = 0;	// effect sprites drawn in the half-resolution layer (Switch Vulkan)
+ 	double halfarea = 0;	// screen area of the effects that could go to that layer (screens)
++	int draws2d = 0, skipped2d = 0;	// 2D images drawn (HUD, menus) / left out because they were fully transparent
++	double area2d = 0;	// screen area those 2D images cover (screens)
+ 	double present_ms = 0;	// copy of the finished frame to the window (waits for a free window buffer)
+ 	double draw2d_ms = 0;	// 2D drawing (HUD, menus, messages) - part of update_ms
+ 	double frameend_ms = 0;	// end of the previous frame done at the start of this one (GL driver thread: fence, swap, waits)
+-- 
+2.56.0
+
