@@ -258,6 +258,10 @@ Pacote atual: `dist/RDoom.nro` sha256 `f78662e024517fb24151b053f0dd7085e784294f7
   perf.log mede: `r_ticstability` gira, em cada quadro sem tic (25 de 60 por segundo), pelo tempo do último
   tic (~8 ms ali). 5.0.3-55-g23e731af9: desligado por padrão no Switch (revisão 3 das configurações desliga uma vez);
   horda no Ryujinx: tempo não medido 2,7 → 0,7 ms por quadro. Logs em `evidence/hw/2026-10-14-dynavg`.
+- **Teste do 23e731af9 (2026-10-14, Trailblazer + Lexicon slaughter, ~1300 atores):** 55–60 fps, quase sempre
+  60, resolução 80–100%, tempo não medido 0,8–1,0 ms por quadro (antes 3–4 ms). Um quadro de 220 ms em jogo:
+  pipeline novo de um shader do Trailblazer (efeito 14), agora salvo na lista do cartão. Lista do pacote com
+  96 pipelines. Logs em `evidence/hw/2026-10-14-trailblazer`.
 - **Publicado em 2026-10-13:** https://github.com/aeon1911/RDoom-NX (público) com o motor em
   https://github.com/aeon1911/RDoom-NX-engine (fork do UZDoom, branch `rdoom-nx`, submódulo `engine/`).
   Autor dos commits trocado para o e-mail privado do GitHub (os hashes do motor mudaram). Não publicados:
@@ -284,8 +288,8 @@ Pacote atual: `dist/RDoom.nro` sha256 `f78662e024517fb24151b053f0dd7085e784294f7
   depois de atualizar.
 - Mapas com hordas (slaughter): medir no console o malloc em pool; depois colisão (1,7–2,3 ms por tic) e os
   scripts dos imps (3,8 ms por tic com ~150).
-- Outros mods no console: Trailblazer ainda não testado; Compendium/Ashes testados (ver acima). Modo dock:
-  não se aplica (Switch Lite). Opcional: launcher avisar quando mods selecionados declaram a mesma cvar.
+- Mods testados no console: Brutal Doom, Lexicon (+ slaughter), Compendium, Ashes 2063, Aliens Eradication TC,
+  Trailblazer. Modo dock: não se aplica (Switch Lite). Opcional: launcher avisar quando mods selecionados declaram a mesma cvar.
 - OpenGL no console: vista preta. No Ryujinx (OpenGL de desktop) a vista 3D fica preta ao começar direto
   num mapa até alternar o automapa.
 - WadFusion: regerar `doom_fusion.ipk3` com o WadFusion v1.6.1 (precisa dos WADs do usuário).
