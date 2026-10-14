@@ -1,0 +1,134 @@
+From a1d3a1e797f2d59af956bdd101b6f76a8025878c Mon Sep 17 00:00:00 2001
+From: RDoom <171243930+aeon1911@users.noreply.github.com>
+Date: Wed, 14 Oct 2026 18:25:17 -0300
+Subject: [PATCH 61/61] Switch Vulkan: 2D images with the default material use
+ a lean "simple2d" shader
+
+Console test of Project Brutality: 2D costs ~1.9 ms of GPU per screen of
+area with the full main.fp (visor on: 2D/present 4.3-5.5 ms; off: 1.4-1.8
+ms, scale 60% -> 81-85%). EFF_SIMPLE2D is main.fp built with SIMPLE_2D:
+getTexel, alpha test, the 2D colormap mode, vertex color and overlay, the
+same result as the 2D branch with func_normal and the default ProcessLight,
+without the 3D material/light code. Used for textured 2D draws with shader
+index 0 once the effect shaders exist (the loading screen draws while they
+compile; the effect returns null until then). rd_vk_simple2d 0 restores the
+old path. Ryujinx: Freedoom title, menu and status bar pixel-identical
+on/off; Project Brutality HUD and visor drawn.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ .../hwrenderer/data/hw_renderstate.h          |  1 +
+ .../hwrenderer/data/hw_shaderpatcher.cpp      |  1 +
+ .../vulkan/renderer/vk_renderstate.cpp        | 14 ++++++++
+ wadsrc/static/shaders/glsl/main.fp            | 34 +++++++++++++++++++
+ 4 files changed, 50 insertions(+)
+
+diff --git a/src/common/rendering/hwrenderer/data/hw_renderstate.h b/src/common/rendering/hwrenderer/data/hw_renderstate.h
+index 266df72ab..18752c6f3 100644
+--- a/src/common/rendering/hwrenderer/data/hw_renderstate.h
++++ b/src/common/rendering/hwrenderer/data/hw_renderstate.h
+@@ -42,6 +42,7 @@ enum ERenderEffect
+ 	EFF_BURN,
+ 	EFF_STENCIL,
+ 	EFF_DITHERTRANS,
++	EFF_SIMPLE2D,	// 2D image with the default material: main.fp's 2D path only (SIMPLE_2D)
+ 	MAX_EFFECTS
+ };
+ 
+diff --git a/src/common/rendering/hwrenderer/data/hw_shaderpatcher.cpp b/src/common/rendering/hwrenderer/data/hw_shaderpatcher.cpp
+index 8314d61c7..76add6e15 100644
+--- a/src/common/rendering/hwrenderer/data/hw_shaderpatcher.cpp
++++ b/src/common/rendering/hwrenderer/data/hw_shaderpatcher.cpp
+@@ -305,6 +305,7 @@ const FEffectShader effectshaders[] =
+ 	{ "burn", "shaders/glsl/main.vp", "shaders/glsl/burn.fp", nullptr, nullptr, "#define SIMPLE\n#define NO_ALPHATEST\n" },
+ 	{ "stencil", "shaders/glsl/main.vp", "shaders/glsl/stencil.fp", nullptr, nullptr, "#define SIMPLE\n#define NO_ALPHATEST\n" },
+ 	{ "dithertrans", "shaders/glsl/main.vp", "shaders/glsl/main.fp", "shaders/glsl/func_normal.fp", "shaders/glsl/material_normal.fp", "#define NO_ALPHATEST\n#define DITHERTRANS\n" },
++	{ "simple2d", "shaders/glsl/main.vp", "shaders/glsl/main.fp", "shaders/glsl/func_normal.fp", "shaders/glsl/material_normal.fp", "#define SIMPLE_2D\n#define NO_LAYERS\n" },
+ };
+ 
+ int DFrameBuffer::GetShaderCount()
+diff --git a/src/common/rendering/vulkan/renderer/vk_renderstate.cpp b/src/common/rendering/vulkan/renderer/vk_renderstate.cpp
+index 733be30d3..f16af6b54 100644
+--- a/src/common/rendering/vulkan/renderer/vk_renderstate.cpp
++++ b/src/common/rendering/vulkan/renderer/vk_renderstate.cpp
+@@ -77,6 +77,10 @@ CVAR(Int, rd_vk_zstate, 0, 0)
+ // range for biased draws ([0,1-eps] closer, [eps,1] farther); 1: native bias
+ CVAR(Bool, rd_vk_depthbias, false, 0)
+ CVAR(Float, rd_vk_depthbias_eps, 1.0f / 8192.0f, 0)
++// 2D images with the default material use the "simple2d" effect shader:
++// main.fp's 2D path without the 3D material/light code (Project Brutality's
++// visor on the console: ~1.9 ms of GPU per screen of 2D with the full shader)
++CVAR(Bool, rd_vk_simple2d, true, CVAR_ARCHIVE | CVAR_GLOBALCONFIG)
+ int rd_vk_drawlog_burst = 0;
+ int rd_vk_drawlog_started = 0;
+ extern int nx_levelframes;
+@@ -334,6 +338,16 @@ void VkRenderState::ApplyRenderPass(int dt)
+ 		if (r_skipmats && pipelineKey.EffectState >= 3 && pipelineKey.EffectState <= 4)
+ 			pipelineKey.EffectState = 0;
+ 		pipelineKey.AlphaTest = mAlphaThreshold >= 0.f;
++#ifdef __SWITCH__
++		// 2D (fog mode 2) with a texture and the default material, once the
++		// effect shaders exist (the loading screen draws while they compile)
++		if (rd_vk_simple2d && mFogEnabled == 2 && mTextureEnabled && pipelineKey.EffectState == 0 && !mNXFxLayer &&
++			fb->GetShaderManager()->GetEffect(EFF_SIMPLE2D, NORMAL_PASS))
++		{
++			pipelineKey.SpecialEffect = EFF_SIMPLE2D;
++			pipelineKey.AlphaTest = false;
++		}
++#endif
+ 	}
+ 
+ 	// Is this the one we already have?
+diff --git a/wadsrc/static/shaders/glsl/main.fp b/wadsrc/static/shaders/glsl/main.fp
+index 66fcefbec..1a597f9f3 100644
+--- a/wadsrc/static/shaders/glsl/main.fp
++++ b/wadsrc/static/shaders/glsl/main.fp
+@@ -855,6 +855,39 @@ void main()
+ 	if (ClipDistanceA.x < 0 || ClipDistanceA.y < 0 || ClipDistanceA.z < 0 || ClipDistanceA.w < 0 || ClipDistanceB.x < 0) discard;
+ #endif
+ 
++#ifdef SIMPLE_2D
++	// 2D image with the default material (EFF_SIMPLE2D): the same result as
++	// the "simple 2D" branch below with func_normal and the default
++	// ProcessLight (returns vColor), without the 3D material and light code
++	// the GPU would otherwise run for every pixel of a HUD or menu.
++	vec2 texCoord = vTexCoord.st;
++#ifdef NPOT_EMULATION
++	if (uNpotEmulation.y != 0.0)
++	{
++		float period = floor(texCoord.t / uNpotEmulation.y);
++		texCoord.s += uNpotEmulation.x * floor(mod(texCoord.t, uNpotEmulation.y));
++		texCoord.t = period + mod(texCoord.t, uNpotEmulation.y);
++	}
++#endif
++	vec4 frag = getTexel(texCoord);
++#ifndef NO_ALPHATEST
++	if (frag.a <= uAlphaThreshold) discard;
++#endif
++	if ((uTextureMode & 0xffff) == 7)
++	{
++		float gray = grayscale(frag);
++		vec4 cm = (uObjectColor + gray * (uAddColor - uObjectColor)) * 2;
++		frag = vec4(clamp(cm.rgb, 0.0, 1.0), frag.a);
++	}
++	frag = frag * vColor;
++	frag.rgb = frag.rgb + uFogColor.rgb;
++	FragColor = frag;
++#ifdef GBUFFER_PASS
++	FragFog = vec4(0.0, 0.0, 0.0, 1.0);
++	FragNormal = vec4(0.5, 0.5, 0.5, 1.0);
++#endif
++#else
++
+ #ifndef LEGACY_USER_SHADER
+ 	Material material;
+ 
+@@ -960,4 +993,5 @@ void main()
+ 	FragFog = vec4(AmbientOcclusionColor(), 1.0);
+ 	FragNormal = vec4(vEyeNormal.xyz * 0.5 + 0.5, 1.0);
+ #endif
++#endif // SIMPLE_2D
+ }
+-- 
+2.56.0
+

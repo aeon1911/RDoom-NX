@@ -1,7 +1,7 @@
 From cd3caa9253a042aac67d9dd4414319b81a93a1ad Mon Sep 17 00:00:00 2001
 From: RDoom <171243930+aeon1911@users.noreply.github.com>
 Date: Mon, 12 Oct 2026 15:55:45 -0300
-Subject: [PATCH 29/60] Shaders: validate the dynamic light list header before
+Subject: [PATCH 29/61] Shaders: validate the dynamic light list header before
  the light loops
 
 A header read back as garbage turned the light loops into practically

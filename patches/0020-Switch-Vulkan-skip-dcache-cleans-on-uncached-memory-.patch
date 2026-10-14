@@ -1,7 +1,7 @@
 From 8b928579267724a79a7de362c579132e81814f53 Mon Sep 17 00:00:00 2001
 From: RDoom <171243930+aeon1911@users.noreply.github.com>
 Date: Sun, 11 Oct 2026 13:40:47 -0300
-Subject: [PATCH 20/60] Switch Vulkan: skip dcache cleans on uncached memory,
+Subject: [PATCH 20/61] Switch Vulkan: skip dcache cleans on uncached memory,
  overlap frames, stop per-frame phase.log writes
 
 - VulkanBuffer/VulkanImage know whether their memory is HOST_CACHED. NVK on

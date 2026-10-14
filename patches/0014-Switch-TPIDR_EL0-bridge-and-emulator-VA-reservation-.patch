@@ -1,7 +1,7 @@
 From 3a03407bc93ab091e64d374d629605aa8ed14160 Mon Sep 17 00:00:00 2001
 From: RDoom <171243930+aeon1911@users.noreply.github.com>
 Date: Sun, 11 Oct 2026 10:03:19 -0300
-Subject: [PATCH 14/60] Switch: TPIDR_EL0 bridge and emulator VA-reservation
+Subject: [PATCH 14/61] Switch: TPIDR_EL0 bridge and emulator VA-reservation
  compatibility.
 
 nx_tls_bridge.c copies the libnx soft thread pointer into TPIDR_EL0 on every
