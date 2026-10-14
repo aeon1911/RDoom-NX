@@ -6,6 +6,8 @@ Port não oficial do **UZDoom 5.0.3** para Nintendo Switch desbloqueado
 o **RDoom NX**, com bibliotecas de IWADs e mods, ordem de carregamento e
 perfis.
 
+**Atualmente a melhor experiência jogável de DOOM w/MODS do Nintendo Switch!**
+
 **Somente os clocks de fábrica.** O RDoom não tem código de overclock, nem
 opção de frequência, nem dependência de sys-clk (verificado por
 `tests/check_no_overclock.sh`).
