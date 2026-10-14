@@ -1,7 +1,7 @@
 From dcadfb7f81438f2b3b2c29962c45d956096cba41 Mon Sep 17 00:00:00 2001
 From: RDoom <171243930+aeon1911@users.noreply.github.com>
 Date: Sun, 11 Oct 2026 10:03:19 -0300
-Subject: [PATCH 18/52] Switch: per-profile Joy-Con/Pro Controller sensitivity,
+Subject: [PATCH 18/53] Switch: per-profile Joy-Con/Pro Controller sensitivity,
  dead zone and look inversion (rd_joy_* cvars).
 
 Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>

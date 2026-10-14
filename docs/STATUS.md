@@ -1,7 +1,7 @@
 # RDoom NX — estado em 2026-10-13
 
-Pacote atual: `dist/RDoom.nro` sha256 `9b17c43249020a0eb8a3d5b33f47e0e7e6875dd2c8f2960ec05eee3268f1279c`
-(motor `5.0.3-52-g6bba77e33`), zips e `SHA256SUMS.txt` em `dist/`.
+Pacote atual: `dist/RDoom.nro` sha256 `a566fa155500fe307bcb3bbde7e12a4cc41d65ad615253e077b47e0fac0ef3c5`
+(motor `5.0.3-53-gc5638cdba`), zips e `SHA256SUMS.txt` em `dist/`.
 
 ## Feito e verificado
 
@@ -238,6 +238,13 @@ Pacote atual: `dist/RDoom.nro` sha256 `9b17c43249020a0eb8a3d5b33f47e0e7e6875dd2c
   `common/objects/nx_objpool.cpp`): tic da horda 7,2 → 4,5 ms, criação 2,5 → 0,34 ms. perf.log ganhou por tic:
   colisão, visão, criação de atores por fase, partes da criação de objetos e malloc/free da thread do jogo
   por quadro (~650 mallocs, ~1 ms no Ryujinx; trocar o alocador global fica para depois de medir no console).
+- **Teste do 6bba77e33 (2026-10-14, CSH101 do Lexicon slaughter + Brutal v21):** com o alocador de objetos o tic
+  da horda caiu de 16–25 ms para 11–12,6 ms (37–55 fps, ~1800–2000 atores); criar ~75 atores por tic custa
+  1,0–1,1 ms (0,2 de alocação); colisão 1,7–2,3 ms; imps 3,8 ms. A lista do pacote preparou 79 pipelines no
+  carregamento (instalação do zero: até os perfis foram recriados); ainda 13 no hub e 6 no mapa. A thread do
+  jogo gastava ~2,8 ms por quadro em ~1500 malloc/free da newlib. 5.0.3-53-gc5638cdba: malloc/free/realloc/calloc/
+  malloc_usable_size de até 1 KB saem do mesmo pool (Ryujinx: 1,1 → 0,22 ms por quadro; 4 min de horda sem
+  erro); lista do pacote com 95 pipelines (hub VR incluído). Logs em `evidence/hw/2026-10-14-objpool`.
 - **Publicado em 2026-10-13:** https://github.com/aeon1911/RDoom-NX (público) com o motor em
   https://github.com/aeon1911/RDoom-NX-engine (fork do UZDoom, branch `rdoom-nx`, submódulo `engine/`).
   Autor dos commits trocado para o e-mail privado do GitHub (os hashes do motor mudaram). Não publicados:
@@ -262,8 +269,8 @@ Pacote atual: `dist/RDoom.nro` sha256 `9b17c43249020a0eb8a3d5b33f47e0e7e6875dd2c
 
 - Teste no console do build atual: hub do Lexicon nos primeiros segundos, pipelines na primeira sessão
   depois de atualizar.
-- Mapas com hordas (slaughter): medir no console o alocador de objetos (tic era 16–25 ms com ~2000 atores);
-  depois, scripts dos imps (~13 µs cada por tic no Ryujinx) e o alocador global se o perf.log mostrar peso.
+- Mapas com hordas (slaughter): medir no console o malloc em pool; depois colisão (1,7–2,3 ms por tic) e os
+  scripts dos imps (3,8 ms por tic com ~150).
 - Outros mods no console (Compendium, Trailblazer, Ashes, Aliens TC). Modo dock: não se aplica (Switch Lite).
 - OpenGL no console: vista preta. No Ryujinx (OpenGL de desktop) a vista 3D fica preta ao começar direto
   num mapa até alternar o automapa.
