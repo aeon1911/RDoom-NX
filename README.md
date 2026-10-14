@@ -29,7 +29,7 @@ Anthropic), em sessões com testes no Switch Lite do autor a cada etapa.
 
 | | |
 |---|---|
-| Gasto real | assinatura **Claude Pro**: US$ 20 por mês |
+| Gasto real | CRÉDITOS GASTOS NA API: US$ 261 |
 | Equivalente em preço de API | **≈ US$ 261** |
 
 O equivalente em API soma os tokens registrados nas sessões do projeto, com a
