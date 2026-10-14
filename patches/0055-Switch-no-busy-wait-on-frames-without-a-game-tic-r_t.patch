@@ -1,0 +1,70 @@
+From 23e731af998be4321ad5f617a9551e7e2dfceaef Mon Sep 17 00:00:00 2001
+From: RDoom <171243930+aeon1911@users.noreply.github.com>
+Date: Wed, 14 Oct 2026 10:58:26 -0300
+Subject: [PATCH 55/55] Switch: no busy wait on frames without a game tic
+ (r_ticstability off)
+
+Console test of a50efb888: Ashes 2063 now 55-60 fps and Compendium 54-60
+(were 43-53). In the slaughter map perf.log still showed 3-4 ms of every
+frame outside anything it measures: r_ticstability spins, on each frame
+without a tic (25 of 60 per second), for as long as the last tic took
+(~8 ms there), ~3.3 ms per frame on average. Off by default on the Switch
+(defaults revision 3 turns it off once); vsync paces the frames anyway.
+Ryujinx horde: unmeasured time per frame 2.7 -> 0.7 ms.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ src/d_main.cpp | 9 ++++++++-
+ src/d_net.cpp  | 8 ++++++++
+ 2 files changed, 16 insertions(+), 1 deletion(-)
+
+diff --git a/src/d_main.cpp b/src/d_main.cpp
+index d9f3f7389..733e114c4 100644
+--- a/src/d_main.cpp
++++ b/src/d_main.cpp
+@@ -2425,6 +2425,8 @@ EXTERN_CVAR(Float, rd_vk_async_upload_ms)
+ EXTERN_CVAR(Int, nx_perfthreshold)
+ #endif
+ 
++EXTERN_CVAR(Bool, r_ticstability)
++
+ static void RDoom_UpdateDefaults(bool gameSection)
+ {
+ #ifdef __SWITCH__
+@@ -2446,7 +2448,12 @@ static void RDoom_UpdateDefaults(bool gameSection)
+ 	}
+ 	if (rev < 2 && !gameSection)
+ 		nx_perfthreshold = 40;	// 2: perf.log also shows frames of 40-90 ms (two vsyncs or more)
+-	rd_defaults_rev = 2;
++	if (rev < 3 && !gameSection)
++	{
++		// 3: no busy wait on frames without a tic (see r_ticstability in d_net.cpp)
++		r_ticstability = false;
++	}
++	rd_defaults_rev = 3;
+ #endif
+ }
+ 
+diff --git a/src/d_net.cpp b/src/d_net.cpp
+index bea64b127..f0b516c22 100644
+--- a/src/d_net.cpp
++++ b/src/d_net.cpp
+@@ -2100,7 +2100,15 @@ ADD_STAT(network)
+ // With this cvar off the mods with a high playsim processing time will appear
+ // less smooth as the measured time used for interpolation will vary.
+ 
++#ifdef __SWITCH__
++// Off on the Switch: on frames without a game tic (25 of 60 per second) it
++// spins for as long as the last tic took, to even out frame times. With the
++// CPU as the limit (Lexicon slaughter map, 8 ms tics) that was ~3.3 ms of
++// every frame (perf.log "rest"); vsync already paces the frames.
++CVAR(Bool, r_ticstability, false, CVAR_ARCHIVE | CVAR_GLOBALCONFIG)
++#else
+ CVAR(Bool, r_ticstability, true, CVAR_ARCHIVE | CVAR_GLOBALCONFIG)
++#endif
+ 
+ static uint64_t stabilityticduration = 0;
+ static uint64_t stabilitystarttime = 0;
+-- 
+2.56.0
+

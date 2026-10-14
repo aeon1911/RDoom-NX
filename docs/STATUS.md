@@ -1,7 +1,7 @@
 # RDoom NX — estado em 2026-10-13
 
-Pacote atual: `dist/RDoom.nro` sha256 `0b539a9ecce9ddcbcaf6e949c7dd2e75a27319aaa795fb7d48101da3164070cf`
-(motor `5.0.3-54-ga50efb888`), zips e `SHA256SUMS.txt` em `dist/`.
+Pacote atual: `dist/RDoom.nro` sha256 `f78662e024517fb24151b053f0dd7085e784294f7190ce7ffe6c7e6865d46a24`
+(motor `5.0.3-55-g23e731af9`), zips e `SHA256SUMS.txt` em `dist/`.
 
 ## Feito e verificado
 
@@ -253,6 +253,11 @@ Pacote atual: `dist/RDoom.nro` sha256 `0b539a9ecce9ddcbcaf6e949c7dd2e75a27319aaa
   carregar separados; mesmo erro no UZDoom de PC). 5.0.3-54-ga50efb888: médias de ~20 quadros também baixam a escala
   (quadros > 18,7 ms com espera pela GPU > 6 ms) e ela só sobe com 60 fps na média.
   Logs em `evidence/hw/2026-10-14-pool`.
+- **Teste do a50efb888 (2026-10-14):** Ashes 2063 55–60 fps (resolução ~65% nos trechos pesados, volta a
+  100%), Compendium NJZ01 54–60 fps (antes 43–53). No slaughter, 3–4 ms de cada quadro fora de tudo que o
+  perf.log mede: `r_ticstability` gira, em cada quadro sem tic (25 de 60 por segundo), pelo tempo do último
+  tic (~8 ms ali). 5.0.3-55-g23e731af9: desligado por padrão no Switch (revisão 3 das configurações desliga uma vez);
+  horda no Ryujinx: tempo não medido 2,7 → 0,7 ms por quadro. Logs em `evidence/hw/2026-10-14-dynavg`.
 - **Publicado em 2026-10-13:** https://github.com/aeon1911/RDoom-NX (público) com o motor em
   https://github.com/aeon1911/RDoom-NX-engine (fork do UZDoom, branch `rdoom-nx`, submódulo `engine/`).
   Autor dos commits trocado para o e-mail privado do GitHub (os hashes do motor mudaram). Não publicados:
