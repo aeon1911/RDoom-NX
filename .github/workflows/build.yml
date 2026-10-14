@@ -21,7 +21,7 @@ jobs:
       - name: Host tools
         run: |
           sudo apt-get update -q
-          sudo apt-get install -y -q librsvg2-bin imagemagick ninja-build cmake unzip
+          sudo apt-get install -y -q librsvg2-bin imagemagick python3-pil ninja-build cmake unzip
           # the art script calls ImageMagick 7's "magick"; Ubuntu ships 6 ("convert", same arguments here)
           command -v magick || { printf '#!/bin/sh\nexec convert "$@"\n' | sudo tee /usr/local/bin/magick >/dev/null; sudo chmod +x /usr/local/bin/magick; }
 

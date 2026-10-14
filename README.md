@@ -79,7 +79,7 @@ regras em `docs/PROFILES.md`.
 
 ## Compilar
 
-Requisitos no host: Docker, git, python3, rsvg-convert, ImageMagick, curl,
+Requisitos no host: Docker, git, python3 (com Pillow), rsvg-convert, ImageMagick, curl,
 unzip.
 
 ```bash
@@ -153,7 +153,7 @@ the Homebrew Menu in title mode (hold R while opening a game). To update, copy
 over the old files: profiles, saves and the pipeline cache are kept.
 
 **Build:** `git clone --recursive https://github.com/aeon1911/RDoom-NX.git &&
-cd RDoom-NX && scripts/build.sh` (Docker, git, python3, rsvg-convert,
+cd RDoom-NX && scripts/build.sh` (Docker, git, python3 + Pillow, rsvg-convert,
 ImageMagick, curl, unzip).
 
 **What it cost:** developed with Claude Code (Anthropic's Claude Opus 5.5
