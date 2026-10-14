@@ -1,0 +1,58 @@
+# Builds RDoom.nro and the release zips with scripts/build.sh (the same
+# Docker toolchain as a local build) and runs the host tests it ends with.
+name: build
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 150
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          fetch-depth: 0  # build.sh checks the engine is based on the UZDoom 5.0.3 commit
+
+      - name: Host tools
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y -q librsvg2-bin imagemagick ninja-build cmake unzip
+          # the art script calls ImageMagick 7's "magick"; Ubuntu ships 6 ("convert", same arguments here)
+          command -v magick || { printf '#!/bin/sh\nexec convert "$@"\n' | sudo tee /usr/local/bin/magick >/dev/null; sudo chmod +x /usr/local/bin/magick; }
+
+      # the Mesa Horizon SDK is a CI artifact of danfromtico/mesa-switch (build.sh checks its SHA-256)
+      - name: Cache the Mesa SDK and Freedoom downloads
+        uses: actions/cache@v4
+        with:
+          path: |
+            third_party/mesa-sdk
+            third_party/freedoom/freedoom-0.13.0.zip
+          key: deps-mesa-606441c9-freedoom-0.13.0
+
+      - name: Build and test
+        env:
+          GH_TOKEN: ${{ github.token }}
+          JOBS: 4
+        run: scripts/build.sh
+
+      - name: Upload the package
+        uses: actions/upload-artifact@v4
+        with:
+          name: RDoom-NX-${{ github.sha }}
+          path: |
+            dist/RDoom.nro
+            dist/RDoom-NX-*.zip
+            dist/SHA256SUMS.txt
+          if-no-files-found: error
+
+      - name: Build logs
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-logs-${{ github.sha }}
+          path: build/logs/

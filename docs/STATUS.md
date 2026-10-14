@@ -312,14 +312,12 @@ Pacote atual: `dist/RDoom.nro` sha256 `5c8dc83c38c1b6e9038f47d8139e4f4454adaaec4
 
 ## Pendente
 
-- Teste no console do build atual: hub do Lexicon nos primeiros segundos, pipelines na primeira sessão
-  depois de atualizar.
-- Mapas com hordas (slaughter): medir no console o malloc em pool; depois colisão (1,7–2,3 ms por tic) e os
-  scripts dos imps (3,8 ms por tic com ~150).
-- Mods testados no console: Brutal Doom, Lexicon (+ slaughter), Compendium, Ashes 2063, Aliens Eradication TC,
-  Trailblazer. Modo dock: não se aplica (Switch Lite).
+- DKTS01 Arch Bridge (Lexicon slaughter, ~800 objetos, 90 barris): repetir no console com o 1.0.1.
+- Brutal Doom + Lexicon slaughter (~4000 objetos): 43–54 fps, limitado pelos scripts do Brutal Doom
+  (`BDECWindowColision1` ×792, ShotgunGuy1, Imp).
+- Project Brutality: em andamento.
 - WadFusion: regerar `doom_fusion.ipk3` com o WadFusion v1.6.1 (precisa dos WADs do usuário).
-- CI no GitHub (build automático).
-- Sessões longas (1–2 h): memória e estabilidade.
-- Depois: Project Brutality (mais pesado em scripts que o Brutal Doom).
+- CI no GitHub (`.github/workflows/build.yml`): o Mesa SDK vem de um artefato de CI do danfromtico/mesa-switch
+  que expira em 2027-01-05.
 - Lightmaps ainda sobem por cópia (compute) no Vulkan; nenhum mod testado usa.
+- Sessões longas: não se aplicam (um mapa não dura horas); modo dock: não se aplica (Switch Lite).

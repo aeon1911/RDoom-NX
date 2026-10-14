@@ -83,7 +83,6 @@ em relação ao UZDoom 5.0.3 (o commit `0284cce00` do port anterior restaurou
 
 ## 6. Problemas em aberto
 
-1. Sessões longas (1–2 h) no Switch físico.
-2. WadFusion: o arquivo do usuário foi gerado para o UZDoom 4.14; precisa ser
+1. WadFusion: o arquivo do usuário foi gerado para o UZDoom 4.14; precisa ser
    regerado com o WadFusion v1.6.1 (ver `MOD_COMPATIBILITY.md`).
-3. Ryujinx não implementa `PRMT` imediato (afeta só o emulador).
+2. Ryujinx não implementa `PRMT` imediato (afeta só o emulador).
