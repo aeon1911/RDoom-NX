@@ -1,7 +1,7 @@
 From c5638cdbacdcae5014c4ef2d52cc5f73b2ab58ce Mon Sep 17 00:00:00 2001
 From: RDoom <171243930+aeon1911@users.noreply.github.com>
 Date: Wed, 14 Oct 2026 10:04:46 -0300
-Subject: [PATCH 53/57] Switch: mallocs of up to 1 KB from the object pool
+Subject: [PATCH 53/58] Switch: mallocs of up to 1 KB from the object pool
 
 Console test of 6bba77e33 (Lexicon slaughter + Brutal, ~2000 actors): the
 object pool took the horde tic from 16-25 ms to 11-12.6 ms (37-55 fps),

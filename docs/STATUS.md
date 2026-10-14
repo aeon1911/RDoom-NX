@@ -1,7 +1,7 @@
 # RDoom NX — estado em 2026-10-14 (1.0.0)
 
-Pacote atual: `dist/RDoom.nro` sha256 `9ba9b6087bc119fa244bb3ebe6a258ee3473853a0f196c5fa7ed797a1dbf66c2`
-(motor `5.0.3-57-g6926966ab`), zips e `SHA256SUMS.txt` em `dist/`.
+Pacote atual: `dist/RDoom.nro` sha256 `601ed87a424e32cc3d0c64c9447e435ebfa0f50730552ca56ebaefa7e4a48d04`
+(motor `5.0.3-58-g387dc8279`), zips e `SHA256SUMS.txt` em `dist/`.
 
 ## Feito e verificado
 
@@ -294,10 +294,15 @@ Pacote atual: `dist/RDoom.nro` sha256 `9ba9b6087bc119fa244bb3ebe6a258ee3473853a0
 - Freedoom 2 MAP01: 54,6–60 fps. CPU quase parada (tic 0,3 ms), esperando 13–14 ms por frame pela GPU;
   timestamps da GPU 11 ms, resolução 65–95%. A média de frame (17,4–18,3 ms) ficava entre a regra de
   descida (18,7 ms) e a de subida (17,5 ms): nada mexia na resolução. Motor 6926966ab: desce com média
-  acima de 17,33 ms (≈57,7 fps) e espera > 6 ms; sobe só abaixo de 17,0 ms. **Falta confirmar no console.**
+  acima de 17,33 ms (≈57,7 fps) e espera > 6 ms; sobe só abaixo de 17,0 ms.
 - Brutal Doom v21 + Lexicon slaughter (PZST01, ~4000 objetos): 43–54 fps, limitado pela CPU (tic 15 ms,
   ShotgunGuy1/Imp/`BDECWindowColision1` ×792 do Brutal Doom); GPU 10–12 ms a 75%.
 - Logs em `evidence/hw/2026-10-14-v1.0.0/`.
+- **Console, motor 6926966ab:** Freedoom 2 MAP01 58,1–60,1 fps (era 54,6–57), resolução 74–78%.
+  Lexicon slaughter (sem Brutal): 52–60 fps; uma janela a 52 fps esperava 4,9 ms pela GPU (limite era 6 ms).
+  Motor 387dc8279: a espera sustentada soma o acquire do frame anterior, limite 4 ms; um travamento de
+  carregamento conta na média como no máximo dois vsyncs. **Falta confirmar no console.**
+  Logs em `evidence/hw/2026-10-14-dynres-band/`.
 
 ## Pendente
 

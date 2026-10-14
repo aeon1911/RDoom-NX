@@ -1,7 +1,7 @@
 From 5c9c4c95e861bf88d939bcbb93323794e2f65430 Mon Sep 17 00:00:00 2001
 From: RDoom <171243930+aeon1911@users.noreply.github.com>
 Date: Mon, 12 Oct 2026 17:15:18 -0300
-Subject: [PATCH 32/57] Switch Vulkan: submit the 3D scene before waiting for
+Subject: [PATCH 32/58] Switch Vulkan: submit the 3D scene before waiting for
  the swapchain
 
 Console timestamps: the GPU needs 8-13 ms per frame, yet frames took
