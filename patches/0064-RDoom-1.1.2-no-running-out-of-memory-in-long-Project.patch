@@ -1,0 +1,411 @@
+From 9c4078c49ccef3f36d6e25177033823e73d10d03 Mon Sep 17 00:00:00 2001
+From: RDoom <171243930+aeon1911@users.noreply.github.com>
+Date: Thu, 15 Oct 2026 21:31:30 -0300
+Subject: [PATCH 64/64] RDoom 1.1.2: no running out of memory in long Project
+ Brutality sessions
+
+Console (PB + WadFusion, Legacy of Rust MAP08, ~11 minutes): "Could not
+realloc 24263712 bytes". Every sprite, gore and weapon frame ever drawn kept
+its GPU copy for the rest of the map, and each map start also loaded the
+whole texture warm list, which had grown to 2000 pictures over four sessions.
+
+- Texture eviction: every 5 s, with the heap above rd_vk_texevict_mb (2300 MB),
+  sprite, decal and HUD pictures not drawn for 30 s (5 s above +400 MB) lose
+  their GPU copy at the start of a frame, after the decode queue is flushed
+  and the GPU is idle; all texture descriptor sets are rebuilt on next use.
+  At most one pass per 30 s unless urgent. Ryujinx: 2-4 ms per pass.
+- Warm list in order of use (most recent last, oldest dropped past 2000) and a
+  warm-up budget (rd_vk_texwarm_mb, 256 MB, newest first; none above 1.8 GB).
+- perf.log has the heap in use every 5 s; out-of-memory errors name the
+  caller and the memory in use.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ CMakeLists.txt                                |  2 +-
+ src/common/engine/nx_perf.cpp                 | 26 ++++++++
+ src/common/engine/nx_perf.h                   |  1 +
+ .../vulkan/renderer/vk_descriptorset.h        |  1 +
+ .../vulkan/renderer/vk_renderpass.cpp         | 56 +++++++++++++---
+ .../vulkan/system/vk_renderdevice.cpp         | 66 +++++++++++++++++++
+ .../rendering/vulkan/system/vk_renderdevice.h |  1 +
+ .../vulkan/textures/vk_hwtexture.cpp          |  7 ++
+ .../rendering/vulkan/textures/vk_hwtexture.h  |  1 +
+ src/common/utility/m_alloc.cpp                | 25 ++++++-
+ 10 files changed, 175 insertions(+), 11 deletions(-)
+
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index f67ba4afe..0c87a3b56 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -72,7 +72,7 @@ if( NINTENDO_SWITCH )
+ 	# our gcc complains about the use of alloca, stricmp, etc without including the appropriate headers
+ 	# unless we just do this
+ 	set( CMAKE_CXX_EXTENSIONS ON )
+-	set( RDOOM_VERSION "1.1.1" )
++	set( RDOOM_VERSION "1.1.2" )
+ 	set( SWITCH_APP_VERSION "${RDOOM_VERSION}" )
+ 	# RDoom launcher sources (outside this tree so the engine stays a patch series)
+ 	set( RDOOM_LAUNCHER_DIR "${CMAKE_SOURCE_DIR}/../launcher" CACHE PATH "RDoom launcher source directory" )
+diff --git a/src/common/engine/nx_perf.cpp b/src/common/engine/nx_perf.cpp
+index 1affe321a..bbd76aadb 100644
+--- a/src/common/engine/nx_perf.cpp
++++ b/src/common/engine/nx_perf.cpp
+@@ -67,6 +67,27 @@ static struct
+ 
+ #ifdef __SWITCH__
+ #include <switch.h>
++#include <malloc.h>
++
++// Memory in use: the process (heap + code + GPU buffers, all from the same
++// pool on the Switch) and malloc's view of its heap (in use / obtained).
++void NXPerf_MemoryText(char *buf, size_t len)
++{
++	u64 used = 0, total = 0;
++	svcGetInfo(&used, InfoType_UsedMemorySize, CUR_PROCESS_HANDLE, 0);
++	svcGetInfo(&total, InfoType_TotalMemorySize, CUR_PROCESS_HANDLE, 0);
++	struct mallinfo mi = mallinfo();
++	snprintf(buf, len, "memory: process %.0f of %.0f MB, malloc in use %.0f MB of %.0f MB obtained",
++		used / 1048576.0, total / 1048576.0, mi.uordblks / 1048576.0, mi.arena / 1048576.0);
++}
++#else
++void NXPerf_MemoryText(char *buf, size_t len)
++{
++	snprintf(buf, len, "memory: n/a");
++}
++#endif
++
++#ifdef __SWITCH__
+ // handheld and docked run the GPU at different (stock) clocks
+ static const char *NXOperationMode() { return appletGetOperationMode() == AppletOperationMode_Console ? "docked" : "handheld"; }
+ #include "common/platform/posix/nx/nx_glthread.h"
+@@ -333,6 +354,11 @@ void NXPerf_EndFrame()
+ 					win.draws / n, win.dynlights / n, win.dynlightsall / n, win.lightuploads / n, win.lightskips / n, win.govlevel / n, nxGovLevel, win.effectsculled / n, win.halfeffects / n, win.halfarea / n, win.halfareamax);
+ 				fprintf(perfFile, "#   2D (HUD, menus, messages) per frame: %.0f images covering %.2f screens, %.1f fully transparent ones left out\n",
+ 					win.draws2d / n, win.area2d / n, win.skipped2d / n);
++				{
++					char mem[160];
++					NXPerf_MemoryText(mem, sizeof(mem));
++					fprintf(perfFile, "#   %s\n", mem);
++				}
+ 			}
+ 			if (frames > 0 && win.vksubmits > 0)
+ 			{
+diff --git a/src/common/engine/nx_perf.h b/src/common/engine/nx_perf.h
+index 4b77d1d89..ede4c4ec9 100644
+--- a/src/common/engine/nx_perf.h
++++ b/src/common/engine/nx_perf.h
+@@ -82,6 +82,7 @@ double NXPerf_LastFrameMS();
+ double NXPerf_LastSimMS();
+ double NXPerf_LastTicWaitMS();	// the last frame's wait for the next game tic
+ double NXPerf_LastAcquireMS();	// the last frame's wait for a swapchain image
++void NXPerf_MemoryText(char *buf, size_t len);	// "memory: process X of Y MB, malloc in use ..."
+ double NXPerf_LastTicMS();
+ // set by the game code: writes a breakdown (e.g. which actor classes cost the most) into the summary
+ extern void (*NXPerf_SummaryHook)(FILE *f);
+diff --git a/src/common/rendering/vulkan/renderer/vk_descriptorset.h b/src/common/rendering/vulkan/renderer/vk_descriptorset.h
+index 104940870..9cc81f870 100644
+--- a/src/common/rendering/vulkan/renderer/vk_descriptorset.h
++++ b/src/common/rendering/vulkan/renderer/vk_descriptorset.h
+@@ -58,6 +58,7 @@ public:
+ 
+ 	void AddMaterial(VkMaterial* texture);
+ 	void RemoveMaterial(VkMaterial* texture);
++	const std::list<VkMaterial*> &GetMaterials() const { return Materials; }
+ 
+ private:
+ 	void CreateHWBufferSetLayout();
+diff --git a/src/common/rendering/vulkan/renderer/vk_renderpass.cpp b/src/common/rendering/vulkan/renderer/vk_renderpass.cpp
+index 6a16dac0d..f605440c1 100644
+--- a/src/common/rendering/vulkan/renderer/vk_renderpass.cpp
++++ b/src/common/rendering/vulkan/renderer/vk_renderpass.cpp
+@@ -42,6 +42,12 @@
+ #include "filesystem.h"
+ #include "hw_material.h"
+ #include "texturemanager.h"
++#ifdef __SWITCH__
++#include <malloc.h>
++#include "c_cvars.h"
++// memory the texture warm-up may fill at the start of a map (newest pictures first)
++CVAR(Int, rd_vk_texwarm_mb, 256, CVAR_ARCHIVE | CVAR_GLOBALCONFIG)
++#endif
+ #include "gamestate.h"
+ #include "nx_perf.h"
+ #include "nx_jobs.h"
+@@ -268,9 +274,11 @@ void VkRenderPassManager::LoadTextureList()
+ 	{
+ 		int useType = 0, scaleFlags = 0;
+ 		char name[64] = "";
+-		if (sscanf(line.GetChars(), "%d %d %63s", &useType, &scaleFlags, name) == 3 && mTexList.size() < 2000)
++		if (sscanf(line.GetChars(), "%d %d %63s", &useType, &scaleFlags, name) == 3)
+ 			mTexList.push_back({ name, useType, scaleFlags });
+ 	}
++	if (mTexList.size() > 2000)	// the newest 2000
++		mTexList.erase(mTexList.begin(), mTexList.end() - 2000);
+ }
+ 
+ void VkRenderPassManager::TextureFirstUsed(FGameTexture *tex, int scaleFlags)
+@@ -292,15 +300,28 @@ void VkRenderPassManager::TextureFirstUsed(FGameTexture *tex, int scaleFlags)
+ 		return;
+ 	LoadTextureList();
+ 	const int useType = (int)tex->GetUseType();
+-	for (auto &t : mTexList)
++	// the list is kept in order of use: the end holds the most recent pictures
++	// (the warm-up starts there), the oldest leave when it grows past 2000
++	for (size_t i = 0; i < mTexList.size(); i++)
++	{
++		auto &t = mTexList[i];
+ 		if (t.UseType == useType && t.ScaleFlags == scaleFlags && t.Name.CompareNoCase(name) == 0)
++		{
++			if (i + 1 == mTexList.size())
++				return;
++			TextureUse moved = t;
++			mTexList.erase(mTexList.begin() + i);
++			mTexList.push_back(moved);
++			mTexDirty = true;
++			mLastTexMs = I_msTime();
+ 			return;
+-	if (mTexList.size() < 2000)
+-	{
+-		mTexList.push_back({ name, useType, scaleFlags });
+-		mTexDirty = true;
+-		mLastTexMs = I_msTime();
++		}
+ 	}
++	mTexList.push_back({ name, useType, scaleFlags });
++	if (mTexList.size() > 2000)
++		mTexList.erase(mTexList.begin());
++	mTexDirty = true;
++	mLastTexMs = I_msTime();
+ #endif
+ }
+ 
+@@ -310,24 +331,41 @@ void VkRenderPassManager::PrecacheListedTextures()
+ 	LoadTextureList();
+ 	if (mTexList.empty())
+ 		return;
++	// Memory budget, newest pictures first. Project Brutality + WadFusion on
++	// the console: the list had grown to 2000 pictures over four sessions
++	// (every weapon and monster frame seen in any map), all loaded at the
++	// start of each map; with what the map itself then loaded, the heap ran
++	// out after ~11 minutes ("Could not realloc 24263712 bytes").
++	struct mallinfo mi = mallinfo();
++	const double inUseMB = mi.uordblks / 1048576.0;
++	double budget = std::max(0, (int)rd_vk_texwarm_mb) * 1048576.0;
++	if (inUseMB > 1800)
++		budget = 0;	// already a big game: no warm-up at all
+ 	mTexWarming = true;
+ 	const uint64_t start = I_msTime();
+ 	int done = 0;
+-	for (auto &t : mTexList)
++	double bytes = 0;
++	for (auto it = mTexList.rbegin(); it != mTexList.rend(); ++it)
+ 	{
++		auto &t = *it;
+ 		FTextureID id = TexMan.CheckForTexture(t.Name.GetChars(), (ETextureType)t.UseType, FTextureManager::TEXMAN_TryAny);
+ 		FGameTexture *tex = id.isValid() ? TexMan.GetGameTexture(id) : nullptr;
+ 		if (!tex || !tex->isValid())
+ 			continue;
++		// RGBA8 on the GPU plus a third for mipmaps
++		const double size = double(tex->GetTexelWidth()) * tex->GetTexelHeight() * 4 * 4 / 3;
++		if (bytes + size > budget)
++			break;
+ 		FMaterial *mat = FMaterial::ValidateTexture(tex, t.ScaleFlags, true);
+ 		if (!mat)
+ 			continue;
+ 		fb->PrecacheMaterial(mat, 0);
++		bytes += size;
+ 		done++;
+ 	}
+ 	mTexWarming = false;
+ 	FString n;
+-	n.Format("%d of %d textures in %d ms", done, (int)mTexList.size(), (int)(I_msTime() - start));
++	n.Format("%d of %d textures in %d ms (%.0f MB; heap in use before %.0f MB)", done, (int)mTexList.size(), (int)(I_msTime() - start), bytes / 1048576.0, inUseMB);
+ 	RDoom_SessionSet("vulkan_texture_warmup", n.GetChars());
+ #endif
+ }
+diff --git a/src/common/rendering/vulkan/system/vk_renderdevice.cpp b/src/common/rendering/vulkan/system/vk_renderdevice.cpp
+index e7635632b..7b1a35085 100644
+--- a/src/common/rendering/vulkan/system/vk_renderdevice.cpp
++++ b/src/common/rendering/vulkan/system/vk_renderdevice.cpp
+@@ -21,6 +21,10 @@
+ */
+ 
+ #include <cinttypes>
++#include <unordered_set>
++#ifdef __SWITCH__
++#include <malloc.h>
++#endif
+ #include "gamestate.h"
+ #include "vulkan/renderer/vk_pprenderstate.h"
+ #include "hwrenderer/postprocessing/hw_postprocess.h"
+@@ -714,8 +718,70 @@ TArray<uint8_t> VulkanRenderDevice::GetScreenshotBuffer(int &pitch, ESSType &col
+ 	return ScreenshotBuffer;
+ }
+ 
++#ifdef __SWITCH__
++uint64_t RDoom_VkFrameNumber = 0;
++// Heap in use (MB) above which sprite, decal and HUD pictures not drawn for a
++// while lose their GPU copy (recreated from the picture the next time they
++// show up). Project Brutality + WadFusion on the console: every monster,
++// gore and weapon frame seen stayed on the GPU until the heap ran out after
++// ~11 minutes ("Could not realloc 24263712 bytes").
++CVAR(Int, rd_vk_texevict_mb, 2300, CVAR_ARCHIVE | CVAR_GLOBALCONFIG)
++
++void VulkanRenderDevice::EvictStaleTextures()
++{
++	static uint64_t lastEviction = 0;
++	const int limit = rd_vk_texevict_mb;
++	if (limit <= 0 || (RDoom_VkFrameNumber % 300) != 0 || gamestate != GS_LEVEL)
++		return;
++	struct mallinfo mi = mallinfo();
++	const double inUse = mi.uordblks / 1048576.0;
++	if (inUse < limit)
++		return;
++	// 30 seconds unseen, at most every 30 seconds (every pass waits for the
++	// GPU and rebuilds the texture descriptor sets); when the heap is much
++	// fuller, 5 seconds unseen at every check
++	const bool urgent = inUse > limit + 400;
++	if (!urgent && lastEviction != 0 && RDoom_VkFrameNumber - lastEviction < 1800)
++		return;
++	const uint64_t age = urgent ? 300 : 1800;
++	const double tScan = NXPerf_NowMS();
++	std::unordered_set<FGameTexture *> seen;
++	TArray<FGameTexture *> stale;
++	for (VkMaterial *mat : mDescriptorSetManager->GetMaterials())
++	{
++		FGameTexture *tex = mat->Source();
++		if (!tex || RDoom_VkFrameNumber - mat->LastUseFrame < age)
++			continue;
++		const ETextureType ut = tex->GetUseType();
++		if (ut != ETextureType::Sprite && ut != ETextureType::SkinSprite && ut != ETextureType::Decal &&
++			ut != ETextureType::MiscPatch && ut != ETextureType::Override)
++			continue;
++		if (seen.insert(tex).second)
++			stale.Push(tex);
++	}
++	if (stale.Size() == 0)
++		return;
++	lastEviction = RDoom_VkFrameNumber;
++	const double t0 = NXPerf_NowMS();
++	// nothing on the GPU, nothing being decoded may still use these pictures;
++	// every texture descriptor set is rebuilt on its next use
++	VkAsyncTex_Flush();
++	mCommands->WaitForCommands(false);
++	for (FGameTexture *tex : stale)
++		tex->CleanHardwareData(true);
++	mDescriptorSetManager->ResetHWTextureSets();
++	mi = mallinfo();
++	NXPerf_Note("texture eviction: %u pictures unseen for %d s, heap in use %.0f -> %.0f MB, %.1f ms (+%.1f ms scan)",
++		stale.Size(), (int)(age / 60), inUse, mi.uordblks / 1048576.0, NXPerf_NowMS() - t0, t0 - tScan);
++}
++#endif
++
+ void VulkanRenderDevice::BeginFrame()
+ {
++#ifdef __SWITCH__
++	RDoom_VkFrameNumber++;
++	EvictStaleTextures();
++#endif
+ 	// perf.log "begin" breakdown: wait / cache save / buffers / sprites
+ 	double t = NXPerf_NowMS(), t2;
+ 	auto lap = [&](double &acc) { t2 = NXPerf_NowMS(); acc += t2 - t; t = t2; };
+diff --git a/src/common/rendering/vulkan/system/vk_renderdevice.h b/src/common/rendering/vulkan/system/vk_renderdevice.h
+index b19b0168d..cd8f12826 100644
+--- a/src/common/rendering/vulkan/system/vk_renderdevice.h
++++ b/src/common/rendering/vulkan/system/vk_renderdevice.h
+@@ -150,6 +150,7 @@ private:
+ 	bool mSceneScaled = false;
+ 	IntRect mSceneFull, mSceneSmall;
+ 	void UpdateDynamicResolution();
++	void EvictStaleTextures();
+ 	// half-resolution effects layer: its viewport, the scene clear colour
+ 	// while it is cleared, first-use costs paid at level load
+ 	IntRect mNXFxRect;
+diff --git a/src/common/rendering/vulkan/textures/vk_hwtexture.cpp b/src/common/rendering/vulkan/textures/vk_hwtexture.cpp
+index 25fd58563..e9d26b1f5 100644
+--- a/src/common/rendering/vulkan/textures/vk_hwtexture.cpp
++++ b/src/common/rendering/vulkan/textures/vk_hwtexture.cpp
+@@ -379,8 +379,15 @@ void VkMaterial::DeleteDescriptors()
+ 	}
+ }
+ 
++#ifdef __SWITCH__
++extern uint64_t RDoom_VkFrameNumber;
++#endif
++
+ VulkanDescriptorSet* VkMaterial::GetDescriptorSet(const FMaterialState& state)
+ {
++#ifdef __SWITCH__
++	LastUseFrame = RDoom_VkFrameNumber;
++#endif
+ 	auto base = Source();
+ 	int clampmode = state.mClampMode;
+ 	int translation = state.mTranslation;
+diff --git a/src/common/rendering/vulkan/textures/vk_hwtexture.h b/src/common/rendering/vulkan/textures/vk_hwtexture.h
+index f0be2a284..982c7e563 100644
+--- a/src/common/rendering/vulkan/textures/vk_hwtexture.h
++++ b/src/common/rendering/vulkan/textures/vk_hwtexture.h
+@@ -97,6 +97,7 @@ public:
+ 
+ 	VulkanRenderDevice* fb = nullptr;
+ 	std::list<VkMaterial*>::iterator it;
++	uint64_t LastUseFrame = 0;	// Switch: frame number of the last bind (texture eviction)
+ 
+ private:
+ 	struct DescriptorEntry
+diff --git a/src/common/utility/m_alloc.cpp b/src/common/utility/m_alloc.cpp
+index 238ef5c77..b7bb34f35 100644
+--- a/src/common/utility/m_alloc.cpp
++++ b/src/common/utility/m_alloc.cpp
+@@ -53,24 +53,47 @@ size_t _msize(void* block)
+ 
+ #ifndef _DEBUG
+ #if !defined(__solaris__) && !defined(__sun__) && !defined(_sun) && !defined(__OpenBSD__) && !defined(__DragonFly__)
++void *M_Realloc(void *memblock, size_t size);
++#ifdef __SWITCH__
++void NXPerf_MemoryText(char *buf, size_t len);
++#endif
++
+ void *M_Malloc(size_t size)
+ {
+ 	void *block = malloc(size);
+ 
+ 	if (block == nullptr)
++	{
++#ifdef __SWITCH__
++		char mem[160];
++		NXPerf_MemoryText(mem, sizeof(mem));
++		I_FatalError("Could not malloc %zu bytes (caller %p, M_Realloc %p, M_Malloc %p)\n%s", size, __builtin_return_address(0), (void *)&M_Realloc, (void *)&M_Malloc, mem);
++#else
+ 		I_FatalError("Could not malloc %zu bytes", size);
++#endif
++	}
+ 
+ 	GC::ReportAlloc(_msize(block));
+ 	return block;
+ }
+ 
++#ifdef __SWITCH__
++// Out of memory on the console: name the caller (subtract M_Realloc's runtime
++// address and add its ELF address to find it with addr2line) and the memory in use
++void NXPerf_MemoryText(char *buf, size_t len);
++#define RD_ALLOC_FAIL(what, size) do { char mem[160]; NXPerf_MemoryText(mem, sizeof(mem)); \
++	I_FatalError("Could not " what " %zu bytes (caller %p, M_Realloc %p, M_Malloc %p)\n%s", size, __builtin_return_address(0), (void *)&M_Realloc, (void *)&M_Malloc, mem); } while (0)
++#else
++#define RD_ALLOC_FAIL(what, size) I_FatalError("Could not " what " %zu bytes", size)
++#endif
++
+ void *M_Realloc(void *memblock, size_t size)
+ {
+ 	size_t oldsize = memblock ? _msize(memblock) : 0;
+ 	void *block = realloc(memblock, size);
+ 	if (block == nullptr)
+ 	{
+-		I_FatalError("Could not realloc %zu bytes", size);
++		RD_ALLOC_FAIL("realloc", size);
+ 	}
+ 	GC::ReportRealloc(oldsize, _msize(block));
+ 	return block;
+-- 
+2.56.0
+

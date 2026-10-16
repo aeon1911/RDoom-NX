@@ -1,7 +1,7 @@
-# RDoom NX — estado final em 2026-10-14 (1.1.1, projeto concluído)
+# RDoom NX — estado final em 2026-10-15 (1.1.2, projeto concluído)
 
-Pacote atual: `dist/RDoom.nro` sha256 `ac8859f4896c5fb9de62ac2d008338d05d7fd91da7e26558b1434bc43539783c`
-(motor `5.0.3-63-g1c1599ca7`, release 1.1.1), zips e `SHA256SUMS.txt` em `dist/`.
+Pacote atual: `dist/RDoom.nro` sha256 `ddd1018f17af20c4f156e2c926c4b3c9c03eb814add652a1b9a831567412d2bd`
+(motor `5.0.3-64-g9c4078c49`, release 1.1.2), zips e `SHA256SUMS.txt` em `dist/`.
 
 ## Feito e verificado
 
@@ -337,6 +337,15 @@ Pacote atual: `dist/RDoom.nro` sha256 `ac8859f4896c5fb9de62ac2d008338d05d7fd91da
   ~670 itens, HUD do PB 2,5 ms, monstros 5 ms por tic) e GPU 11,5 ms com a cena no piso de 60%: os dois perto do
   limite. O `engine-stderr.log` tinha ~1000 linhas de avisos do `mpg123` (sons MP3 do PB com lixo no começo),
   gravadas no SD durante o jogo; o 1.1.1 liga `MPG123_QUIET`. Logs em `2026-10-14-lr-pb/`.
+
+- **Falta de memória em partida longa (corrigido no 1.1.2):** PB + WadFusion, LR_MAP08, ~11 min: "Could not
+  realloc 24263712 bytes". Toda textura de sprite, gore e arma já vista ficava na GPU até o fim do mapa, e cada
+  início de mapa ainda carregava a lista de pré-carregamento inteira (já com 2000 imagens, de quatro sessões).
+  Agora: liberação de texturas (acima de `rd_vk_texevict_mb`, 2300 MB de heap, sprites/decalques/imagens da HUD
+  sem uso há 30 s perdem a cópia na GPU e voltam quando reaparecem; no Ryujinx 2–4 ms por passada, no máximo a
+  cada 30 s); lista de pré-carregamento por ordem de uso, com orçamento de 256 MB (`rd_vk_texwarm_mb`). O
+  `perf.log` mostra o heap em uso a cada 5 s e o erro de memória diz quem pediu. Base do PB + WadFusion no
+  Ryujinx: ~1,2–1,7 GB. Logs em `evidence/hw/2026-10-15-oom/`.
 
 ## Limitações conhecidas (projeto encerrado)
 

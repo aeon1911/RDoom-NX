@@ -53,7 +53,7 @@ int main(int argc, char **argv)
 
 	HostPlatform plat;
 	AppInfo info;
-	info.version = "RDoom 1.1.1";
+	info.version = "RDoom 1.1.2";
 	info.engineVersion = "UZDoom 5.0.3 (7910df71)";
 	info.gfxVersion = "Mesa 26.2.4 NVK (Vulkan 1.4)";
 	info.buildDate = "host preview";

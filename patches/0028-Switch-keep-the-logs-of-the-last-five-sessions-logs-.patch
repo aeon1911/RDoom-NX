@@ -1,7 +1,7 @@
 From 69942aee5b9a9783a66a7956bcab062374fee538 Mon Sep 17 00:00:00 2001
 From: RDoom <171243930+aeon1911@users.noreply.github.com>
 Date: Sun, 11 Oct 2026 21:02:35 -0300
-Subject: [PATCH 28/63] Switch: keep the logs of the last five sessions
+Subject: [PATCH 28/64] Switch: keep the logs of the last five sessions
  (logs/anterior .. anterior-5)
 
 Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
