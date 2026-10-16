@@ -1,0 +1,266 @@
+From 2e72b192ebb1a2ecf2c81e5521efdd7281c2b6b9 Mon Sep 17 00:00:00 2001
+From: RDoom <171243930+aeon1911@users.noreply.github.com>
+Date: Fri, 16 Oct 2026 09:09:58 -0300
+Subject: [PATCH 65/65] RDoom 1.1.3: Ogg Vorbis/FLAC/Opus sounds play; smoke in
+ the camera's face is not drawn
+
+Console (Project Brutality, TNT, 26 minutes): no gunfire, monster or impact
+sounds. libsndfile had been built without the Xiph codecs (see the root
+repository's docker/Dockerfile), so every Ogg sound failed to decode and was
+marked empty; PB's 1433 sounds are Ogg Vorbis. The engine now links vorbisenc,
+vorbis, FLAC, opus and ogg. perf.log counts sound requests and why they did or
+did not play (started at once, after loading, dropped, refused by reason).
+
+Point-blank gun smoke put a dozen translucent sprites over the whole screen.
+Pure effects (never monsters, pickups, hurting projectiles or anything
+shootable) nearer than rd_fx_nearcull (20 map units) are not drawn and fade in
+up to rd_fx_nearfade (48).
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ CMakeLists.txt                                |  2 +-
+ src/CMakeLists.txt                            |  3 ++-
+ src/common/audio/sound/s_sound.cpp            | 25 ++++++++++++++++---
+ src/common/engine/nx_perf.cpp                 |  9 +++++++
+ src/common/engine/nx_perf.h                   |  2 ++
+ src/rendering/hwrenderer/scene/hw_sprites.cpp | 24 ++++++++++++++++++
+ 6 files changed, 60 insertions(+), 5 deletions(-)
+
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index 0c87a3b56..8d002b14a 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -72,7 +72,7 @@ if( NINTENDO_SWITCH )
+ 	# our gcc complains about the use of alloca, stricmp, etc without including the appropriate headers
+ 	# unless we just do this
+ 	set( CMAKE_CXX_EXTENSIONS ON )
+-	set( RDOOM_VERSION "1.1.2" )
++	set( RDOOM_VERSION "1.1.3" )
+ 	set( SWITCH_APP_VERSION "${RDOOM_VERSION}" )
+ 	# RDoom launcher sources (outside this tree so the engine stays a patch series)
+ 	set( RDOOM_LAUNCHER_DIR "${CMAKE_SOURCE_DIR}/../launcher" CACHE PATH "RDoom launcher source directory" )
+diff --git a/src/CMakeLists.txt b/src/CMakeLists.txt
+index 57e600a5a..1c8efffab 100644
+--- a/src/CMakeLists.txt
++++ b/src/CMakeLists.txt
+@@ -1355,7 +1355,8 @@ if( NINTENDO_SWITCH )
+ 	if( HAVE_VULKAN )
+ 		set( PROJECT_LIBRARIES ${PROJECT_LIBRARIES} vulkan )
+ 	endif()
+-	set( PROJECT_LIBRARIES ${PROJECT_LIBRARIES} expat zstd z )
++	# libsndfile is built with Ogg/Vorbis, FLAC and Opus (docker/Dockerfile)
++	set( PROJECT_LIBRARIES ${PROJECT_LIBRARIES} vorbisenc vorbis FLAC opus ogg expat zstd z )
+ 	# static ZMusic pulls in libsndfile (+ codecs) and mpg123
+ 	set( ZMUSIC_LIBRARIES ${ZMUSIC_LIBRARIES} sndfile FLAC opus vorbisenc vorbis ogg mpg123 m )
+ 	link_directories( $ENV{DEVKITPRO}/portlibs/switch/lib )
+diff --git a/src/common/audio/sound/s_sound.cpp b/src/common/audio/sound/s_sound.cpp
+index 7aab25fdf..3c2285a63 100644
+--- a/src/common/audio/sound/s_sound.cpp
++++ b/src/common/audio/sound/s_sound.cpp
+@@ -268,8 +268,8 @@ void SoundEngine::NXRestartPending()
+ 		// a short sound that would start way too late is better skipped.
+ 		// Start from the beginning (a delayed start sounds better than cutting off the attack).
+ 		chan->StartTime = 0;
+-		if (!loading && (loop || now - since < 400)) RestartChannel(chan);
+-		if ((chan->ChanFlags & CHANF_EVICTED) && !loop) ReturnChannel(chan);
++		if (!loading && (loop || now - since < 400)) { RestartChannel(chan); nxperf.sndwhy[7]++; }
++		if ((chan->ChanFlags & CHANF_EVICTED) && !loop) { ReturnChannel(chan); nxperf.sndwhy[8]++; }
+ 	}
+ 	// channels that went away in the meantime
+ 	for (auto it = nxPendingSince.begin(); it != nxPendingSince.end();)
+@@ -626,7 +626,10 @@ FSoundChan *SoundEngine::StartSound(int type, const void *source,
+ 	FRolloffInfo *rolloff;
+ 
+ 	if (!isValidSoundId(sound_id) || volume <= 0 || nosfx || !SoundEnabled() || blockNewSounds)
++	{
++		nxperf.sndwhy[0]++;
+ 		return NULL;
++	}
+ 
+ 	// prevent crashes.
+ 	if (type == SOURCE_Unattached && pt == nullptr) type = SOURCE_None;
+@@ -637,6 +640,7 @@ FSoundChan *SoundEngine::StartSound(int type, const void *source,
+ 
+ 	if (!ValidatePosVel(type, source, pos, vel))
+ 	{
++		nxperf.sndwhy[2]++;
+ 		return nullptr;
+ 	}
+ 
+@@ -645,7 +649,10 @@ FSoundChan *SoundEngine::StartSound(int type, const void *source,
+ 	// Scale volume according to SNDINFO data.
+ 	volume = min(volume * sfx->Volume, 1.f);
+ 	if (volume <= 0)
++	{
++		nxperf.sndwhy[1]++;
+ 		return NULL;
++	}
+ 
+ 	// When resolving a link we do not want to get the NearLimit of
+ 	// the referenced sound so some additional checks are required
+@@ -724,17 +731,19 @@ FSoundChan *SoundEngine::StartSound(int type, const void *source,
+ 	// eventually play for real.
+ 	if ((chanflags & (CHANF_EVICTED | CHANF_LOOP)) == CHANF_EVICTED)
+ 	{
++		nxperf.sndwhy[3]++;
+ 		return NULL;
+ 	}
+ 
+ 	// Make sure the sound is loaded (in the background if possible).
+ 	bool nxpending = false;
+ 	sfx = LoadSoundAsync(sfx, &nxpending);
+-	if (nxpending) chanflags |= CHANF_EVICTED | CHANF_NXPENDING;
++	if (nxpending) { chanflags |= CHANF_EVICTED | CHANF_NXPENDING; nxperf.sndwhy[6]++; }
+ 
+ 	// The empty sound never plays.
+ 	if (sfx->lumpnum == sfx_empty)
+ 	{
++		nxperf.sndwhy[4]++;
+ 		return NULL;
+ 	}
+ 
+@@ -779,6 +788,7 @@ FSoundChan *SoundEngine::StartSound(int type, const void *source,
+ 	// Such a sound would play right after unpausing which wouldn't sound right.
+ 	if (!(chanflags & CHANF_LOOP) && !(chanflags & (CHANF_UI|CHANF_NOPAUSE|CHANF_FORCE)) && SoundPaused)
+ 	{
++		nxperf.sndwhy[5]++;
+ 		return NULL;
+ 	}
+ 
+@@ -881,13 +891,17 @@ void SoundEngine::RestartChannel(FSoundChan *chan)
+ 
+ 	// If this is a singular sound, don't play it if it's already playing.
+ 	if (sfx->bSingular && CheckSingular(chan->SoundID))
++	{
++		nxperf.sndrestart[0]++;
+ 		return;
++	}
+ 
+ 	sfx = LoadSound(sfx);
+ 
+ 	// The empty sound never plays.
+ 	if (sfx->lumpnum == sfx_empty)
+ 	{
++		nxperf.sndrestart[1]++;
+ 		return;
+ 	}
+ 
+@@ -907,6 +921,7 @@ void SoundEngine::RestartChannel(FSoundChan *chan)
+ 
+ 		if (!ValidatePosVel(chan, pos, vel))
+ 		{
++			nxperf.sndrestart[2]++;
+ 			return;
+ 		}
+ 
+@@ -914,6 +929,7 @@ void SoundEngine::RestartChannel(FSoundChan *chan)
+ 		// that's what would happen.
+ 		if (chan->NearLimit > 0 && CheckSoundLimit(&S_sfx[chan->SoundID.index()], pos, chan->NearLimit, chan->LimitRange, 0, NULL, 0, chan->DistanceScale))
+ 		{
++			nxperf.sndrestart[3]++;
+ 			return;
+ 		}
+ 
+@@ -930,7 +946,10 @@ void SoundEngine::RestartChannel(FSoundChan *chan)
+ 	if (ochan == NULL)
+ 	{
+ 		chan->ChanFlags = oldflags;
++		nxperf.sndrestart[4]++;
+ 	}
++	else
++		nxperf.sndrestart[5]++;
+ }
+ 
+ //==========================================================================
+diff --git a/src/common/engine/nx_perf.cpp b/src/common/engine/nx_perf.cpp
+index bbd76aadb..b103c9ab3 100644
+--- a/src/common/engine/nx_perf.cpp
++++ b/src/common/engine/nx_perf.cpp
+@@ -63,6 +63,7 @@ static struct
+ 	double hmalloc, hfree; int hmallocs, hfrees;
+ 	int tics, thinkers, sndstarts, drawitems, transitems, glsyncs, spriteskips, draws, lightuploads, lightskips, dynlights, dynlightsall, govlevel, vksubmits, effectsculled, halfeffects;
+ 	int draws2d, skipped2d; double area2d;
++	int sndwhy[10], sndrestart[6], sndcalls, sndstarted;
+ } win;
+ 
+ #ifdef __SWITCH__
+@@ -233,6 +234,10 @@ void NXPerf_EndFrame()
+ 		win.halfeffects += nxperf.halfeffects;
+ 		win.halfarea += nxperf.halfarea;
+ 		win.draws2d += nxperf.draws2d;
++		for (int i = 0; i < 10; i++) win.sndwhy[i] += nxperf.sndwhy[i];
++		for (int i = 0; i < 6; i++) win.sndrestart[i] += nxperf.sndrestart[i];
++		win.sndcalls += nxperf.sndcalls;
++		win.sndstarted += nxperf.sndstarts;
+ 		win.skipped2d += nxperf.skipped2d;
+ 		win.area2d += nxperf.area2d;
+ 		win.checkpos_ms += nxperf.checkpos_ms;
+@@ -354,6 +359,10 @@ void NXPerf_EndFrame()
+ 					win.draws / n, win.dynlights / n, win.dynlightsall / n, win.lightuploads / n, win.lightskips / n, win.govlevel / n, nxGovLevel, win.effectsculled / n, win.halfeffects / n, win.halfarea / n, win.halfareamax);
+ 				fprintf(perfFile, "#   2D (HUD, menus, messages) per frame: %.0f images covering %.2f screens, %.1f fully transparent ones left out\n",
+ 					win.draws2d / n, win.area2d / n, win.skipped2d / n);
++				fprintf(perfFile, "#   sounds: %d requests, %d started at once, %d waiting for their data -> %d started after loading, %d dropped (loaded too late) | not started: off/invalid %d, volume 0 %d, position %d, limit/singular %d, no sound data %d, paused %d\n",
++					win.sndcalls, win.sndstarted, win.sndwhy[6], win.sndwhy[7], win.sndwhy[8], win.sndwhy[0], win.sndwhy[1], win.sndwhy[2], win.sndwhy[3], win.sndwhy[4], win.sndwhy[5]);
++				fprintf(perfFile, "#   sound restarts: ok %d | refused: singular %d, no data %d, position %d, limit %d, backend %d\n",
++					win.sndrestart[5], win.sndrestart[0], win.sndrestart[1], win.sndrestart[2], win.sndrestart[3], win.sndrestart[4]);
+ 				{
+ 					char mem[160];
+ 					NXPerf_MemoryText(mem, sizeof(mem));
+diff --git a/src/common/engine/nx_perf.h b/src/common/engine/nx_perf.h
+index ede4c4ec9..0ce95cf90 100644
+--- a/src/common/engine/nx_perf.h
++++ b/src/common/engine/nx_perf.h
+@@ -46,6 +46,8 @@ struct NXPerfCounters
+ 	int effectsculled = 0;	// translucent effects left out by the stabilizer's screen area budget
+ 	int halfeffects = 0;	// effect sprites drawn in the half-resolution layer (Switch Vulkan)
+ 	double halfarea = 0;	// screen area of the effects that could go to that layer (screens)
++	int sndrestart[6] = {};	// RestartChannel: singular, empty, position, limit, backend refused, ok
++	int sndwhy[10] = {};	// StartSound outcomes: off/invalid, volume 0, position, limit, empty, paused, pending load, restarted after load, dropped (late), -
+ 	int draws2d = 0, skipped2d = 0;	// 2D images drawn (HUD, menus) / left out because they were fully transparent
+ 	double area2d = 0;	// screen area those 2D images cover (screens)
+ 	double present_ms = 0;	// copy of the finished frame to the window (waits for a free window buffer)
+diff --git a/src/rendering/hwrenderer/scene/hw_sprites.cpp b/src/rendering/hwrenderer/scene/hw_sprites.cpp
+index c0b1b1bf0..80b59394f 100644
+--- a/src/rendering/hwrenderer/scene/hw_sprites.cpp
++++ b/src/rendering/hwrenderer/scene/hw_sprites.cpp
+@@ -825,6 +825,11 @@ void HWSprite::PerformSpriteClipAdjustment(AActor *thing, const DVector2 &thingp
+ //
+ //==========================================================================
+ 
++#ifdef __SWITCH__
++CVAR(Float, rd_fx_nearcull, 20.f, CVAR_ARCHIVE | CVAR_GLOBALCONFIG)	// map units; pure effects nearer than this are not drawn
++CVAR(Float, rd_fx_nearfade, 48.f, CVAR_ARCHIVE | CVAR_GLOBALCONFIG)	// they fade in up to this distance
++#endif
++
+ void HWSprite::Process(HWDrawInfo *di, AActor* thing, sector_t * sector, area_t in_area, int thruportal, bool isSpriteShadow)
+ {
+ 	sector_t rs;
+@@ -1489,6 +1494,25 @@ void HWSprite::Process(HWDrawInfo *di, AActor* thing, sector_t * sector, area_t
+ 		lightlist = nullptr;
+ 	}
+ 
++#ifdef __SWITCH__
++	// Smoke and sparks right in front of the camera: Project Brutality's gun
++	// smoke fired point-blank into a wall or a monster put a dozen translucent
++	// sprites over the whole screen, each a full screen of fill (console fps
++	// drops). Pure effects closer than rd_fx_nearcull map units are not drawn,
++	// up to rd_fx_nearfade they fade in. Never monsters, pickups, projectiles
++	// that hurt or anything shootable (NXIsPureEffect).
++	if (hw_styleflags != STYLEHW_Solid && !modelframe && !isSpriteShadow && thing != nullptr && rd_fx_nearfade > rd_fx_nearcull &&
++		depth < rd_fx_nearfade && NXIsPureEffect(thing))
++	{
++		const float f = (depth - rd_fx_nearcull) / (rd_fx_nearfade - rd_fx_nearcull);
++		if (f <= 0.f)
++		{
++			nxperf.effectsculled++;
++			return;
++		}
++		trans *= f;
++	}
++#endif
+ 	if (hw_styleflags != STYLEHW_Solid && !modelframe && !isSpriteShadow && NXEffectOverBudget(di, thing))
+ 		return;
+ 	double nxArea;
+-- 
+2.56.0
+

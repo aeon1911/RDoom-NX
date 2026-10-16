@@ -24,6 +24,10 @@ its owners; no Doom logo, character art or commercial game data is included.
 | SDL2 (switch-sdl2) | 2.28.5 | zlib | linked static |
 | OpenAL Soft (switch-openal-soft) | 1.21.1 | LGPL-2.1-or-later | linked static (satisfied by full source availability) |
 | libsndfile | 1.2.2 (`72f6af15e8f85157bd622ed45b979025828b7001`) | LGPL-2.1-or-later | linked static |
+| libogg | 1.3.4 (devkitPro switch-libogg) | BSD-3-Clause (Xiph.Org) | linked static (libsndfile: Ogg sounds) |
+| libvorbis / libvorbisenc | 1.3.7 (devkitPro switch-libvorbis) | BSD-3-Clause (Xiph.Org) | linked static (libsndfile: Vorbis sounds) |
+| libFLAC | 1.3.2 (devkitPro switch-flac) | BSD-3-Clause (Xiph.Org) | linked static (libsndfile: FLAC sounds) |
+| libopus | 1.3 (devkitPro switch-libopus) | BSD-3-Clause (Xiph.Org, Skype, others) | linked static (libsndfile: Opus sounds) |
 | mpg123 | 1.31.3 | LGPL-2.1 | linked static |
 | libogg / libvorbis / FLAC / Opus / opusfile | devkitPro portlibs | BSD-3-Clause | linked static |
 | zlib, zstd, expat | devkitPro portlibs | zlib / BSD-3-Clause / MIT | linked static |

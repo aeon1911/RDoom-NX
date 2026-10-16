@@ -1,7 +1,7 @@
-# RDoom NX — estado final em 2026-10-15 (1.1.2, projeto concluído)
+# RDoom NX — estado final em 2026-10-16 (1.1.3, projeto concluído)
 
-Pacote atual: `dist/RDoom.nro` sha256 `ddd1018f17af20c4f156e2c926c4b3c9c03eb814add652a1b9a831567412d2bd`
-(motor `5.0.3-64-g9c4078c49`, release 1.1.2), zips e `SHA256SUMS.txt` em `dist/`.
+Pacote atual: `dist/RDoom.nro` sha256 `3e21357b64bbc646874bcf5b3fd77d63db3c118b0d7321af2cbc23c6e4f38d22`
+(motor `5.0.3-65-g2e72b192e`, release 1.1.3), zips e `SHA256SUMS.txt` em `dist/`.
 
 ## Feito e verificado
 
@@ -346,6 +346,14 @@ Pacote atual: `dist/RDoom.nro` sha256 `ddd1018f17af20c4f156e2c926c4b3c9c03eb814a
   cada 30 s); lista de pré-carregamento por ordem de uso, com orçamento de 256 MB (`rd_vk_texwarm_mb`). O
   `perf.log` mostra o heap em uso a cada 5 s e o erro de memória diz quem pediu. Base do PB + WadFusion no
   Ryujinx: ~1,2–1,7 GB. Logs em `evidence/hw/2026-10-15-oom/`.
+
+- **PB + TNT por 26 minutos (console, 1.1.2):** sem falta de memória (pico ~2,37 GB, uma liberação de texturas de
+  ~28 ms). Mas o PB estava **sem efeitos sonoros** desde o primeiro teste: o libsndfile da imagem Docker tinha sido
+  compilado sem Ogg/Vorbis (o toolchain do devkitPro liga `CMAKE_FIND_PACKAGE_PREFER_CONFIG` e os portlibs só têm
+  arquivos pkg-config), e os 1433 sons Ogg do PB falhavam ao decodificar e eram marcados vazios. 1.1.3: libsndfile
+  com Vorbis/FLAC/Opus; no Ryujinx, 0 sons descartados (antes, todos). O `perf.log` conta os pedidos de som e por que
+  tocaram ou não. Quedas de fps com fumaça de arma colada na câmera: efeitos puros a menos de 20 unidades não são
+  desenhados e esmaecem até 48 (`rd_fx_nearcull`, `rd_fx_nearfade`). Logs em `evidence/hw/2026-10-16-tnt-pb/`.
 
 ## Limitações conhecidas (projeto encerrado)
 

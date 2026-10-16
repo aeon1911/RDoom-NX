@@ -36,7 +36,7 @@ tabela pública do Claude Opus 5.5 (outubro de 2026): 1,93 milhão de tokens de
 saída (US$ 38,65), 6,26 milhões de escrita de cache (US$ 50,08), 860 milhões de
 leitura de cache (US$ 172,08) e 3,7 mil de entrada (US$ 0,01).
 
-## Estado (1.1.2, 2026-10-15) — projeto concluído
+## Estado (1.1.3, 2026-10-16) — projeto concluído
 
 Testado no Switch físico (Lite, portátil, clocks de fábrica):
 
@@ -61,7 +61,7 @@ testes em `docs/STATUS.md`.
 
 ## Instalação
 
-1. Copie `switch/` do zip `RDoom-NX-1.1.2.zip` (ou `…-Freedoom.zip`, que já
+1. Copie `switch/` do zip `RDoom-NX-1.1.3.zip` (ou `…-Freedoom.zip`, que já
    traz as IWADs livres do Freedoom) para a raiz do cartão SD. Para atualizar,
    copie por cima: perfis, saves e o cache de `switch/rdoom/cache` continuam.
 2. IWADs em `sdmc:/switch/rdoom/iwads/`, mods em `sdmc:/switch/rdoom/mods/`.
@@ -151,7 +151,7 @@ the game thread keep the frame rate up. The launcher warns before starting
 when two selected mods declare the same CVARINFO variables (they cannot load
 together).
 
-**Install:** copy `switch/` from `RDoom-NX-1.1.2.zip` (or the `-Freedoom` zip,
+**Install:** copy `switch/` from `RDoom-NX-1.1.3.zip` (or the `-Freedoom` zip,
 which includes the free Freedoom IWADs) to the root of the SD card; IWADs go in
 `sdmc:/switch/rdoom/iwads/`, mods in `sdmc:/switch/rdoom/mods/`. Start it from
 the Homebrew Menu in title mode (hold R while opening a game). To update, copy

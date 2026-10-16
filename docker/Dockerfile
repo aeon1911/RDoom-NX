@@ -44,16 +44,23 @@ RUN echo "${MESA_SDK_SHA256}  /tmp/mesa-sdk.zip" | sha256sum -c - \
  && test -f /opt/devkitpro/portlibs/switch/lib/libvulkan.a \
  && test -f /opt/devkitpro/portlibs/switch/include/vulkan/vulkan_vi.h
 
+# libsndfile with Ogg/Vorbis, FLAC and Opus (Project Brutality's 1433 sounds
+# are Ogg Vorbis): devkitPro's toolchain sets CMAKE_FIND_PACKAGE_PREFER_CONFIG,
+# and the portlibs have no CMake package files, only pkg-config ones, so
+# libsndfile's own find modules (fed by pkg-config) must be used.
 RUN git clone -q --depth 1 --branch ${LIBSNDFILE_TAG} https://github.com/libsndfile/libsndfile.git /tmp/libsndfile \
  && git -C /tmp/libsndfile rev-parse HEAD > /opt/devkitpro/portlibs/switch/libsndfile.REVISION \
+ && sed -i "s/^if (CMAKE_FIND_PACKAGE_PREFER_CONFIG)/if (FALSE)/" /tmp/libsndfile/cmake/SndFileChecks.cmake \
  && . /opt/devkitpro/switchvars.sh \
  && unset CFLAGS CXXFLAGS CPPFLAGS LDFLAGS \
+ && export PKG_CONFIG_LIBDIR=/opt/devkitpro/portlibs/switch/lib/pkgconfig PKG_CONFIG_PATH= \
  && cmake -S /tmp/libsndfile -B /tmp/libsndfile/build-nx -G Ninja \
       -DCMAKE_TOOLCHAIN_FILE=/opt/devkitpro/cmake/Switch.cmake \
       -DCMAKE_INSTALL_PREFIX=/opt/devkitpro/portlibs/switch -DBUILD_SHARED_LIBS=OFF \
       -DBUILD_PROGRAMS=OFF -DBUILD_EXAMPLES=OFF -DBUILD_TESTING=OFF -DENABLE_CPACK=OFF \
       -DENABLE_EXTERNAL_LIBS=ON -DENABLE_MPEG=OFF -DINSTALL_MANPAGES=OFF -DBUILD_REGTEST=OFF \
  && ninja -C /tmp/libsndfile/build-nx install \
+ && grep -q "vorbis" /opt/devkitpro/portlibs/switch/lib/pkgconfig/sndfile.pc \
  && rm -rf /tmp/libsndfile \
  && ( [ -f /opt/devkitpro/portlibs/switch/lib/libdl.a ] || aarch64-none-elf-ar rcs /opt/devkitpro/portlibs/switch/lib/libdl.a )
 
