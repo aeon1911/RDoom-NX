@@ -1,0 +1,342 @@
+From 1eb49010f29e984ddb9a2375c64522fbaa90ea7f Mon Sep 17 00:00:00 2001
+From: RDoom <171243930+aeon1911@users.noreply.github.com>
+Date: Tue, 20 Oct 2026 03:57:27 -0300
+Subject: [PATCH 66/66] RDoom 1.1.4: texture eviction without freezes; PB visor
+ kept ready
+
+Console (PB + WadFusion, Master Levels, 1.1.3): every texture eviction pass
+froze the game for 0.8-1.2 s. The heap sits around 2.3 GB in PB, so a pass
+ran every 30 s, and destroying the evicted images costs about 0.23 ms each
+(845 ms for 3682 at the start of the next frame).
+
+- Eviction queues the unseen pictures (oldest first) and frees
+  rd_vk_texevict_perframe (4) per frame; no GPU wait, no rebuild of every
+  texture descriptor set. Pictures that another material also samples (a
+  brightmap layer, two textures sharing one picture) are tracked when each
+  material is created and keep their GPU copy. Ryujinx: 6065 pictures over
+  25 s, heap 1712 -> 1610 MB, no frame over 30 ms (1.1.2: 223-235 ms).
+- Big HUD pictures (>= 256x256) are not evicted, and the map-start warm-up
+  still loads them (64 MB at most) when the heap is above 1.8 GB: PB's
+  radiation suit visor (1472x2160) took 313 ms when picked up.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ CMakeLists.txt                                |   2 +-
+ .../vulkan/renderer/vk_descriptorset.cpp      |  15 ++
+ .../vulkan/renderer/vk_descriptorset.h        |  15 ++
+ .../vulkan/renderer/vk_renderpass.cpp         |  21 ++-
+ .../vulkan/system/vk_renderdevice.cpp         | 138 +++++++++++++-----
+ src/common/textures/textures.h                |   7 +
+ 6 files changed, 155 insertions(+), 43 deletions(-)
+
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index 8d002b14a..a1805020a 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -72,7 +72,7 @@ if( NINTENDO_SWITCH )
+ 	# our gcc complains about the use of alloca, stricmp, etc without including the appropriate headers
+ 	# unless we just do this
+ 	set( CMAKE_CXX_EXTENSIONS ON )
+-	set( RDOOM_VERSION "1.1.3" )
++	set( RDOOM_VERSION "1.1.4" )
+ 	set( SWITCH_APP_VERSION "${RDOOM_VERSION}" )
+ 	# RDoom launcher sources (outside this tree so the engine stays a patch series)
+ 	set( RDOOM_LAUNCHER_DIR "${CMAKE_SOURCE_DIR}/../launcher" CACHE PATH "RDoom launcher source directory" )
+diff --git a/src/common/rendering/vulkan/renderer/vk_descriptorset.cpp b/src/common/rendering/vulkan/renderer/vk_descriptorset.cpp
+index 6f1288c54..c01243318 100644
+--- a/src/common/rendering/vulkan/renderer/vk_descriptorset.cpp
++++ b/src/common/rendering/vulkan/renderer/vk_descriptorset.cpp
+@@ -185,6 +185,21 @@ VulkanDescriptorSetLayout* VkDescriptorSetManager::GetTextureSetLayout(int numLa
+ void VkDescriptorSetManager::AddMaterial(VkMaterial* texture)
+ {
+ 	texture->it = Materials.insert(Materials.end(), texture);
++#ifdef __SWITCH__
++	// the layers are set by the FMaterial constructor, before this. Entries
++	// are never removed: a stale one only keeps a picture on the GPU.
++	FGameTexture *src = texture->Source();
++	const auto &layers = texture->GetLayerArray();
++	for (unsigned i = 0; i < layers.Size(); i++)
++	{
++		FTexture *pic = layers[i].layerTexture;
++		if (!pic)
++			continue;
++		auto ins = PictureOwner.insert({ pic, src });
++		if (i > 0 || (!ins.second && ins.first->second != src))
++			SharedPictures.insert(pic);
++	}
++#endif
+ }
+ 
+ void VkDescriptorSetManager::RemoveMaterial(VkMaterial* texture)
+diff --git a/src/common/rendering/vulkan/renderer/vk_descriptorset.h b/src/common/rendering/vulkan/renderer/vk_descriptorset.h
+index 9cc81f870..b11b53389 100644
+--- a/src/common/rendering/vulkan/renderer/vk_descriptorset.h
++++ b/src/common/rendering/vulkan/renderer/vk_descriptorset.h
+@@ -22,12 +22,17 @@
+ 
+ #pragma once
+ 
++#include <unordered_map>
++#include <unordered_set>
++
+ #include "zvulkan/vulkanobjects.h"
+ #include <list>
+ #include "tarray.h"
+ 
+ class VulkanRenderDevice;
+ class VkMaterial;
++class FTexture;
++class FGameTexture;
+ class PPTextureInput;
+ class VkPPRenderPassSetup;
+ 
+@@ -59,6 +64,12 @@ public:
+ 	void AddMaterial(VkMaterial* texture);
+ 	void RemoveMaterial(VkMaterial* texture);
+ 	const std::list<VkMaterial*> &GetMaterials() const { return Materials; }
++#ifdef __SWITCH__
++	// pictures sampled by materials of more than one texture, or as a
++	// brightmap/extra layer: texture eviction leaves their GPU copy alone,
++	// another material's descriptor set may still point at it
++	bool IsSharedPicture(FTexture *pic) const { return SharedPictures.count(pic) != 0; }
++#endif
+ 
+ private:
+ 	void CreateHWBufferSetLayout();
+@@ -69,6 +80,10 @@ private:
+ 	std::unique_ptr<VulkanDescriptorSet> AllocatePPDescriptorSet(VulkanDescriptorSetLayout* layout);
+ 
+ 	VulkanRenderDevice* fb = nullptr;
++#ifdef __SWITCH__
++	std::unordered_map<FTexture*, FGameTexture*> PictureOwner;
++	std::unordered_set<FTexture*> SharedPictures;
++#endif
+ 
+ 	std::unique_ptr<VulkanDescriptorSetLayout> HWBufferSetLayout;
+ 	std::unique_ptr<VulkanDescriptorSetLayout> FixedSetLayout;
+diff --git a/src/common/rendering/vulkan/renderer/vk_renderpass.cpp b/src/common/rendering/vulkan/renderer/vk_renderpass.cpp
+index f605440c1..497b842f6 100644
+--- a/src/common/rendering/vulkan/renderer/vk_renderpass.cpp
++++ b/src/common/rendering/vulkan/renderer/vk_renderpass.cpp
+@@ -339,8 +339,13 @@ void VkRenderPassManager::PrecacheListedTextures()
+ 	struct mallinfo mi = mallinfo();
+ 	const double inUseMB = mi.uordblks / 1048576.0;
+ 	double budget = std::max(0, (int)rd_vk_texwarm_mb) * 1048576.0;
+-	if (inUseMB > 1800)
+-		budget = 0;	// already a big game: no warm-up at all
++	// Already a big game (above 1.8 GB, the usual state after the first map
++	// of Project Brutality): only the big HUD pictures, 64 MB at most. Read
++	// and decoded when first shown, PB's radiation suit visor (1472x2160)
++	// held the game up for 313 ms on the console.
++	const bool hudOnly = inUseMB > 1800;
++	if (hudOnly)
++		budget = std::min(budget, 64 * 1048576.0);
+ 	mTexWarming = true;
+ 	const uint64_t start = I_msTime();
+ 	int done = 0;
+@@ -354,8 +359,18 @@ void VkRenderPassManager::PrecacheListedTextures()
+ 			continue;
+ 		// RGBA8 on the GPU plus a third for mipmaps
+ 		const double size = double(tex->GetTexelWidth()) * tex->GetTexelHeight() * 4 * 4 / 3;
++		if (hudOnly)
++		{
++			const ETextureType ut = tex->GetUseType();
++			if ((ut != ETextureType::MiscPatch && ut != ETextureType::Override) || tex->GetTexelWidth() * tex->GetTexelHeight() < 256 * 256)
++				continue;
++		}
+ 		if (bytes + size > budget)
++		{
++			if (hudOnly)
++				continue;
+ 			break;
++		}
+ 		FMaterial *mat = FMaterial::ValidateTexture(tex, t.ScaleFlags, true);
+ 		if (!mat)
+ 			continue;
+@@ -365,7 +380,7 @@ void VkRenderPassManager::PrecacheListedTextures()
+ 	}
+ 	mTexWarming = false;
+ 	FString n;
+-	n.Format("%d of %d textures in %d ms (%.0f MB; heap in use before %.0f MB)", done, (int)mTexList.size(), (int)(I_msTime() - start), bytes / 1048576.0, inUseMB);
++	n.Format("%d of %d textures in %d ms (%.0f MB; heap in use before %.0f MB%s)", done, (int)mTexList.size(), (int)(I_msTime() - start), bytes / 1048576.0, inUseMB, hudOnly ? ", big HUD pictures only" : "");
+ 	RDoom_SessionSet("vulkan_texture_warmup", n.GetChars());
+ #endif
+ }
+diff --git a/src/common/rendering/vulkan/system/vk_renderdevice.cpp b/src/common/rendering/vulkan/system/vk_renderdevice.cpp
+index 7b1a35085..15b399815 100644
+--- a/src/common/rendering/vulkan/system/vk_renderdevice.cpp
++++ b/src/common/rendering/vulkan/system/vk_renderdevice.cpp
+@@ -726,53 +726,113 @@ uint64_t RDoom_VkFrameNumber = 0;
+ // gore and weapon frame seen stayed on the GPU until the heap ran out after
+ // ~11 minutes ("Could not realloc 24263712 bytes").
+ CVAR(Int, rd_vk_texevict_mb, 2300, CVAR_ARCHIVE | CVAR_GLOBALCONFIG)
++// pictures losing their GPU copy per frame. Destroying an image costs about
++// 0.23 ms on the console (845 ms for 3682 in one frame); 1.1.2/1.1.3 freed
++// them all at once and froze the game for 0.1-1.3 s every 30 s.
++CVAR(Int, rd_vk_texevict_perframe, 4, CVAR_ARCHIVE | CVAR_GLOBALCONFIG)
++
++namespace
++{
++	TArray<FGameTexture *> evictQueue;	// oldest first
++	unsigned evictNext = 0;
++	uint64_t evictAge = 1800;
++	unsigned evictDone = 0;
++	double evictStartHeap = 0, evictStartTime = 0;
++
++	uint64_t NewestUse(FGameTexture *tex)
++	{
++		uint64_t newest = 0;
++		for (int i = 0; i < 5; i++)
++			if (auto mat = static_cast<VkMaterial *>(tex->GetMaterial(i)))
++				newest = std::max(newest, mat->LastUseFrame);
++		return newest;
++	}
++}
+ 
+ void VulkanRenderDevice::EvictStaleTextures()
+ {
+-	static uint64_t lastEviction = 0;
++	static uint64_t lastScan = 0;
+ 	const int limit = rd_vk_texevict_mb;
+-	if (limit <= 0 || (RDoom_VkFrameNumber % 300) != 0 || gamestate != GS_LEVEL)
+-		return;
+-	struct mallinfo mi = mallinfo();
+-	const double inUse = mi.uordblks / 1048576.0;
+-	if (inUse < limit)
++	if (limit <= 0 || gamestate != GS_LEVEL)
+ 		return;
+-	// 30 seconds unseen, at most every 30 seconds (every pass waits for the
+-	// GPU and rebuilds the texture descriptor sets); when the heap is much
+-	// fuller, 5 seconds unseen at every check
+-	const bool urgent = inUse > limit + 400;
+-	if (!urgent && lastEviction != 0 && RDoom_VkFrameNumber - lastEviction < 1800)
+-		return;
+-	const uint64_t age = urgent ? 300 : 1800;
+-	const double tScan = NXPerf_NowMS();
+-	std::unordered_set<FGameTexture *> seen;
+-	TArray<FGameTexture *> stale;
+-	for (VkMaterial *mat : mDescriptorSetManager->GetMaterials())
++
++	if (evictNext >= evictQueue.Size())
+ 	{
+-		FGameTexture *tex = mat->Source();
+-		if (!tex || RDoom_VkFrameNumber - mat->LastUseFrame < age)
+-			continue;
+-		const ETextureType ut = tex->GetUseType();
+-		if (ut != ETextureType::Sprite && ut != ETextureType::SkinSprite && ut != ETextureType::Decal &&
+-			ut != ETextureType::MiscPatch && ut != ETextureType::Override)
+-			continue;
+-		if (seen.insert(tex).second)
+-			stale.Push(tex);
++		if (evictQueue.Size() > 0)
++		{
++			struct mallinfo mi = mallinfo();
++			NXPerf_Note("texture eviction: %u pictures lost their GPU copy over %.1f s, heap in use %.0f -> %.0f MB",
++				evictDone, (NXPerf_NowMS() - evictStartTime) / 1000.0, evictStartHeap, mi.uordblks / 1048576.0);
++			evictQueue.Clear();
++			evictNext = 0;
++		}
++		if ((RDoom_VkFrameNumber % 300) != 0)
++			return;
++		struct mallinfo mi = mallinfo();
++		const double inUse = mi.uordblks / 1048576.0;
++		if (inUse < limit)
++			return;
++		// 30 seconds unseen, a scan (5-9 ms with Project Brutality) at most
++		// every 30 seconds; when the heap is much fuller, 5 seconds unseen
++		const bool urgent = inUse > limit + 400;
++		if (!urgent && lastScan != 0 && RDoom_VkFrameNumber - lastScan < 1800)
++			return;
++		lastScan = RDoom_VkFrameNumber;
++		evictAge = urgent ? 300 : 1800;
++		const double tScan = NXPerf_NowMS();
++		std::unordered_set<FGameTexture *> seen;
++		TArray<std::pair<uint64_t, FGameTexture *>> stale;
++		for (VkMaterial *mat : mDescriptorSetManager->GetMaterials())
++		{
++			FGameTexture *tex = mat->Source();
++			if (!tex || RDoom_VkFrameNumber - mat->LastUseFrame < evictAge)
++				continue;
++			const ETextureType ut = tex->GetUseType();
++			if (ut != ETextureType::Sprite && ut != ETextureType::SkinSprite && ut != ETextureType::Decal &&
++				ut != ETextureType::MiscPatch && ut != ETextureType::Override)
++				continue;
++			// big HUD pictures stay: decoding PB's 1472x2160 visor again
++			// costs the game thread ~300 ms
++			if ((ut == ETextureType::MiscPatch || ut == ETextureType::Override) &&
++				tex->GetTexelWidth() * tex->GetTexelHeight() >= 256 * 256)
++				continue;
++			if (!seen.insert(tex).second)
++				continue;
++			// a texture with a material drawn recently keeps everything; one
++			// already without GPU copies has nothing to give back
++			const uint64_t newest = NewestUse(tex);
++			if (RDoom_VkFrameNumber - newest < evictAge || !tex->GetTexture()->HasHardwareTextures())
++				continue;
++			stale.Push({ newest, tex });
++		}
++		if (stale.Size() == 0)
++			return;
++		std::sort(stale.begin(), stale.end(), [](const auto &a, const auto &b) { return a.first < b.first; });
++		for (auto &it : stale)
++			evictQueue.Push(it.second);
++		evictNext = 0;
++		evictDone = 0;
++		evictStartHeap = inUse;
++		evictStartTime = NXPerf_NowMS();
++		NXPerf_Note("texture eviction: %u pictures unseen for %d s, heap in use %.0f MB, scan %.1f ms",
++			stale.Size(), (int)(evictAge / 60), inUse, NXPerf_NowMS() - tScan);
++		return;	// the scan was this frame's share
+ 	}
+-	if (stale.Size() == 0)
+-		return;
+-	lastEviction = RDoom_VkFrameNumber;
+-	const double t0 = NXPerf_NowMS();
+-	// nothing on the GPU, nothing being decoded may still use these pictures;
+-	// every texture descriptor set is rebuilt on its next use
+-	VkAsyncTex_Flush();
+-	mCommands->WaitForCommands(false);
+-	for (FGameTexture *tex : stale)
++
++	// the images go to this frame's delete list: destroyed once the GPU is
++	// done with this frame (and so with every earlier one using them); the
++	// materials' descriptor sets go with them, no other set points at them
++	int budget = std::max(1, (int)rd_vk_texevict_perframe);
++	for (int looked = 0; budget > 0 && looked < 256 && evictNext < evictQueue.Size(); looked++)
++	{
++		FGameTexture *tex = evictQueue[evictNext++];
++		FTexture *base = tex->GetTexture();
++		if (RDoom_VkFrameNumber - NewestUse(tex) < evictAge || mDescriptorSetManager->IsSharedPicture(base) || !base->HasHardwareTextures())
++			continue;
+ 		tex->CleanHardwareData(true);
+-	mDescriptorSetManager->ResetHWTextureSets();
+-	mi = mallinfo();
+-	NXPerf_Note("texture eviction: %u pictures unseen for %d s, heap in use %.0f -> %.0f MB, %.1f ms (+%.1f ms scan)",
+-		stale.Size(), (int)(age / 60), inUse, mi.uordblks / 1048576.0, NXPerf_NowMS() - t0, t0 - tScan);
++		evictDone++;
++		budget--;
++	}
+ }
+ #endif
+ 
+diff --git a/src/common/textures/textures.h b/src/common/textures/textures.h
+index a137c5ee4..f36e6a6e8 100644
+--- a/src/common/textures/textures.h
++++ b/src/common/textures/textures.h
+@@ -225,6 +225,13 @@ public:
+ 		SystemTextures.Clean();
+ 	}
+ 
++	bool HasHardwareTextures()
++	{
++		bool any = false;
++		SystemTextures.Iterate([&](IHardwareTexture *) { any = true; });
++		return any;
++	}
++
+ 	void CleanPrecacheMarker()
+ 	{
+ 		SystemTextures.UnmarkAll();
+-- 
+2.56.0
+

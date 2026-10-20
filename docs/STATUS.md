@@ -1,7 +1,7 @@
-# RDoom NX — estado final em 2026-10-16 (1.1.3, projeto concluído)
+# RDoom NX — estado final em 2026-10-20 (1.1.4, projeto concluído)
 
-Pacote atual: `dist/RDoom.nro` sha256 `3e21357b64bbc646874bcf5b3fd77d63db3c118b0d7321af2cbc23c6e4f38d22`
-(motor `5.0.3-65-g2e72b192e`, release 1.1.3), zips e `SHA256SUMS.txt` em `dist/`.
+Pacote atual: `dist/RDoom.nro` sha256 `f8510adfc200f861f53de5a635e8df9b476395f900b8dfb7debd11db8c83235c`
+(motor `5.0.3-66-g1eb49010f`, release 1.1.4), zips e `SHA256SUMS.txt` em `dist/`.
 
 ## Feito e verificado
 
@@ -355,10 +355,26 @@ Pacote atual: `dist/RDoom.nro` sha256 `3e21357b64bbc646874bcf5b3fd77d63db3c118b0
   tocaram ou não. Quedas de fps com fumaça de arma colada na câmera: efeitos puros a menos de 20 unidades não são
   desenhados e esmaecem até 48 (`rd_fx_nearcull`, `rd_fx_nearfade`). Logs em `evidence/hw/2026-10-16-tnt-pb/`.
 
+- **Travamentos de meio segundo a um segundo (corrigido no 1.1.4):** PB + WadFusion, Master Levels ML_MAP01–05,
+  ~17 min por sessão, três sessões (1.1.3). Os únicos travamentos em jogo (0,8–1,2 s) eram a liberação de texturas:
+  no PB o heap fica perto de 2,3 GB, então ela rodava a cada 30 s, e destruir as imagens custa ~0,23 ms cada
+  (845 ms para 3682 no começo do quadro seguinte). Agora as imagens vão para uma fila e saem 4 por quadro
+  (`rd_vk_texevict_perframe`), sem esperar a GPU nem refazer todos os descritores; imagens usadas por mais de um
+  material ficam. Ryujinx (LR_MAP08 + PB, limite forçado em 1500 MB): 6065 imagens em 25 s, heap 1712 → 1610 MB,
+  nenhum quadro acima de 30 ms (1.1.2: 223–235 ms por passada; `evidence/ryujinx/130-lr-evict-gradual`). O visor
+  do traje antirradiação do PB (1472×2160) custava 313 ms ao ser pego: imagens grandes da HUD não são mais
+  liberadas e continuam no pré-carregamento (até 64 MB) mesmo com o heap acima de 1,8 GB.
+  Quedas com fumaça, mísseis e inimigos explodindo: a GPU ficou em 10–13 ms por quadro (abaixo dos 16,7 ms); o
+  limite é a CPU — lógica do PB de 8–12 ms por quadro (~400 manchas de sangue, ~140 pedaços de corpo, fumaça de
+  barris) e ações isoladas de 13–22 ms (`A_Explode` de granada e foguete, gibs do Imp). Os outros picos longos
+  eram troca de mapa, carregar e gravar o jogo. Logs em `evidence/hw-2026-10-18-v113/`.
+
 ## Limitações conhecidas (projeto encerrado)
 
 - Brutal Doom ou Project Brutality em mapas slaughter gigantes (milhares de monstros): limitados pela CPU do
   Switch (scripts dos mods; 12–14 fps com 7500 objetos). Não há ajuste de resolução que resolva.
+- Project Brutality em combate com explosões: 36–55 fps nos momentos de mais gore (CPU; a quantidade de sangue e
+  pedaços se ajusta nas opções do próprio PB).
 - Project Brutality: carregamento longo (leitura dos scripts ~11 s; 577 MB lidos do SD); o visor do capacete
   custa ~3 ms de GPU (desligá-lo no menu do PB dá resolução mais alta).
 - Mesa SDK: cópia guardada no release `deps-mesa-26.2.4-606441c9` deste repositório (o artefato original do

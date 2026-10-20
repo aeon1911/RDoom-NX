@@ -1,7 +1,7 @@
 From a50efb88837f050687906bafe554db6c7853ddda Mon Sep 17 00:00:00 2001
 From: RDoom <171243930+aeon1911@users.noreply.github.com>
 Date: Wed, 14 Oct 2026 10:33:09 -0300
-Subject: [PATCH 54/65] Switch: dynamic resolution also follows sustained frame
+Subject: [PATCH 54/66] Switch: dynamic resolution also follows sustained frame
  rate and GPU waits
 
 Console test of c5638cdba: the pooled malloc took the game thread's heap
