@@ -121,6 +121,7 @@ Testes: `scripts/test.sh` (host) e `scripts/ryujinx-test.sh`,
 - `docs/RYUJINX_TEST_REPORT.md` — ambiente e resultados no emulador
 - `docs/PORTING_AUDIT.md` — origem de cada parte, mudanças, política de clocks
 - `docs/STATUS.md` — histórico de testes no console e pendências
+- `AGENTS.md` e `docs/ai/` — história completa, problemas e soluções, mapa do código e fluxos de trabalho (para IAs e novos desenvolvedores)
 - `THIRD_PARTY_NOTICES.md` — licenças
 
 ## Licença
